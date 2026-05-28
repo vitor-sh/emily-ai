@@ -1,0 +1,56 @@
+# Variáveis de ambiente — NUNCA subir pro GitHub
+.env
+.env.local
+.env.*
+
+# Arquivos de cache e configuração local gerados pela Emily
+.emily_cache.json
+.emily_llm_cache.json
+.emily_discord.json
+.emily_modos.json
+.emily_speedruns.json
+.emily_steam_applist.json
+
+# Funcionalidades em desenvolvimento
+agente_jogo.py
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.Python
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+ENV/
+
+# Assets visuais pessoais
+img/
+*.gif
+
+# PyInstaller — executável compilado
+build/
+dist/
+*.spec
+
+# IDEs
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Logs
+*.log
+
+# Arquivos de áudio temporários
+*.wav
+*.mp3
+*.pcm
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
