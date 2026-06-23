@@ -2,7 +2,15 @@
   "nome_usuario": "Oi, Tudo Bem?  Vitor.",
   "fatos": [
     "Vitor gosta de Hollow Knight.",
-    "A conversa não revelou muito sobre os gostos, hobbies ou trabalho de Vitor.",
-    "Não há informações que confirmem se ele assiste às frases no estilo de baixo e alto (Low e high Code)."
-  ]
+    "O usuário se chama Vitor, tem 19 anos, é brasileiro e mora em Belo Horizonte. Está cursando técnico em Sistemas de Desenvolvimento e ainda está aprendendo — tem boa base em Python, Discord.py, MySQL e administração Windows, mas não se considera expert em nada ainda.\nSeu projeto principal é a Emily — um assistente pessoal em Python com personalidade, visão, memória, automações e bot no Discord, usando claude-sonnet-4-6 via API da Anthropic.\nGosta de Elden Ring (joga como mago/sorcerer), Hollow Knight/Silksong e Jujutsu Kaisen. Programação e jogos são suas formas principais de se manter estável emocionalmente.\nSeu PC: Intel I5 8400, Rx580, placa-mãe H310 (slot de RAM defeituoso, não suporta GPU integrada + dedicada ao mesmo tempo).\nTem ansiedade e autoestima baixa, dificuldade de se abrir com pessoas próximas. Perdeu contato com sua melhor amiga há cerca de 1 ano. Está numa situação romântica com uma garota chamada Maria Clara.\nPrefere respostas diretas, simples e sem enrolação. Gosta de confirmações antes de partes mais complexas. Tem senso de humor e comunicação casual.",
+    "Trabalha com código (programador)",
+    "Gosta do estilo antigo do canal Celbit, considerando a versão mais antiga superior à atual",
+    "Costuma trabalhar/ficar acordado até tarde (pelo menos até meia-noite)",
+    "Costuma elogiar a Emily com frequência ao pedir que ela faça coisas",
+    "Tem um projeto publicado no GitHub",
+    "Tem o hábito de acumular mudanças sem fazer commits por longos períodos (ficou um mês sem dar push)"
+  ],
+  "preferencias": {},
+  "pedidos_frequentes": {},
+  "ultima_atualizacao": "23/06/2026 10:52"
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agente_jogo import iniciar_agente, pausar_agente, continuar_agente, parar_agente, status_agente
+import agente_ui
 import difflib
 import json
 import os
@@ -10,6 +11,11 @@ from modelo import EMILY_PERSONALIDADE
 import subprocess
 import threading
 import time
+try:
+    import discord_bot as _discord_bot
+    _DISCORD_DISPONIVEL = True
+except ImportError:
+    _DISCORD_DISPONIVEL = False
 
 try:
     import keyboard as _kb
@@ -17,16 +23,19 @@ try:
 except ImportError:
     _KB_DISPONIVEL = False
     print("[SPEEDRUN] Módulo 'keyboard' não encontrado. Instala com: pip install keyboard")
+    
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG_DISPONIVEL = True
+except ImportError:
+    _WATCHDOG_DISPONIVEL = False
+    print("[DOWNLOADS] Instala o watchdog: pip install watchdog")
 
 import webbrowser
 from pathlib import Path
 from typing import Dict, Iterable, Optional
-from openai import OpenAI
-
-_fw_client = OpenAI(
-    api_key=os.getenv("FIREWORKS_API_KEY2"),
-    base_url="https://api.fireworks.ai/inference/v1",
-)
+from modelo import _chamar_llm as _modelo_llm
 
 _callback_status = None
 
@@ -626,6 +635,9 @@ KEYWORDS_ABRIR = (
     "coloca", "colocar", "liga", "ligar", "carrega", "carregar",
     "chama", "chamar", "lança", "lançar", "vai no", "entra no", "acessa",
     "joga", "jogar", "jogar o", "iniciar o jogo", "abrir o jogo",
+    "bota", "botar", "mete", "meter",
+    "me abre", "me coloca", "me bota",
+    "me passa", "me manda", "me dá",
 )
 
 KEYWORDS_RECORTAR = (
@@ -669,6 +681,19 @@ KEYWORDS_MAXIMIZAR = (
 KEYWORDS_FECHAR_ABA = (
     "fecha a aba", "fechar a aba", "fecha essa aba", "fecha o youtube",
     "fecha o netflix", "fecha o twitch", "fecha a aba do",
+)
+
+# Intenções indiretas — "quero o discord", "preciso do vscode", "cadê a pasta"
+KEYWORDS_INTENT = (
+    "quero o", "quero a", "quero ver", "quero jogar",
+    "preciso do", "preciso da", "preciso de",
+    "cadê o", "cade o", "cadê a", "cade a",
+    "onde tá o", "onde ta o", "onde está o", "onde esta o",
+    "pode me abrir", "pode abrir", "pode fechar",
+    "consegue abrir", "consegue fechar",
+    "dá pra abrir", "da pra abrir",
+    "quero usar", "quero acessar",
+    "me leva", "me leva pro", "me leva pra",
 )
 
 KEYWORDS_DELETAR = (
@@ -720,6 +745,19 @@ KEYWORDS_AGENTE_PARAR = (
     "para o agente", "parar o agente", "cancela o agente", "encerra o agente",
 )
 
+# Intenções de controle da tela/interface (agente de UI)
+KEYWORDS_AGENTE_UI = (
+    "clica", "clicar", "clique", "clica no", "clica em", "clica aqui",
+    "preenche", "preencher", "preenche o", "preenche esse", "preenche aí",
+    "digita", "digitar", "digite",
+    "seleciona", "selecionar", "marca", "marcar",
+    "rola", "rolar",
+    "desce", "sobe", "arrasta", "arrastar",
+    "confirma", "cancela a tela", "fecha a janela", "fecha o popup", "fecha esse",
+    "faz isso", "faz aí", "faz na tela", "faz pra mim", "resolve isso",
+    "interage", "interaja", "interagir",
+)
+
 KEYWORDS_STEAM_INSTALAR = (
     "instala", "instalar", "instale", "baixa o jogo",
     "baixar o jogo", "instala o jogo",
@@ -746,6 +784,263 @@ KEYWORDS_CONTROLE_MUSICA = (
     "diminui o volume", "diminuir volume", "baixa o volume",
     "muta", "mutar", "sem som", "silencia",
 )
+
+KEYWORDS_DISCORD_CALL = (
+    "entra na call", "entra no canal de voz", "vai pra call",
+    "conecta na call", "entra na voz", "entra no voice",
+    "sai da call", "sai da voz", "desconecta da call",
+    "lista as calls", "quais calls", "que calls tem",
+    "entra no canal", "vai pro canal",
+)
+
+# ── Monitoramento de Downloads ──
+KEYWORDS_MONITOR_DOWNLOADS = (
+    "monitora downloads", "monitora os downloads",
+    "fica de olho nos downloads", "começa a monitorar downloads",
+    "inicia o monitor", "monitora a pasta de downloads",
+)
+
+KEYWORDS_PARAR_MONITOR_DOWNLOADS = (
+    "para de monitorar downloads", "para o monitor de downloads",
+    "desliga o monitor", "cancela monitoramento",
+)
+
+KEYWORDS_ORGANIZAR_DOWNLOADS = (
+    "organiza os downloads", "organiza meus downloads",
+    "organiza a pasta de downloads", "organiza downloads",
+    "organizar os downloads", "organizar meus downloads",
+    "organizar downloads", "organizar a pasta de downloads",
+    "arruma os downloads", "arruma meus downloads",
+    "arruma a pasta de downloads", "arrumar os downloads",
+    "limpa os downloads", "limpar os downloads",
+    "separa os arquivos dos downloads", "separar os downloads",
+    "categoriza os downloads", "categorizar os downloads",
+)
+
+_download_observer = None
+_download_callback = None       # callback que avisa a Emily
+_downloads_notificados: set = set()   # evita notificar o mesmo arquivo 2 vezes
+_download_pendente: Optional[Path] = None   # arquivo aguardando confirmação de extração
+_EXTENSOES_BAIXANDO = {".crdownload", ".part", ".tmp", ".!ut", ".opdownload"}
+_EXTENSOES_COMPACTADAS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
+
+
+def definir_callback_download(callback):
+    """Chamado no main.py pra registrar como avisar a Emily."""
+    global _download_callback
+    _download_callback = callback
+    
+# ─────────────────────────────────────────────────────────────────
+# MONITORAMENTO DE DOWNLOADS
+# ─────────────────────────────────────────────────────────────────
+
+def _notificar_download_concluido(caminho: Path) -> None:
+    global _download_callback, _downloads_notificados, _download_pendente
+
+    # Garante que o mesmo arquivo não gera notificação duplicada
+    caminho_str = str(caminho)
+    if caminho_str in _downloads_notificados:
+        return
+    _downloads_notificados.add(caminho_str)
+
+    if not _download_callback:
+        return
+
+    eh_compactado = caminho.suffix.lower() in _EXTENSOES_COMPACTADAS
+
+    if eh_compactado:
+        _download_pendente = caminho
+        msg = "Tem um zip novo nos Downloads, Vitor! Quer que eu extraia?"
+    else:
+        msg = "Download concluído nos Downloads, Vitor!"
+
+    try:
+        _download_callback(msg)
+    except Exception as e:
+        print(f"[DOWNLOADS] Erro no callback: {e}")
+        
+def obter_download_pendente() -> Optional[Path]:
+    return _download_pendente
+
+def limpar_download_pendente() -> None:
+    global _download_pendente
+    _download_pendente = None
+
+def extrair_download_pendente() -> Optional[str]:
+    global _download_pendente
+    if not _download_pendente:
+        return None
+    caminho = _download_pendente
+    _download_pendente = None
+    _downloads_notificados.discard(str(caminho))
+    return _extrair_arquivo_fn(
+        nome_arquivo=caminho.name,
+        caminho_direto=caminho,
+    )
+
+
+class _MonitorDownloads(FileSystemEventHandler):
+    def __init__(self):
+        self._tamanhos: dict = {}
+        self._timers:   dict = {}
+        self._arquivos_monitorando: set = set()   # ← NOVO: só arquivos que nasceram nessa sessão
+
+    def _agendar_verificacao(self, caminho_str: str, delay: float = 3.0):
+        timer_ant = self._timers.pop(caminho_str, None)
+        if timer_ant:
+            timer_ant.cancel()
+        timer = threading.Timer(delay, self._verificar_conclusao, args=[caminho_str])
+        timer.daemon = True
+        self._timers[caminho_str] = timer
+        timer.start()
+
+    def _verificar_conclusao(self, caminho_str: str):
+        caminho = Path(caminho_str)
+        if not caminho.exists():
+            self._tamanhos.pop(caminho_str, None)
+            self._arquivos_monitorando.discard(caminho_str)   # ← limpa também aqui
+            return
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            return
+        try:
+            tamanho_atual = caminho.stat().st_size
+        except Exception:
+            return
+
+        tamanho_anterior = self._tamanhos.get(caminho_str, -1)
+
+        if tamanho_atual == tamanho_anterior and tamanho_atual > 0:
+            self._tamanhos.pop(caminho_str, None)
+            self._timers.pop(caminho_str, None)
+            self._arquivos_monitorando.discard(caminho_str)   # ← limpa ao concluir
+            print(f"[DOWNLOADS] Concluído: {caminho.name}")
+            _notificar_download_concluido(caminho)
+        else:
+            self._tamanhos[caminho_str] = tamanho_atual
+            self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        caminho = Path(event.src_path)
+        caminho_str = str(caminho)
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            # Arquivo temporário de download — rastreia para o on_moved depois
+            self._arquivos_monitorando.add(caminho_str)
+            return
+        # Arquivo final criado direto (sem passar por .crdownload)
+        self._arquivos_monitorando.add(caminho_str)   # ← marca como nascido agora
+        self._tamanhos[caminho_str] = 0
+        self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        caminho = Path(event.src_path)
+        caminho_str = str(caminho)
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            return
+        # ← CORREÇÃO: ignora arquivos que já existiam antes do monitor iniciar
+        if caminho_str not in self._arquivos_monitorando:
+            return
+        try:
+            self._tamanhos[caminho_str] = caminho.stat().st_size
+        except Exception:
+            pass
+        self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        src  = Path(event.src_path)
+        dest = Path(event.dest_path)
+        src_str = str(src)
+        if (src.suffix.lower() in _EXTENSOES_BAIXANDO
+                and dest.suffix.lower() not in _EXTENSOES_BAIXANDO):
+            # ← CORREÇÃO: só notifica se o .crdownload foi visto nessa sessão
+            if src_str not in self._arquivos_monitorando:
+                return
+            self._arquivos_monitorando.discard(src_str)
+            dest_str = str(dest)
+            self._arquivos_monitorando.add(dest_str)
+            def _avisar():
+                time.sleep(1.0)
+                self._arquivos_monitorando.discard(dest_str)
+                _notificar_download_concluido(dest)
+            threading.Thread(target=_avisar, daemon=True).start()
+
+
+def iniciar_monitor_downloads() -> str:
+    global _download_observer
+
+    if not _WATCHDOG_DISPONIVEL:
+        return "Preciso do watchdog pra isso! Instala com: pip install watchdog"
+
+    if _download_observer and _download_observer.is_alive():
+        return "Já tô de olho nos downloads, Vitor!"
+
+    pastas = PASTA_MAP.get("downloads", [])
+    if not pastas:
+        return "Não achei a pasta de Downloads, Vitor!"
+
+    pasta_downloads = pastas[0]
+    try:
+        handler = _MonitorDownloads()
+        _download_observer = Observer()
+        _download_observer.schedule(handler, str(pasta_downloads), recursive=False)
+        _download_observer.daemon = True
+        _download_observer.start()
+        print(f"[DOWNLOADS] Monitorando: {pasta_downloads}")
+        return "Tô de olho nos downloads! Te aviso quando qualquer arquivo terminar de baixar."
+    except Exception as e:
+        return f"Não consegui iniciar o monitoramento: {e}"
+
+
+def parar_monitor_downloads() -> str:
+    global _download_observer
+
+    if not _download_observer or not _download_observer.is_alive():
+        return "Não tô monitorando downloads agora, Vitor!"
+    try:
+        _download_observer.stop()
+        _download_observer.join(timeout=2)
+        _download_observer = None
+        return "Ok, parei de monitorar os downloads!"
+    except Exception as e:
+        return f"Erro ao parar: {e}"
+
+# Ações que usuários externos do Discord não podem executar
+ACOES_BLOQUEADAS_EXTERNOS = {
+    "fechar_app",
+    "fechar_aba",
+    "minimizar_app",
+    "maximizar_app",
+    "deletar_arquivo",
+    "deletar_selecionados",
+    "deletar_arquivos_da_pasta",
+    "mover_arquivo",
+    "mover_pasta",
+    "mover_selecionados",
+    "renomear_arquivo",
+    "renomear_selecionados",
+}
+
+def checar_bloqueio_externo(mensagem: str) -> Optional[dict]:
+    """
+    Verifica se o comando é uma ação bloqueada pra usuários externos do Discord.
+    Retorna o dict interpretado se for bloqueado, None se não for.
+    O LLM cache garante que a interpretação não seja feita duas vezes.
+    """
+    texto_norm = _normalizar(mensagem)
+    if not _eh_possivel_comando(texto_norm):
+        return None
+    resultado = _interpretar_com_llm(mensagem)
+    if not resultado:
+        return None
+    acao = resultado.get("acao", "nenhuma")
+    if acao in ACOES_BLOQUEADAS_EXTERNOS:
+        return resultado
+    return None
 
 # ─────────────────────────────────────────────────────────────────
 # ÍNDICE AUTOMÁTICO DE APPS INSTALADOS
@@ -3049,7 +3344,7 @@ def _interpretar_com_llm(mensagem: str) -> Optional[dict]:
         print (f"[DEBUG automacao] LLM cache hit: '{mensagem}'")
         return cached
     try:
-        system_content = EMILY_PERSONALIDADE + """
+        system_content = """
 
 Você interpreta comandos de automação do PC.
 Analise a mensagem e retorne APENAS um JSON válido, sem texto adicional.
@@ -3195,6 +3490,20 @@ Exemplos:
   "maximiza o Discord"  → {"acao": "maximizar_app", "alvo": "Discord", "resposta": "Maximizando o Discord!"}
   "expande o VS Code"   → {"acao": "maximizar_app", "alvo": "VS Code",  "resposta": "Maximizando o VS Code!"}
 
+{"acao": "discord_entrar_call", "canal": "nome_do_canal", "servidor": "nome_do_servidor_ou_vazio"}
+  → Entra em um canal de voz do Discord pelo nome.
+  → "servidor" só preenche se o usuário mencionar o servidor. Senão deixa vazio "".
+  Exemplos:
+  "entra na call Geral"                          → {"acao": "discord_entrar_call", "canal": "Geral", "servidor": "", "resposta": "Entrando na call!"}
+  "entra na call Gameplay lá no servidor Friends" → {"acao": "discord_entrar_call", "canal": "Gameplay", "servidor": "Friends", "resposta": "Entrando!"}
+  "vai pra call de voz"                           → {"acao": "discord_entrar_call", "canal": "voz", "servidor": "", "resposta": "Indo pra call!"}
+
+{"acao": "discord_sair_call", "resposta": "Saindo da call!"}
+  → Sai do canal de voz atual.
+
+{"acao": "discord_listar_calls", "resposta": "Olha os canais disponíveis!"}
+  → Lista todos os canais de voz dos servidores.
+
 {"acao": "deletar_arquivo", "alvo": "nome_do_arquivo", "pasta": "pasta_se_mencionada"}
   → Para deletar um arquivo específico.
 
@@ -3265,6 +3574,27 @@ Exemplos:
 "move os arquivos selecionados pra downloads" → {"acao": "mover_selecionados", "destino": "downloads", "resposta": "Movendo tudo pros Downloads!"}
 "deleta todos os selecionados" → {"acao": "deletar_selecionados", "resposta": "Jogando tudo na lixeira!"}
 "como tá o tempo?" → {"acao": "nenhuma"}
+
+{"acao": "agente_ui", "objetivo": "texto do que fazer na tela"}
+  → Use quando o usuário pedir pra FAZER algo que envolva navegar visualmente pela interface, múltiplas ações subsequentes, ou tarefas complexas que precisam "ver a tela" pra executar.
+  → O campo "objetivo" deve conter a intenção COMPLETA do usuário, descrita de forma clara e executável.
+  → OBRIGATÓRIO usar agente_ui quando:
+      - O pedido descreve um FLUXO de trabalho complexo ("entra na pasta X, copia tudo pra Y, substitui os arquivos")
+      - O usuário quer que a Emily NAVEGUE pelo sistema de arquivos vendo a tela ("acha o git ali", "vai na área de trabalho e faz isso")
+      - O pedido menciona múltiplas pastas/locais diferentes que dependem um do outro visualmente
+      - O pedido é vago/relativo à tela atual ("faz aquilo que você disse", "faz isso que tá na tela", "resolve isso pra mim")
+      - Qualquer coisa que seria mais confiável fazer VENDO a tela do que executando comandos cegos
+  → NÃO use agente_ui para ações simples diretas como: abrir um app, abrir um site, mover um arquivo específico de pasta A pra pasta B com caminhos conhecidos.
+  → Use quando ouvir: clica, preenche, digita, seleciona, faz isso, resolve isso, mexe, navega, acha, procura na tela, etc.
+  → Exemplos:
+    "clica no botão confirmar" → {"acao": "agente_ui", "objetivo": "clica no botão confirmar", "resposta": "Vou clicar pra você!"}
+    "preenche esse formulário com o meu endereço" → {"acao": "agente_ui", "objetivo": "preenche esse formulário com o meu endereço", "resposta": "Vou preencher o formulário!"}
+    "faz isso pra mim" → {"acao": "agente_ui", "objetivo": "faz isso pra mim", "resposta": "Vou fazer na tela!"}
+    "entra na pasta do Projeto Emily na área de trabalho, copia os arquivos de lá e cola na pasta Minha IA substituindo tudo" → {"acao": "agente_ui", "objetivo": "entra na pasta do Projeto Emily na área de trabalho, copia os arquivos de lá e cola na pasta Minha IA substituindo tudo", "resposta": "Vou fazer isso na tela!"}
+    "abre o git ali pra mim e faz o commit que você disse" → {"acao": "agente_ui", "objetivo": "abrir o git bash, fazer git add ., git commit e git push conforme instruído", "resposta": "Vou fazer isso na tela!"}
+
+REGRA CRÍTICA — QUANDO NÃO USAR SEQUÊNCIA:
+Quando o pedido for complexo, envolver navegação visual, múltiplos passos dependentes ou referência ao que foi dito antes, prefira SEMPRE "agente_ui" em vez de tentar montar uma "sequencia" de ações diretas. A sequencia só deve ser usada para tarefas SIMPLES e diretas (abrir 2-3 apps, fechar e abrir algo) onde cada passo é independente e não precisa "ver a tela".
 
 === REFERÊNCIAS A DRIVES/UNIDADES ===
 Quando o usuário mencionar uma unidade de disco, coloque a referência como está no campo destino ou pasta_origem.
@@ -3424,26 +3754,13 @@ Exemplos:
 "elden rign", "eldenring" → "Elden Ring"
 """
 
-        completion = _fw_client.chat.completions.create(
-            model="accounts/fireworks/models/kimi-k2p6",
-            messages=[
+        texto = _modelo_llm(
+            [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": mensagem}
             ],
             max_tokens=256,
-            extra_body={"reasoning_effort": "none"},
         )
-
-        texto = completion.choices[0].message.content or ""
-
-        if not texto.strip():
-            try:
-                thinking = completion.choices[0].message.reasoning_content or ""
-                match = re.search(r"\{.*?\}", thinking, re.DOTALL)
-                if match:
-                    texto = match.group(0)
-            except Exception:
-                pass
 
         if not texto.strip():
             print("[DEBUG automacao] Kimi retornou resposta vazia")
@@ -3494,6 +3811,11 @@ def _eh_possivel_comando(texto: str) -> bool:
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_PAUSAR)
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_CONTINUAR)
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_PARAR)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_UI)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_INTENT)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_DISCORD_CALL)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_MONITOR_DOWNLOADS)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_PARAR_MONITOR_DOWNLOADS)
     )
 
 # ─────────────────────────────────────────────────────────────────
@@ -3956,6 +4278,7 @@ def inicializar() -> None:
     threading.Thread(target=_monitorar_janela_explorer, daemon=True).start()
     threading.Thread(target=_carregar_applist_steam, daemon=True).start()
     _carregar_speedruns()
+    iniciar_monitor_downloads()
 
 
 def _buscar_arquivo_fuzzy(nome_arquivo: str, pasta_hint: str = "") -> Optional[Path]:
@@ -4573,7 +4896,146 @@ def _controlar_musica(controle: str) -> str:
 
     return "desconhecido"
     
-def _executar_acao_por_dict(resultado: dict) -> Optional[str]:
+# ─────────────────────────────────────────────────────────────────
+# ORGANIZAÇÃO AUTOMÁTICA DE DOWNLOADS POR TIPO/EXTENSÃO
+# ─────────────────────────────────────────────────────────────────
+
+_CATEGORIAS_EXTENSAO: Dict[str, set] = {
+    "Imagens": {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp",
+        ".ico", ".tiff", ".tif", ".heic", ".heif", ".raw", ".psd",
+        ".ai", ".eps", ".avif", ".jfif",
+    },
+    "Vídeos": {
+        ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+        ".m4v", ".mpg", ".mpeg", ".3gp", ".ogv", ".ts", ".vob",
+    },
+    "Músicas": {
+        ".mp3", ".flac", ".wav", ".aac", ".ogg", ".wma", ".m4a",
+        ".opus", ".alac", ".aiff", ".mid", ".midi",
+    },
+    "Documentos": {
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".odt", ".ods", ".odp", ".txt", ".rtf", ".csv", ".epub",
+        ".mobi", ".pages", ".numbers", ".key",
+    },
+    "Programas": {
+        ".exe", ".msi", ".dmg", ".deb", ".rpm", ".appimage",
+        ".app", ".bat", ".cmd", ".ps1", ".sh", ".run", ".bin",
+    },
+    "Compactados": {
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+        ".tgz", ".tar.gz", ".tar.bz2", ".cab", ".iso", ".img",
+    },
+    "Código": {
+        ".py", ".js", ".ts", ".html", ".css", ".java", ".cpp",
+        ".c", ".h", ".cs", ".rb", ".go", ".rs", ".php", ".swift",
+        ".kt", ".lua", ".r", ".sql", ".json", ".xml", ".yaml",
+        ".yml", ".toml", ".ini", ".cfg", ".conf", ".md", ".log",
+    },
+    "Fontes": {
+        ".ttf", ".otf", ".woff", ".woff2", ".eot", ".fon",
+    },
+    "Torrents": {
+        ".torrent",
+    },
+    "Modelos 3D": {
+        ".obj", ".fbx", ".stl", ".blend", ".dae", ".3ds", ".gltf", ".glb",
+    },
+    "Outros": set(),  # tudo que não se encaixa em nenhuma categoria
+}
+
+
+def _obter_categoria(arquivo: Path) -> str:
+    """Retorna a categoria de um arquivo com base na sua extensão."""
+    ext = arquivo.suffix.lower()
+    # Checa extensões compostas (ex: .tar.gz)
+    sufixos = "".join(arquivo.suffixes).lower()
+    for categoria, extensoes in _CATEGORIAS_EXTENSAO.items():
+        if categoria == "Outros":
+            continue
+        if ext in extensoes or sufixos in extensoes:
+            return categoria
+    return "Outros"
+
+
+def _organizar_downloads_fn() -> str:
+    """
+    Organiza todos os arquivos da pasta Downloads em subpastas por tipo.
+    As subpastas são criadas DENTRO da própria pasta Downloads.
+    Ignora pastas já existentes (não move pastas, só arquivos soltos).
+    """
+    pastas = PASTA_MAP.get("downloads", [])
+    if not pastas:
+        return "Não achei a pasta de Downloads, Vitor!"
+
+    pasta_downloads = pastas[0]
+    if not pasta_downloads.exists():
+        return "A pasta de Downloads não existe!"
+
+    # Lista só os arquivos soltos na raiz da pasta (não entra em subpastas)
+    try:
+        itens = list(pasta_downloads.iterdir())
+    except (OSError, PermissionError) as e:
+        return f"Não consegui acessar a pasta Downloads: {e}"
+
+    arquivos = [f for f in itens if f.is_file()]
+
+    if not arquivos:
+        return "A pasta Downloads já tá limpa, Vitor! Não tem nenhum arquivo solto pra organizar."
+
+    # Ignora arquivos temporários de download em andamento
+    arquivos = [
+        f for f in arquivos
+        if f.suffix.lower() not in _EXTENSOES_BAIXANDO
+    ]
+
+    if not arquivos:
+        return "Só tem downloads em andamento lá, Vitor! Espera terminar."
+
+    # Organiza por categoria
+    contagem: Dict[str, int] = {}
+    erros: list[str] = []
+
+    for arquivo in arquivos:
+        categoria = _obter_categoria(arquivo)
+        pasta_destino = pasta_downloads / categoria
+
+        try:
+            pasta_destino.mkdir(exist_ok=True)
+            destino_final = pasta_destino / arquivo.name
+
+            # Se já existe arquivo com mesmo nome no destino, adiciona sufixo
+            if destino_final.exists():
+                stem = arquivo.stem
+                ext = arquivo.suffix
+                contador = 1
+                while destino_final.exists():
+                    destino_final = pasta_destino / f"{stem}_{contador}{ext}"
+                    contador += 1
+
+            shutil.move(str(arquivo), str(destino_final))
+            contagem[categoria] = contagem.get(categoria, 0) + 1
+        except Exception as e:
+            erros.append(f"{arquivo.name} ({e})")
+
+    total_movidos = sum(contagem.values())
+
+    if total_movidos == 0:
+        return "Não consegui mover nenhum arquivo, Vitor!"
+
+    # Monta resumo bonito
+    partes = [f"{qtd} em {cat}" for cat, qtd in sorted(contagem.items(), key=lambda x: -x[1])]
+    resumo = ", ".join(partes)
+
+    resp = f"Organizei {total_movidos} arquivo(s) nos Downloads! {resumo}."
+    if erros:
+        resp += f" Não consegui mover: {', '.join(erros[:5])}"
+
+    return resp
+
+
+def _executar_acao_por_dict(resultado: dict, callback_falar=None) -> Optional[str]:
     """
     Executa uma única ação a partir de um dicionário já interpretado pelo LLM.
     Retorna a mensagem de resultado ou None.
@@ -5049,6 +5511,36 @@ def _executar_acao_por_dict(resultado: dict) -> Optional[str]:
         r = _maximizar_app(alvo)
         return r if "Não achei" in r or "Não consegui" in r else resposta_emily
     
+    if acao == "discord_entrar_call":
+        if not _DISCORD_DISPONIVEL:
+           return "Módulo do Discord não disponível!"
+        canal   = resultado.get("canal", "")
+        servidor = resultado.get("servidor", "")
+        if not canal:
+           return "Me diz o nome do canal que você quer que eu entre, Vitor!"
+        return _discord_bot.entrar_em_call(canal, servidor)
+
+    if acao == "discord_sair_call":
+       if not _DISCORD_DISPONIVEL:
+          return "Módulo do Discord não disponível!"
+       return _discord_bot.sair_da_call()
+
+    if acao == "discord_listar_calls":
+       if not _DISCORD_DISPONIVEL:
+          return "Módulo do Discord não disponível!"
+       return _discord_bot.listar_calls()
+
+    if acao == "agente_ui":
+        objetivo = resultado.get("objetivo", "")
+        if not objetivo:
+            return "Me diz o que você quer que eu faça na tela, Vitor!"
+        if _callback_status:
+            _callback_status("agente_ui")
+        return agente_ui.iniciar_agente_ui(objetivo, callback_falar=callback_falar)
+
+    if acao == "organizar_downloads":
+        return _organizar_downloads_fn()
+
     return None
 
 def _executar_sequencia(acoes: list, resposta_inicial: str, callback_falar=None) -> str:
@@ -5070,7 +5562,7 @@ def _executar_sequencia(acoes: list, resposta_inicial: str, callback_falar=None)
 
         # Em _executar_sequencia, troca o bloco do resultado_passo por:
         try:
-            resultado_passo = _executar_acao_por_dict(acao_dict)
+            resultado_passo = _executar_acao_por_dict(acao_dict, callback_falar)
             if resultado_passo is None:
                 # Ação não reconhecida — avisa mas continua
                 erros.append(f"Passo {i} não sei fazer: {acao_dict.get('acao', '?')}")
@@ -5606,11 +6098,43 @@ def listar_speedruns() -> str:
 # PONTO DE ENTRADA PRINCIPAL
 # ─────────────────────────────────────────────
 
-def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
+def executar_comando(mensagem: str, callback_falar=None, acao_forcada: str = None) -> Optional[str]:
+    """
+    Executa um comando da Emily.
+    
+    Se acao_forcada for passado (pelo fallback inteligente), pula o filtro de
+    palavras-chave e força a LLM a interpretar a mensagem com aquela ação em mente.
+    """
     if not mensagem or not mensagem.strip():
         return None
 
     mensagem_normalizada = _normalizar(mensagem)
+
+    # ── Se vier do fallback inteligente, pula keywords e vai direto pra LLM ──
+    if acao_forcada:
+        print(f"[FALLBACK→AUTOMACAO] Executando acao_forcada='{acao_forcada}' para: '{mensagem}'")
+        # Injeta a ação esperada no texto pra ajudar a LLM a interpretar corretamente
+        mensagem_com_dica = f"{acao_forcada}: {mensagem}"
+        resultado = _interpretar_com_llm(mensagem_com_dica)
+        if not resultado or resultado.get("acao", "nenhuma") == "nenhuma":
+            # Tenta de novo só com a mensagem original mas sem filtro
+            resultado = _interpretar_com_llm(mensagem)
+        if not resultado or resultado.get("acao", "nenhuma") == "nenhuma":
+            return None
+
+        if "acoes" in resultado:
+            acoes = resultado.get("acoes", [])
+            if not acoes:
+                return None
+            resposta_inicial = resultado.get("resposta", f"Vou fazer {len(acoes)} coisas pra você!")
+            return _executar_sequencia(acoes, resposta_inicial, callback_falar)
+
+        acao = resultado.get("acao", "nenhuma")
+        resposta = _executar_acao_por_dict(resultado, callback_falar)
+        ERROS = ("Não achei", "Não encontrei", "Não consegui", "Não entendi", "Não reconheci")
+        if acao in ACOES_SILENCIOSAS and resposta and not any(e in resposta for e in ERROS):
+            return ""
+        return resposta
 
     if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_DESFAZER):
         return desfazer_ultima_acao()
@@ -5665,6 +6189,16 @@ def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
         monitor = int(monitor_match.group(1)) if monitor_match else 1
 
         return iniciar_agente(nome_jogo, monitor=monitor)
+    
+    if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_MONITOR_DOWNLOADS):
+       return iniciar_monitor_downloads()
+
+    if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_PARAR_MONITOR_DOWNLOADS):
+       return parar_monitor_downloads()
+
+    # ── Organizar Downloads ──
+    if any(p in mensagem_normalizada for p in KEYWORDS_ORGANIZAR_DOWNLOADS):
+       return _organizar_downloads_fn()
 
     if not _eh_possivel_comando(mensagem_normalizada):
         return None
@@ -5683,11 +6217,11 @@ def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
 
     # ── Ação única: comportamento normal ──
     acao = resultado.get("acao", "nenhuma")
-    resposta = _executar_acao_por_dict(resultado)
+    resposta = _executar_acao_por_dict(resultado, callback_falar)
 
     # Se a ação é silenciosa e não deu erro, retorna None (sem falar)
     ERROS = ("Não achei", "Não encontrei", "Não consegui", "Não entendi", "Não reconheci")
     if acao in ACOES_SILENCIOSAS and resposta and not any(e in resposta for e in ERROS):
-        return None
+       return ""
 
     return resposta
