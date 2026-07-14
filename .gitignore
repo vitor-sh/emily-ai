@@ -1,0 +1,123 @@
+# ─────────────────────────────────────────────────────────────────
+# SEGREDOS — NUNCA subir pro GitHub
+# ─────────────────────────────────────────────────────────────────
+.env
+.env.local
+.env.*
+
+# ─────────────────────────────────────────────────────────────────
+# DADOS PESSOAIS E CACHE LOCAL gerados pela Emily
+# ─────────────────────────────────────────────────────────────────
+
+# Memória persistente — contém fatos pessoais sobre o usuário
+memoria.json
+
+# Configurações e cache do Discord (token, IDs de canal)
+.emily_discord.json
+
+# Modos configurados pelo usuário
+.emily_modos.json
+
+# Cache de speedruns/inputs gravados
+.emily_speedruns.json
+
+# Cache de apps Steam (lista de jogos da conta)
+.emily_steam_applist.json
+
+# Cache de LLM e outros caches locais
+.emily_cache.json
+.emily_llm_cache.json
+
+# ─────────────────────────────────────────────────────────────────
+# ASSETS VISUAIS PESSOAIS (não são código)
+# ─────────────────────────────────────────────────────────────────
+
+# GIFs do sprite da Emily
+img/
+*.gif
+
+# Imagens geradas pelo gerador de imagens
+imagens_geradas/
+*.png
+
+# Imagem de perfil/avatar
+emilyimage.png
+emily.gif
+
+# ─────────────────────────────────────────────────────────────────
+# PYTHON
+# ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.Python
+*.pyc
+
+# ─────────────────────────────────────────────────────────────────
+# AMBIENTES VIRTUAIS
+# ─────────────────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ENV/
+.env/
+
+# ─────────────────────────────────────────────────────────────────
+# PYINSTALLER — executável compilado
+# ─────────────────────────────────────────────────────────────────
+build/
+dist/
+*.spec
+*.exe
+*.exe_extracted/
+
+# ─────────────────────────────────────────────────────────────────
+# ÁUDIO TEMPORÁRIO
+# ─────────────────────────────────────────────────────────────────
+*.wav
+*.mp3
+*.pcm
+*.ogg
+
+# ─────────────────────────────────────────────────────────────────
+# LOGS
+# ─────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─────────────────────────────────────────────────────────────────
+# IDEs E EDITORES
+# ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.suo
+*.user
+*.swp
+*.swo
+*~
+
+# ─────────────────────────────────────────────────────────────────
+# SISTEMA OPERACIONAL
+# ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# ─────────────────────────────────────────────────────────────────
+# FUNCIONALIDADES EM DESENVOLVIMENTO (ainda não prontas)
+# ─────────────────────────────────────────────────────────────────
+
+# Agente de jogo — ainda sendo ajustado
+agente_jogo.py
+
+# Gerador de imagens — ainda sendo ajustado
+gerador_imagem.py
+
+# ─────────────────────────────────────────────────────────────────
+# ARQUIVOS ANTIGOS / LEGADO
+# ─────────────────────────────────────────────────────────────────
+
+# Arquivo gitignore sem ponto (nome errado — o .gitignore correto é esse aqui)
+gitignore

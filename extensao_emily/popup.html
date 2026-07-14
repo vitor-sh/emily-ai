@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Emily Browser Bridge</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      width: 260px;
+      font-family: 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 16px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .header img {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+    }
+
+    .header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #c9a0ff;
+    }
+
+    .status-card {
+      background: #16213e;
+      border-radius: 10px;
+      padding: 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid #2a2a4a;
+    }
+
+    .indicator {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s ease;
+    }
+
+    .indicator.conectado {
+      background: #4caf50;
+      box-shadow: 0 0 8px #4caf5088;
+    }
+
+    .indicator.desconectado {
+      background: #f44336;
+      box-shadow: 0 0 8px #f4433688;
+    }
+
+    .status-texto {
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .status-label {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .status-label.conectado { color: #4caf50; }
+    .status-label.desconectado { color: #f44336; }
+
+    .status-sub {
+      color: #888;
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .footer {
+      margin-top: 14px;
+      font-size: 10px;
+      color: #444;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icon.png" alt="Emily" />
+    <h1>Emily Browser Bridge</h1>
+  </div>
+
+  <div class="status-card">
+    <div class="indicator" id="indicator"></div>
+    <div class="status-texto">
+      <div class="status-label" id="status-label">Verificando...</div>
+      <div class="status-sub" id="status-sub">Aguarde um momento</div>
+    </div>
+  </div>
+
+  <div class="footer">ws://localhost:8765</div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
