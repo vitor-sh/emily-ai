@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from agente_jogo import iniciar_agente, pausar_agente, continuar_agente, parar_agente, status_agente
+import agente_ui
 import difflib
 import json
 import os
@@ -10,6 +11,11 @@ from modelo import EMILY_PERSONALIDADE
 import subprocess
 import threading
 import time
+try:
+    import discord_bot as _discord_bot
+    _DISCORD_DISPONIVEL = True
+except ImportError:
+    _DISCORD_DISPONIVEL = False
 
 try:
     import keyboard as _kb
@@ -17,16 +23,19 @@ try:
 except ImportError:
     _KB_DISPONIVEL = False
     print("[SPEEDRUN] Módulo 'keyboard' não encontrado. Instala com: pip install keyboard")
+    
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+    _WATCHDOG_DISPONIVEL = True
+except ImportError:
+    _WATCHDOG_DISPONIVEL = False
+    print("[DOWNLOADS] Instala o watchdog: pip install watchdog")
 
 import webbrowser
 from pathlib import Path
 from typing import Dict, Iterable, Optional
-from openai import OpenAI
-
-_fw_client = OpenAI(
-    api_key=os.getenv("FIREWORKS_API_KEY2"),
-    base_url="https://api.fireworks.ai/inference/v1",
-)
+from modelo import _chamar_llm as _modelo_llm
 
 _callback_status = None
 
@@ -626,6 +635,9 @@ KEYWORDS_ABRIR = (
     "coloca", "colocar", "liga", "ligar", "carrega", "carregar",
     "chama", "chamar", "lança", "lançar", "vai no", "entra no", "acessa",
     "joga", "jogar", "jogar o", "iniciar o jogo", "abrir o jogo",
+    "bota", "botar", "mete", "meter",
+    "me abre", "me coloca", "me bota",
+    "me passa", "me manda", "me dá",
 )
 
 KEYWORDS_RECORTAR = (
@@ -669,6 +681,19 @@ KEYWORDS_MAXIMIZAR = (
 KEYWORDS_FECHAR_ABA = (
     "fecha a aba", "fechar a aba", "fecha essa aba", "fecha o youtube",
     "fecha o netflix", "fecha o twitch", "fecha a aba do",
+)
+
+# Intenções indiretas — "quero o discord", "preciso do vscode", "cadê a pasta"
+KEYWORDS_INTENT = (
+    "quero o", "quero a", "quero ver", "quero jogar",
+    "preciso do", "preciso da", "preciso de",
+    "cadê o", "cade o", "cadê a", "cade a",
+    "onde tá o", "onde ta o", "onde está o", "onde esta o",
+    "pode me abrir", "pode abrir", "pode fechar",
+    "consegue abrir", "consegue fechar",
+    "dá pra abrir", "da pra abrir",
+    "quero usar", "quero acessar",
+    "me leva", "me leva pro", "me leva pra",
 )
 
 KEYWORDS_DELETAR = (
@@ -720,6 +745,19 @@ KEYWORDS_AGENTE_PARAR = (
     "para o agente", "parar o agente", "cancela o agente", "encerra o agente",
 )
 
+# Intenções de controle da tela/interface (agente de UI)
+KEYWORDS_AGENTE_UI = (
+    "clica", "clicar", "clique", "clica no", "clica em", "clica aqui",
+    "preenche", "preencher", "preenche o", "preenche esse", "preenche aí",
+    "digita", "digitar", "digite",
+    "seleciona", "selecionar", "marca", "marcar",
+    "rola", "rolar",
+    "desce", "sobe", "arrasta", "arrastar",
+    "confirma", "cancela a tela", "fecha a janela", "fecha o popup", "fecha esse",
+    "faz isso", "faz aí", "faz na tela", "faz pra mim", "resolve isso",
+    "interage", "interaja", "interagir",
+)
+
 KEYWORDS_STEAM_INSTALAR = (
     "instala", "instalar", "instale", "baixa o jogo",
     "baixar o jogo", "instala o jogo",
@@ -746,6 +784,273 @@ KEYWORDS_CONTROLE_MUSICA = (
     "diminui o volume", "diminuir volume", "baixa o volume",
     "muta", "mutar", "sem som", "silencia",
 )
+
+KEYWORDS_DISCORD_CALL = (
+    "entra na call", "entra no canal de voz", "vai pra call",
+    "conecta na call", "entra na voz", "entra no voice",
+    "sai da call", "sai da voz", "desconecta da call",
+    "lista as calls", "quais calls", "que calls tem",
+    "entra no canal", "vai pro canal",
+)
+
+# ── Monitoramento de Downloads ──
+KEYWORDS_MONITOR_DOWNLOADS = (
+    "monitora downloads", "monitora os downloads",
+    "fica de olho nos downloads", "começa a monitorar downloads",
+    "inicia o monitor", "monitora a pasta de downloads",
+)
+
+KEYWORDS_PARAR_MONITOR_DOWNLOADS = (
+    "para de monitorar downloads", "para o monitor de downloads",
+    "desliga o monitor", "cancela monitoramento",
+)
+
+KEYWORDS_LIMPAR_PAGINA = (
+    "esquece a página", "esquece a pagina", "esquece essa página", "esquece essa pagina",
+    "limpa o contexto da página", "limpa o contexto da pagina",
+    "limpa a página", "limpa a pagina",
+    "apaga o contexto da página", "apaga o contexto da pagina",
+    "esquece o site", "esquece a leitura", "esquece o que leu",
+    "sai do contexto da página", "sai do contexto da pagina",
+    "tira a página", "tira a pagina",
+)
+
+KEYWORDS_ORGANIZAR_DOWNLOADS = (
+    "organiza os downloads", "organiza meus downloads",
+    "organiza a pasta de downloads", "organiza downloads",
+    "organizar os downloads", "organizar meus downloads",
+    "organizar downloads", "organizar a pasta de downloads",
+    "arruma os downloads", "arruma meus downloads",
+    "arruma a pasta de downloads", "arrumar os downloads",
+    "limpa os downloads", "limpar os downloads",
+    "separa os arquivos dos downloads", "separar os downloads",
+    "categoriza os downloads", "categorizar os downloads",
+)
+
+_download_observer = None
+_download_callback = None       # callback que avisa a Emily
+_downloads_notificados: set = set()   # evita notificar o mesmo arquivo 2 vezes
+_download_pendente: Optional[Path] = None   # arquivo aguardando confirmação de extração
+_EXTENSOES_BAIXANDO = {".crdownload", ".part", ".tmp", ".!ut", ".opdownload"}
+_EXTENSOES_COMPACTADAS = {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}
+
+
+def definir_callback_download(callback):
+    """Chamado no main.py pra registrar como avisar a Emily."""
+    global _download_callback
+    _download_callback = callback
+    
+# ─────────────────────────────────────────────────────────────────
+# MONITORAMENTO DE DOWNLOADS
+# ─────────────────────────────────────────────────────────────────
+
+def _notificar_download_concluido(caminho: Path) -> None:
+    global _download_callback, _downloads_notificados, _download_pendente
+
+    # Garante que o mesmo arquivo não gera notificação duplicada
+    caminho_str = str(caminho)
+    if caminho_str in _downloads_notificados:
+        return
+    _downloads_notificados.add(caminho_str)
+
+    if not _download_callback:
+        return
+
+    eh_compactado = caminho.suffix.lower() in _EXTENSOES_COMPACTADAS
+
+    if eh_compactado:
+        _download_pendente = caminho
+        msg = "Tem um zip novo nos Downloads, Vitor! Quer que eu extraia?"
+    else:
+        msg = "Download concluído nos Downloads, Vitor!"
+
+    try:
+        _download_callback(msg)
+    except Exception as e:
+        print(f"[DOWNLOADS] Erro no callback: {e}")
+        
+def obter_download_pendente() -> Optional[Path]:
+    return _download_pendente
+
+def limpar_download_pendente() -> None:
+    global _download_pendente
+    _download_pendente = None
+
+def extrair_download_pendente() -> Optional[str]:
+    global _download_pendente
+    if not _download_pendente:
+        return None
+    caminho = _download_pendente
+    _download_pendente = None
+    _downloads_notificados.discard(str(caminho))
+    return _extrair_arquivo_fn(
+        nome_arquivo=caminho.name,
+        caminho_direto=caminho,
+    )
+
+
+class _MonitorDownloads(FileSystemEventHandler):
+    def __init__(self):
+        self._tamanhos: dict = {}
+        self._timers:   dict = {}
+        self._arquivos_monitorando: set = set()   # ← NOVO: só arquivos que nasceram nessa sessão
+
+    def _agendar_verificacao(self, caminho_str: str, delay: float = 3.0):
+        timer_ant = self._timers.pop(caminho_str, None)
+        if timer_ant:
+            timer_ant.cancel()
+        timer = threading.Timer(delay, self._verificar_conclusao, args=[caminho_str])
+        timer.daemon = True
+        self._timers[caminho_str] = timer
+        timer.start()
+
+    def _verificar_conclusao(self, caminho_str: str):
+        caminho = Path(caminho_str)
+        if not caminho.exists():
+            self._tamanhos.pop(caminho_str, None)
+            self._arquivos_monitorando.discard(caminho_str)   # ← limpa também aqui
+            return
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            return
+        try:
+            tamanho_atual = caminho.stat().st_size
+        except Exception:
+            return
+
+        tamanho_anterior = self._tamanhos.get(caminho_str, -1)
+
+        if tamanho_atual == tamanho_anterior and tamanho_atual > 0:
+            self._tamanhos.pop(caminho_str, None)
+            self._timers.pop(caminho_str, None)
+            self._arquivos_monitorando.discard(caminho_str)   # ← limpa ao concluir
+            print(f"[DOWNLOADS] Concluído: {caminho.name}")
+            _notificar_download_concluido(caminho)
+        else:
+            self._tamanhos[caminho_str] = tamanho_atual
+            self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        caminho = Path(event.src_path)
+        caminho_str = str(caminho)
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            # Arquivo temporário de download — rastreia para o on_moved depois
+            self._arquivos_monitorando.add(caminho_str)
+            return
+        # Arquivo final criado direto (sem passar por .crdownload)
+        self._arquivos_monitorando.add(caminho_str)   # ← marca como nascido agora
+        self._tamanhos[caminho_str] = 0
+        self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        caminho = Path(event.src_path)
+        caminho_str = str(caminho)
+        if caminho.suffix.lower() in _EXTENSOES_BAIXANDO:
+            return
+        # ← CORREÇÃO: ignora arquivos que já existiam antes do monitor iniciar
+        if caminho_str not in self._arquivos_monitorando:
+            return
+        try:
+            self._tamanhos[caminho_str] = caminho.stat().st_size
+        except Exception:
+            pass
+        self._agendar_verificacao(caminho_str, delay=3.0)
+
+    def on_moved(self, event):
+        if event.is_directory:
+            return
+        src  = Path(event.src_path)
+        dest = Path(event.dest_path)
+        src_str = str(src)
+        if (src.suffix.lower() in _EXTENSOES_BAIXANDO
+                and dest.suffix.lower() not in _EXTENSOES_BAIXANDO):
+            # ← CORREÇÃO: só notifica se o .crdownload foi visto nessa sessão
+            if src_str not in self._arquivos_monitorando:
+                return
+            self._arquivos_monitorando.discard(src_str)
+            dest_str = str(dest)
+            self._arquivos_monitorando.add(dest_str)
+            def _avisar():
+                time.sleep(1.0)
+                self._arquivos_monitorando.discard(dest_str)
+                _notificar_download_concluido(dest)
+            threading.Thread(target=_avisar, daemon=True).start()
+
+
+def iniciar_monitor_downloads() -> str:
+    global _download_observer
+
+    if not _WATCHDOG_DISPONIVEL:
+        return "Preciso do watchdog pra isso! Instala com: pip install watchdog"
+
+    if _download_observer and _download_observer.is_alive():
+        return "Já tô de olho nos downloads, Vitor!"
+
+    pastas = PASTA_MAP.get("downloads", [])
+    if not pastas:
+        return "Não achei a pasta de Downloads, Vitor!"
+
+    pasta_downloads = pastas[0]
+    try:
+        handler = _MonitorDownloads()
+        _download_observer = Observer()
+        _download_observer.schedule(handler, str(pasta_downloads), recursive=False)
+        _download_observer.daemon = True
+        _download_observer.start()
+        print(f"[DOWNLOADS] Monitorando: {pasta_downloads}")
+        return "Tô de olho nos downloads! Te aviso quando qualquer arquivo terminar de baixar."
+    except Exception as e:
+        return f"Não consegui iniciar o monitoramento: {e}"
+
+
+def parar_monitor_downloads() -> str:
+    global _download_observer
+
+    if not _download_observer or not _download_observer.is_alive():
+        return "Não tô monitorando downloads agora, Vitor!"
+    try:
+        _download_observer.stop()
+        _download_observer.join(timeout=2)
+        _download_observer = None
+        return "Ok, parei de monitorar os downloads!"
+    except Exception as e:
+        return f"Erro ao parar: {e}"
+
+# Ações que usuários externos do Discord não podem executar
+ACOES_BLOQUEADAS_EXTERNOS = {
+    "fechar_app",
+    "fechar_aba",
+    "minimizar_app",
+    "maximizar_app",
+    "deletar_arquivo",
+    "deletar_selecionados",
+    "deletar_arquivos_da_pasta",
+    "mover_arquivo",
+    "mover_pasta",
+    "mover_selecionados",
+    "renomear_arquivo",
+    "renomear_selecionados",
+}
+
+def checar_bloqueio_externo(mensagem: str) -> Optional[dict]:
+    """
+    Verifica se o comando é uma ação bloqueada pra usuários externos do Discord.
+    Retorna o dict interpretado se for bloqueado, None se não for.
+    O LLM cache garante que a interpretação não seja feita duas vezes.
+    """
+    texto_norm = _normalizar(mensagem)
+    if not _eh_possivel_comando(texto_norm):
+        return None
+    resultado = _interpretar_com_llm(mensagem)
+    if not resultado:
+        return None
+    acao = resultado.get("acao", "nenhuma")
+    if acao in ACOES_BLOQUEADAS_EXTERNOS:
+        return resultado
+    return None
 
 # ─────────────────────────────────────────────────────────────────
 # ÍNDICE AUTOMÁTICO DE APPS INSTALADOS
@@ -3049,7 +3354,7 @@ def _interpretar_com_llm(mensagem: str) -> Optional[dict]:
         print (f"[DEBUG automacao] LLM cache hit: '{mensagem}'")
         return cached
     try:
-        system_content = EMILY_PERSONALIDADE + """
+        system_content = """
 
 Você interpreta comandos de automação do PC.
 Analise a mensagem e retorne APENAS um JSON válido, sem texto adicional.
@@ -3195,6 +3500,20 @@ Exemplos:
   "maximiza o Discord"  → {"acao": "maximizar_app", "alvo": "Discord", "resposta": "Maximizando o Discord!"}
   "expande o VS Code"   → {"acao": "maximizar_app", "alvo": "VS Code",  "resposta": "Maximizando o VS Code!"}
 
+{"acao": "discord_entrar_call", "canal": "nome_do_canal", "servidor": "nome_do_servidor_ou_vazio"}
+  → Entra em um canal de voz do Discord pelo nome.
+  → "servidor" só preenche se o usuário mencionar o servidor. Senão deixa vazio "".
+  Exemplos:
+  "entra na call Geral"                          → {"acao": "discord_entrar_call", "canal": "Geral", "servidor": "", "resposta": "Entrando na call!"}
+  "entra na call Gameplay lá no servidor Friends" → {"acao": "discord_entrar_call", "canal": "Gameplay", "servidor": "Friends", "resposta": "Entrando!"}
+  "vai pra call de voz"                           → {"acao": "discord_entrar_call", "canal": "voz", "servidor": "", "resposta": "Indo pra call!"}
+
+{"acao": "discord_sair_call", "resposta": "Saindo da call!"}
+  → Sai do canal de voz atual.
+
+{"acao": "discord_listar_calls", "resposta": "Olha os canais disponíveis!"}
+  → Lista todos os canais de voz dos servidores.
+
 {"acao": "deletar_arquivo", "alvo": "nome_do_arquivo", "pasta": "pasta_se_mencionada"}
   → Para deletar um arquivo específico.
 
@@ -3265,6 +3584,107 @@ Exemplos:
 "move os arquivos selecionados pra downloads" → {"acao": "mover_selecionados", "destino": "downloads", "resposta": "Movendo tudo pros Downloads!"}
 "deleta todos os selecionados" → {"acao": "deletar_selecionados", "resposta": "Jogando tudo na lixeira!"}
 "como tá o tempo?" → {"acao": "nenhuma"}
+
+=== CONTROLAR NAVEGADOR (extensão Chrome/Brave) ===
+Use `controlar_navegador` APENAS quando o usuário quiser interagir com uma página que já está aberta no navegador, ler/extrair conteúdo dela, ou executar algo dentro do browser via extensão.
+
+REGRA CRÍTICA — QUANDO NÃO USAR controlar_navegador:
+- "abre o youtube" / "vai no google" / "acessa o site X"  → use `abrir_site` (só navega, não precisa da extensão)
+- "toca uma música" / "coloca Bohemian Rhapsody"          → use `tocar_musica` (tem fluxo próprio)
+- "fecha a aba do Netflix" / "fecha essa aba"             → use `fechar_aba` (via Ctrl+W, mais simples)
+- "clica em X, preenche o formulário todo, navega pelo site" → use `agente_ui` (fluxo visual complexo)
+
+QUANDO USAR controlar_navegador:
+- Ler/extrair texto da página atual ("lê essa página", "o que tá escrito aqui", "resume esse site")
+- Baixar arquivo de uma URL ("baixa esse vídeo", "faz o download desse arquivo")
+- Rolar a página ("desce a página", "sobe a página", "rola pra baixo")
+- Tirar screenshot da aba ("tira print da aba", "screenshot do navegador")
+- Preencher UM campo específico com seletor CSS conhecido
+- Clicar num elemento específico com seletor CSS conhecido
+- Executar JavaScript na página
+
+{"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "texto da dúvida se quiser que Emily explique"}
+  → Lê o texto da página atual. Se "pergunta" for preenchida, Emily analisa e responde sobre o conteúdo.
+  → Preencha "pergunta" quando o usuário disser "me explica", "o que é isso", "resume", "o que significa", "analisa", etc.
+  → Deixe "pergunta" vazio quando o usuário só quiser ver o texto sem análise.
+
+  Exemplos:
+  "lê essa página"                              → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "", "resposta": "Lendo a página!"}
+  "lê essa página e me explica"                 → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "me explica o que está escrito nessa página", "resposta": "Lendo e explicando pra você!"}
+  "o que esse site está dizendo?"               → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "o que esse site está dizendo?", "resposta": "Deixa eu ler pra te contar!"}
+  "resume o conteúdo dessa página"              → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "resume o conteúdo dessa página", "resposta": "Resumindo pra você!"}
+  "o que é isso que eu tô lendo?"               → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "o que é isso que está escrito na página?", "resposta": "Vou ler e te contar!"}
+  "tem algo estranho nessa página, analisa"     → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "analisa o conteúdo dessa página e me diz se tem algo estranho", "resposta": "Analisando a página!"}
+
+{"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "url_ou_vazio"}
+  → Baixa o ÁUDIO de um vídeo como MP3. Use quando o usuário quiser baixar música/áudio de um site.
+  → Detecta a URL da aba automaticamente se não for informada.
+  → DIFERENÇA com baixar_arquivo: este gera MP3 com metadados e thumbnail embutidos.
+  → Use quando ouvir: "baixa essa música", "salva o áudio", "extrai o áudio", "baixa como mp3", "quero o mp3"
+  Exemplos:
+  "baixa essa música pra mim"                     → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando o áudio!"}
+  "salva esse áudio como mp3"                     → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Salvando o MP3!"}
+  "baixa essa música do youtube pra mim"          → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando como MP3!"}
+  "extrai o áudio desse vídeo"                    → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Extraindo o áudio!"}
+  "quero essa música no meu PC"                   → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando a música!"}
+
+{"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "url_do_arquivo_ou_vazio"}
+  → Inicia o download de VÍDEO ou arquivo genérico. Use quando o usuário quiser o vídeo completo.
+  → Se o usuário não mencionar URL, deixe vazio — a URL será detectada automaticamente.
+  → Use quando ouvir: "baixa esse vídeo", "faz o download desse arquivo", "salva esse vídeo"
+  Exemplos:
+  "baixa esse vídeo"                  → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Iniciando o download!"}
+  "faz o download desse arquivo"      → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Baixando!"}
+  "baixa o arquivo de youtube.com/x"  → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "youtube.com/x", "resposta": "Baixando!"}
+  "salva esse vídeo no meu PC"        → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Salvando o vídeo!"}
+
+{"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo|cima|esquerda|direita", "quantidade": 300}
+  → Rola a página. Use quando o usuário falar em rolar/descer/subir a página DENTRO do navegador.
+  → NÃO confunda com scroll em outras janelas — isso é EXCLUSIVO para a página do navegador.
+  Exemplos:
+  "desce a página"             → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo", "quantidade": 500, "resposta": "Rolando pra baixo!"}
+  "sobe a página"              → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "cima", "quantidade": 500, "resposta": "Rolando pra cima!"}
+  "rola bastante pra baixo"    → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo", "quantidade": 1500, "resposta": "Rolando!"}
+
+{"acao": "controlar_navegador", "sub_acao": "screenshot_aba"}
+  → Tira um screenshot da aba atual do navegador.
+  Exemplos:
+  "tira um print da aba"           → {"acao": "controlar_navegador", "sub_acao": "screenshot_aba", "resposta": "Tirando screenshot!"}
+  "screenshot do navegador"        → {"acao": "controlar_navegador", "sub_acao": "screenshot_aba", "resposta": "Capturando!"}
+
+{"acao": "controlar_navegador", "sub_acao": "preencher_campo", "seletor": "css_selector", "valor": "valor"}
+  → Preenche UM campo específico num site via seletor CSS. Use APENAS quando o seletor for mencionado ou óbvio.
+  → Se for preencher um formulário inteiro ou fluxo complexo → use agente_ui.
+
+{"acao": "controlar_navegador", "sub_acao": "clicar_elemento", "seletor": "css_selector"}
+  → Clica num elemento específico via seletor CSS.
+  → Se for uma sequência de cliques ou navegação visual → use agente_ui.
+
+{"acao": "controlar_navegador", "sub_acao": "executar_js", "codigo": "javascript_aqui"}
+  → Executa JavaScript na página atual.
+  Exemplos:
+  "executa esse JS: alert('oi')"   → {"acao": "controlar_navegador", "sub_acao": "executar_js", "codigo": "alert('oi')", "resposta": "Executando o JS!"}
+
+{"acao": "agente_ui", "objetivo": "texto do que fazer na tela"}
+  → Use quando o usuário pedir pra FAZER algo que envolva navegar visualmente pela interface, múltiplas ações subsequentes, ou tarefas complexas que precisam "ver a tela" pra executar.
+  → O campo "objetivo" deve conter a intenção COMPLETA do usuário, descrita de forma clara e executável.
+  → OBRIGATÓRIO usar agente_ui quando:
+      - O pedido descreve um FLUXO de trabalho complexo ("entra na pasta X, copia tudo pra Y, substitui os arquivos")
+      - O usuário quer que a Emily NAVEGUE pelo sistema de arquivos vendo a tela ("acha o git ali", "vai na área de trabalho e faz isso")
+      - O pedido menciona múltiplas pastas/locais diferentes que dependem um do outro visualmente
+      - O pedido é vago/relativo à tela atual ("faz aquilo que você disse", "faz isso que tá na tela", "resolve isso pra mim")
+      - Qualquer coisa que seria mais confiável fazer VENDO a tela do que executando comandos cegos
+  → NÃO use agente_ui para ações simples diretas como: abrir um app, abrir um site, mover um arquivo específico de pasta A pra pasta B com caminhos conhecidos.
+  → Use quando ouvir: clica, preenche, digita, seleciona, faz isso, resolve isso, mexe, navega, acha, procura na tela, etc.
+  → Exemplos:
+    "clica no botão confirmar" → {"acao": "agente_ui", "objetivo": "clica no botão confirmar", "resposta": "Vou clicar pra você!"}
+    "preenche esse formulário com o meu endereço" → {"acao": "agente_ui", "objetivo": "preenche esse formulário com o meu endereço", "resposta": "Vou preencher o formulário!"}
+    "faz isso pra mim" → {"acao": "agente_ui", "objetivo": "faz isso pra mim", "resposta": "Vou fazer na tela!"}
+    "entra na pasta do Projeto Emily na área de trabalho, copia os arquivos de lá e cola na pasta Minha IA substituindo tudo" → {"acao": "agente_ui", "objetivo": "entra na pasta do Projeto Emily na área de trabalho, copia os arquivos de lá e cola na pasta Minha IA substituindo tudo", "resposta": "Vou fazer isso na tela!"}
+    "abre o git ali pra mim e faz o commit que você disse" → {"acao": "agente_ui", "objetivo": "abrir o git bash, fazer git add ., git commit e git push conforme instruído", "resposta": "Vou fazer isso na tela!"}
+
+REGRA CRÍTICA — QUANDO NÃO USAR SEQUÊNCIA:
+Quando o pedido for complexo, envolver navegação visual, múltiplos passos dependentes ou referência ao que foi dito antes, prefira SEMPRE "agente_ui" em vez de tentar montar uma "sequencia" de ações diretas. A sequencia só deve ser usada para tarefas SIMPLES e diretas (abrir 2-3 apps, fechar e abrir algo) onde cada passo é independente e não precisa "ver a tela".
 
 === REFERÊNCIAS A DRIVES/UNIDADES ===
 Quando o usuário mencionar uma unidade de disco, coloque a referência como está no campo destino ou pasta_origem.
@@ -3424,26 +3844,13 @@ Exemplos:
 "elden rign", "eldenring" → "Elden Ring"
 """
 
-        completion = _fw_client.chat.completions.create(
-            model="accounts/fireworks/models/kimi-k2p6",
-            messages=[
+        texto = _modelo_llm(
+            [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": mensagem}
             ],
             max_tokens=256,
-            extra_body={"reasoning_effort": "none"},
         )
-
-        texto = completion.choices[0].message.content or ""
-
-        if not texto.strip():
-            try:
-                thinking = completion.choices[0].message.reasoning_content or ""
-                match = re.search(r"\{.*?\}", thinking, re.DOTALL)
-                if match:
-                    texto = match.group(0)
-            except Exception:
-                pass
 
         if not texto.strip():
             print("[DEBUG automacao] Kimi retornou resposta vazia")
@@ -3494,6 +3901,11 @@ def _eh_possivel_comando(texto: str) -> bool:
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_PAUSAR)
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_CONTINUAR)
         or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_PARAR)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_AGENTE_UI)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_INTENT)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_DISCORD_CALL)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_MONITOR_DOWNLOADS)
+        or any(_contem_palavra(texto, p) for p in KEYWORDS_PARAR_MONITOR_DOWNLOADS)
     )
 
 # ─────────────────────────────────────────────────────────────────
@@ -3956,6 +4368,7 @@ def inicializar() -> None:
     threading.Thread(target=_monitorar_janela_explorer, daemon=True).start()
     threading.Thread(target=_carregar_applist_steam, daemon=True).start()
     _carregar_speedruns()
+    iniciar_monitor_downloads()
 
 
 def _buscar_arquivo_fuzzy(nome_arquivo: str, pasta_hint: str = "") -> Optional[Path]:
@@ -4476,6 +4889,229 @@ def _deletar_arquivos_da_pasta_fn(
     return resp
 
 # ─────────────────────────────────────────────────────────────────
+# DOWNLOAD VIA YT-DLP — sem agente, direto no terminal
+# ─────────────────────────────────────────────────────────────────
+
+def _baixar_mp3_com_ytdlp(url: str) -> Optional[str]:
+    """
+    Baixa o áudio de um vídeo como MP3 na melhor qualidade disponível usando yt-dlp.
+    Salva na pasta Músicas do usuário (ou Downloads como fallback).
+    Roda em thread separada pra não travar a Emily.
+    Retorna mensagem de status, ou None se yt-dlp não estiver instalado.
+    """
+    import shutil as _shutil
+
+    ytdlp_exe = _shutil.which("yt-dlp") or _shutil.which("yt-dlp.exe")
+    if not ytdlp_exe:
+        candidatos = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Scripts" / "yt-dlp.exe",
+            Path(os.environ.get("APPDATA", "")) / "Python" / "Scripts" / "yt-dlp.exe",
+            Path("C:/Python311/Scripts/yt-dlp.exe"),
+            Path("C:/Python312/Scripts/yt-dlp.exe"),
+        ]
+        for python_dir in Path("C:/Users").glob("*/AppData/Local/Programs/Python/*/Scripts/yt-dlp.exe"):
+            candidatos.append(python_dir)
+        for c in candidatos:
+            if c.exists():
+                ytdlp_exe = str(c)
+                break
+
+    if not ytdlp_exe:
+        print("[YTDLP-MP3] yt-dlp não encontrado.")
+        return None
+
+    # Salva em Músicas, com fallback pra Downloads
+    pasta_musicas = PASTA_MAP.get("musicas", [HOME / "Music"])[0]
+    if not pasta_musicas.exists():
+        pasta_musicas = PASTA_MAP.get("downloads", [HOME / "Downloads"])[0]
+
+    print(f"[YTDLP-MP3] Baixando áudio: {url}")
+    print(f"[YTDLP-MP3] Destino: {pasta_musicas}")
+
+    def _rodar():
+        try:
+            resultado = subprocess.run(
+                [
+                    ytdlp_exe,
+                    "--no-playlist",
+                    "-x",                          # extrai áudio
+                    "--audio-format", "mp3",       # converte pra MP3
+                    "--audio-quality", "0",        # melhor qualidade (0 = melhor, 9 = pior)
+                    "--embed-thumbnail",           # capa do álbum embutida no MP3
+                    "--add-metadata",              # metadados (artista, título, etc.)
+                    "-o", str(pasta_musicas / "%(title)s.%(ext)s"),
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if resultado.returncode == 0:
+                print("[YTDLP-MP3] Download de áudio concluído!")
+            else:
+                print(f"[YTDLP-MP3] Erro: {resultado.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            print("[YTDLP-MP3] Timeout ao baixar áudio.")
+        except Exception as e:
+            print(f"[YTDLP-MP3] Exceção: {e}")
+
+    threading.Thread(target=_rodar, daemon=True).start()
+    return "Baixando o áudio como MP3 na melhor qualidade! Vai aparecer na pasta Músicas quando terminar."
+
+
+def _baixar_com_ytdlp(url: str) -> Optional[str]:
+    """
+    Tenta baixar um vídeo usando yt-dlp na melhor qualidade disponível.
+    Salva na pasta Downloads do usuário.
+    Roda em thread separada pra não travar a Emily.
+    Retorna uma mensagem de status, ou None se yt-dlp não estiver instalado.
+    """
+    import shutil as _shutil
+
+    # Verifica se yt-dlp está instalado
+    ytdlp_exe = _shutil.which("yt-dlp") or _shutil.which("yt-dlp.exe")
+    if not ytdlp_exe:
+        # Tenta encontrar nos locais comuns do Python
+        candidatos = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Scripts" / "yt-dlp.exe",
+            Path(os.environ.get("APPDATA", "")) / "Python" / "Scripts" / "yt-dlp.exe",
+            Path("C:/Python311/Scripts/yt-dlp.exe"),
+            Path("C:/Python312/Scripts/yt-dlp.exe"),
+        ]
+        # Também tenta pelo pip
+        for python_dir in Path("C:/Users").glob("*/AppData/Local/Programs/Python/*/Scripts/yt-dlp.exe"):
+            candidatos.append(python_dir)
+        for c in candidatos:
+            if c.exists():
+                ytdlp_exe = str(c)
+                break
+
+    if not ytdlp_exe:
+        print("[YTDLP] yt-dlp não encontrado. Usando extensão como fallback.")
+        return None  # sinaliza pra usar fallback
+
+    # Pega a pasta Downloads real
+    pasta_downloads = PASTA_MAP.get("downloads", [HOME / "Downloads"])[0]
+
+    print(f"[YTDLP] Baixando: {url}")
+    print(f"[YTDLP] Destino: {pasta_downloads}")
+
+    def _rodar():
+        try:
+            resultado = subprocess.run(
+                [
+                    ytdlp_exe,
+                    "--no-playlist",           # não baixa playlist inteira
+                    "-f", "bestvideo+bestaudio/best",  # melhor qualidade disponível
+                    "--merge-output-format", "mp4",    # sempre sai como .mp4
+                    "-o", str(pasta_downloads / "%(title)s.%(ext)s"),
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutos de timeout
+                encoding="utf-8",
+                errors="replace",
+            )
+            if resultado.returncode == 0:
+                print(f"[YTDLP] Download concluído!")
+            else:
+                print(f"[YTDLP] Erro: {resultado.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            print("[YTDLP] Timeout ao baixar.")
+        except Exception as e:
+            print(f"[YTDLP] Exceção: {e}")
+
+    threading.Thread(target=_rodar, daemon=True).start()
+    return f"Baixando na melhor qualidade disponível! O arquivo vai aparecer nos seus Downloads quando terminar."
+
+
+# ─────────────────────────────────────────────────────────────────
+# DOWNLOAD PENDENTE VIA NAVEGADOR — fluxo com pergunta de qualidade
+# ─────────────────────────────────────────────────────────────────
+
+_download_pendente_nav_url: Optional[str] = None  # URL aguardando escolha de qualidade
+
+def _definir_download_pendente_nav(url: str) -> None:
+    global _download_pendente_nav_url
+    _download_pendente_nav_url = url
+
+def obter_download_pendente_nav() -> Optional[str]:
+    """Retorna a URL pendente de qualidade, ou None se não houver."""
+    return _download_pendente_nav_url
+
+def processar_resposta_qualidade_download(resposta_usuario: str) -> Optional[str]:
+    """
+    Chamado pelo main.py/interface quando o usuário responde à pergunta de qualidade.
+    Monta a URL com o parâmetro de qualidade e inicia o download.
+    Retorna a resposta da Emily ou None se não havia download pendente.
+    """
+    global _download_pendente_nav_url
+
+    url = _download_pendente_nav_url
+    if not url:
+        return None
+
+    _download_pendente_nav_url = None  # limpa o estado
+
+    try:
+        import navegador as _nav
+    except ImportError:
+        return "Módulo navegador não encontrado, Vitor!"
+
+    if not _nav.esta_conectado():
+        return "A extensão do navegador desconectou enquanto eu esperava, Vitor!"
+
+    resp_norm = _normalizar(resposta_usuario)
+
+    # Detecta a qualidade pedida
+    qualidade = None
+    if any(p in resp_norm for p in ("qualquer", "melhor", "maxima", "máxima", "tanto faz", "qualquer uma")):
+        qualidade = "best"
+    elif "4k" in resp_norm or "2160" in resp_norm:
+        qualidade = "2160p"
+    elif "1080" in resp_norm or "full hd" in resp_norm or "fullhd" in resp_norm:
+        qualidade = "1080p"
+    elif "720" in resp_norm or " hd" in resp_norm:
+        qualidade = "720p"
+    elif "480" in resp_norm:
+        qualidade = "480p"
+    elif "360" in resp_norm:
+        qualidade = "360p"
+    elif "240" in resp_norm:
+        qualidade = "240p"
+    elif "144" in resp_norm:
+        qualidade = "144p"
+    else:
+        # Não reconheceu → baixa na melhor disponível
+        qualidade = "best"
+
+    # Para YouTube, se a qualidade for específica, sugere yt-dlp
+    _SITES_VIDEO_YT = ("youtube.com", "youtu.be")
+    eh_youtube = any(s in url.lower() for s in _SITES_VIDEO_YT)
+
+    if eh_youtube and qualidade != "best":
+        # Inicia o download via extensão (o browser baixa o que o YouTube entregar)
+        # e avisa que para qualidade específica precisaria do yt-dlp
+        _nav.baixar_arquivo(url)
+        qualidade_texto = {
+            "2160p": "4K", "1080p": "1080p Full HD", "720p": "720p HD",
+            "480p": "480p", "360p": "360p", "240p": "240p", "144p": "144p",
+        }.get(qualidade, qualidade)
+        return (
+            f"Iniciando o download! Obs: o Brave vai baixar na melhor qualidade disponível. "
+            f"Se quiser especificamente {qualidade_texto}, precisa do yt-dlp instalado. "
+            f"Quer que eu te ensine a usar?"
+        )
+
+    # Para outros sites ou "qualquer" → baixa direto
+    _nav.baixar_arquivo(url)
+    return "Download iniciado! Te aviso quando terminar se o monitor de downloads estiver ativo."
+
+
+# ─────────────────────────────────────────────────────────────────
 # MÚSICA — YouTube + teclas de mídia do Windows
 # ─────────────────────────────────────────────────────────────────
 
@@ -4573,7 +5209,146 @@ def _controlar_musica(controle: str) -> str:
 
     return "desconhecido"
     
-def _executar_acao_por_dict(resultado: dict) -> Optional[str]:
+# ─────────────────────────────────────────────────────────────────
+# ORGANIZAÇÃO AUTOMÁTICA DE DOWNLOADS POR TIPO/EXTENSÃO
+# ─────────────────────────────────────────────────────────────────
+
+_CATEGORIAS_EXTENSAO: Dict[str, set] = {
+    "Imagens": {
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg", ".webp",
+        ".ico", ".tiff", ".tif", ".heic", ".heif", ".raw", ".psd",
+        ".ai", ".eps", ".avif", ".jfif",
+    },
+    "Vídeos": {
+        ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm",
+        ".m4v", ".mpg", ".mpeg", ".3gp", ".ogv", ".ts", ".vob",
+    },
+    "Músicas": {
+        ".mp3", ".flac", ".wav", ".aac", ".ogg", ".wma", ".m4a",
+        ".opus", ".alac", ".aiff", ".mid", ".midi",
+    },
+    "Documentos": {
+        ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+        ".odt", ".ods", ".odp", ".txt", ".rtf", ".csv", ".epub",
+        ".mobi", ".pages", ".numbers", ".key",
+    },
+    "Programas": {
+        ".exe", ".msi", ".dmg", ".deb", ".rpm", ".appimage",
+        ".app", ".bat", ".cmd", ".ps1", ".sh", ".run", ".bin",
+    },
+    "Compactados": {
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz",
+        ".tgz", ".tar.gz", ".tar.bz2", ".cab", ".iso", ".img",
+    },
+    "Código": {
+        ".py", ".js", ".ts", ".html", ".css", ".java", ".cpp",
+        ".c", ".h", ".cs", ".rb", ".go", ".rs", ".php", ".swift",
+        ".kt", ".lua", ".r", ".sql", ".json", ".xml", ".yaml",
+        ".yml", ".toml", ".ini", ".cfg", ".conf", ".md", ".log",
+    },
+    "Fontes": {
+        ".ttf", ".otf", ".woff", ".woff2", ".eot", ".fon",
+    },
+    "Torrents": {
+        ".torrent",
+    },
+    "Modelos 3D": {
+        ".obj", ".fbx", ".stl", ".blend", ".dae", ".3ds", ".gltf", ".glb",
+    },
+    "Outros": set(),  # tudo que não se encaixa em nenhuma categoria
+}
+
+
+def _obter_categoria(arquivo: Path) -> str:
+    """Retorna a categoria de um arquivo com base na sua extensão."""
+    ext = arquivo.suffix.lower()
+    # Checa extensões compostas (ex: .tar.gz)
+    sufixos = "".join(arquivo.suffixes).lower()
+    for categoria, extensoes in _CATEGORIAS_EXTENSAO.items():
+        if categoria == "Outros":
+            continue
+        if ext in extensoes or sufixos in extensoes:
+            return categoria
+    return "Outros"
+
+
+def _organizar_downloads_fn() -> str:
+    """
+    Organiza todos os arquivos da pasta Downloads em subpastas por tipo.
+    As subpastas são criadas DENTRO da própria pasta Downloads.
+    Ignora pastas já existentes (não move pastas, só arquivos soltos).
+    """
+    pastas = PASTA_MAP.get("downloads", [])
+    if not pastas:
+        return "Não achei a pasta de Downloads, Vitor!"
+
+    pasta_downloads = pastas[0]
+    if not pasta_downloads.exists():
+        return "A pasta de Downloads não existe!"
+
+    # Lista só os arquivos soltos na raiz da pasta (não entra em subpastas)
+    try:
+        itens = list(pasta_downloads.iterdir())
+    except (OSError, PermissionError) as e:
+        return f"Não consegui acessar a pasta Downloads: {e}"
+
+    arquivos = [f for f in itens if f.is_file()]
+
+    if not arquivos:
+        return "A pasta Downloads já tá limpa, Vitor! Não tem nenhum arquivo solto pra organizar."
+
+    # Ignora arquivos temporários de download em andamento
+    arquivos = [
+        f for f in arquivos
+        if f.suffix.lower() not in _EXTENSOES_BAIXANDO
+    ]
+
+    if not arquivos:
+        return "Só tem downloads em andamento lá, Vitor! Espera terminar."
+
+    # Organiza por categoria
+    contagem: Dict[str, int] = {}
+    erros: list[str] = []
+
+    for arquivo in arquivos:
+        categoria = _obter_categoria(arquivo)
+        pasta_destino = pasta_downloads / categoria
+
+        try:
+            pasta_destino.mkdir(exist_ok=True)
+            destino_final = pasta_destino / arquivo.name
+
+            # Se já existe arquivo com mesmo nome no destino, adiciona sufixo
+            if destino_final.exists():
+                stem = arquivo.stem
+                ext = arquivo.suffix
+                contador = 1
+                while destino_final.exists():
+                    destino_final = pasta_destino / f"{stem}_{contador}{ext}"
+                    contador += 1
+
+            shutil.move(str(arquivo), str(destino_final))
+            contagem[categoria] = contagem.get(categoria, 0) + 1
+        except Exception as e:
+            erros.append(f"{arquivo.name} ({e})")
+
+    total_movidos = sum(contagem.values())
+
+    if total_movidos == 0:
+        return "Não consegui mover nenhum arquivo, Vitor!"
+
+    # Monta resumo bonito
+    partes = [f"{qtd} em {cat}" for cat, qtd in sorted(contagem.items(), key=lambda x: -x[1])]
+    resumo = ", ".join(partes)
+
+    resp = f"Organizei {total_movidos} arquivo(s) nos Downloads! {resumo}."
+    if erros:
+        resp += f" Não consegui mover: {', '.join(erros[:5])}"
+
+    return resp
+
+
+def _executar_acao_por_dict(resultado: dict, callback_falar=None) -> Optional[str]:
     """
     Executa uma única ação a partir de um dicionário já interpretado pelo LLM.
     Retorna a mensagem de resultado ou None.
@@ -5034,6 +5809,222 @@ def _executar_acao_por_dict(resultado: dict) -> Optional[str]:
         alvo = resultado.get("alvo", "")
         r = _fechar_aba_navegador(alvo)
         return r if any(f in r for f in ("Não consegui", "Não achei", "Não temos")) else resposta_emily
+
+    # ─── CONTROLAR NAVEGADOR via extensão WebSocket ────────────────────────
+    if acao == "controlar_navegador":
+        try:
+            import navegador as _nav
+        except ImportError:
+            return "Módulo navegador não encontrado, Vitor!"
+
+        sub_acao  = resultado.get("sub_acao", "")
+        url       = resultado.get("url", resultado.get("alvo", ""))
+        seletor   = resultado.get("seletor", "")
+        valor     = resultado.get("valor", "")
+        direcao   = resultado.get("direcao", "baixo")
+        quantidade = int(resultado.get("quantidade", 300))
+        codigo    = resultado.get("codigo", "")
+
+        if not _nav.esta_conectado():
+            return "A extensão do navegador não está conectada, Vitor. Instala a extensão Emily no Brave e abre uma aba!"
+
+        if sub_acao == "abrir_url":
+            _nav.abrir_url(url)
+            return resposta_emily
+
+        elif sub_acao == "fechar_aba":
+            _nav.fechar_aba()
+            return resposta_emily
+
+        elif sub_acao == "ler_pagina":
+            dados_pagina = _nav.ler_pagina(timeout=10.0)
+            if not dados_pagina:
+                return "Não consegui ler a página agora, Vitor. A extensão precisa estar conectada!"
+
+            texto_pagina = dados_pagina.get("texto", "")
+            imagens_pagina = dados_pagina.get("imagens", [])
+            url_pagina = dados_pagina.get("url", "")
+            titulo_pagina = dados_pagina.get("titulo", "")
+
+            if not texto_pagina and not imagens_pagina:
+                return "A página parece estar vazia ou bloqueada, Vitor."
+
+            pergunta = resultado.get("pergunta", "").strip()
+
+            # Se não tem pergunta, usa uma pergunta padrão — Emily sempre analisa o conteúdo
+            if not pergunta:
+                pergunta = "Do que se trata essa página? Resume o conteúdo principal pra mim."
+
+            try:
+                from modelo import _chamar_llm as _llm, EMILY_PERSONALIDADE
+
+                # Monta o contexto da página — usa até 80k chars de texto
+                _LIMITE_PAGINA = 80000
+                conteudo_pagina = texto_pagina[:_LIMITE_PAGINA]
+                contexto_pagina = ""
+                if titulo_pagina:
+                    contexto_pagina += f"Título: {titulo_pagina}\n"
+                if url_pagina:
+                    contexto_pagina += f"URL: {url_pagina}\n"
+                contexto_pagina += f"\n[Conteúdo da página]\n{conteudo_pagina}"
+
+                # Indica se o texto foi truncado
+                if len(texto_pagina) > _LIMITE_PAGINA:
+                    contexto_pagina += f"\n\n[NOTA: A página tem {len(texto_pagina):,} caracteres. Mostrando os primeiros {_LIMITE_PAGINA:,}.]"
+
+                # Adiciona descrição das imagens se existirem
+                if imagens_pagina:
+                    contexto_pagina += "\n\n[Imagens encontradas na página]\n"
+                    for i, img in enumerate(imagens_pagina[:5], 1):
+                        alt = img.get("alt", "")
+                        url_img = img.get("url", "")
+                        if alt:
+                            contexto_pagina += f"{i}. \"{alt}\" ({url_img})\n"
+                        else:
+                            contexto_pagina += f"{i}. Imagem sem descrição: {url_img}\n"
+
+                # Tenta analisar imagens com visão se a pergunta for sobre elas
+                analise_visual = ""
+                palavras_visual = ("imagem", "foto", "figura", "gráfico", "ilustração", "visual", "aparece", "mostra", "vejo", "vê")
+                pergunta_sobre_visual = any(p in pergunta.lower() for p in palavras_visual)
+
+                if imagens_pagina and pergunta_sobre_visual:
+                    try:
+                        from modelo import analisar_imagem_url
+                        analises_imgs = []
+                        for img_info in imagens_pagina[:3]:
+                            url_img = img_info.get("url", "")
+                            if url_img:
+                                desc = analisar_imagem_url(url_img, pergunta)
+                                if desc:
+                                    analises_imgs.append(f"- {desc}")
+                        if analises_imgs:
+                            analise_visual = "\n\n[Análise das imagens]\n" + "\n".join(analises_imgs)
+                    except Exception as e_vis:
+                        print(f"[NAVEGADOR] Erro ao analisar imagens: {e_vis}")
+
+                system = f"""{EMILY_PERSONALIDADE}
+Você recebeu o conteúdo COMPLETO de uma página web que o Vitor está acessando no navegador.
+Seu trabalho é ajudar o Vitor com o que ele pediu, usando TODO o conteúdo da página como base.
+
+REGRAS IMPORTANTES:
+- NÃO resuma a página por conta própria a não ser que o Vitor peça explicitamente um resumo.
+- Se o Vitor fez uma pergunta específica, responda DIRETAMENTE usando as informações da página.
+- Se o Vitor pediu ajuda com algo (código, erro, explicação), dê a ajuda completa.
+- Se o Vitor não fez uma pergunta clara, descreva brevemente o que a página contém e pergunte como pode ajudar.
+- Use TODO o contexto disponível — não ignore partes por serem longas ou técnicas.
+- Fale em português brasileiro coloquial, com a sua personalidade natural."""
+
+                mensagem_usuario = f"{contexto_pagina}{analise_visual}\n\n[Pedido do Vitor]\n{pergunta}"
+
+                print(f"[NAVEGADOR] Enviando {len(mensagem_usuario):,} chars pra LLM (página: {len(texto_pagina):,} chars)")
+
+                resposta_analise = _llm(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": mensagem_usuario},
+                    ],
+                    max_tokens=2000,
+                )
+                resposta_final = resposta_analise.strip() if resposta_analise else "Não consegui analisar o conteúdo, Vitor."
+
+                # ── Registra no histórico da conversa para manter contexto ──
+                # Guarda um resumo compacto do contexto (não o texto inteiro, que é gigante)
+                # para a Emily lembrar que leu a página nesta sessão
+                try:
+                    import modelo as _modelo
+                    _resumo_contexto = (
+                        f"[Leitura de página]\n"
+                        f"Título: {titulo_pagina or 'desconhecido'}\n"
+                        f"URL: {url_pagina or 'desconhecida'}\n"
+                        f"Conteúdo ({len(texto_pagina):,} chars lidos):\n{conteudo_pagina[:8000]}"
+                        + (f"\n...[{len(texto_pagina) - _LIMITE_PAGINA:,} chars adicionais não mostrados]" if len(texto_pagina) > _LIMITE_PAGINA else "")
+                    )
+                    _modelo.historico.append({"role": "user", "content": _resumo_contexto})
+                    _modelo.historico.append({"role": "assistant", "content": resposta_final})
+                    _modelo._limitar_historico()
+                    print(f"[NAVEGADOR] Contexto da página registrado no histórico ({len(_resumo_contexto):,} chars)")
+                    # ── Fixa a página no system prompt para perguntas futuras ──
+                    try:
+                        _modelo.fixar_pagina(titulo_pagina, url_pagina, texto_pagina)
+                    except Exception as e_fix:
+                        print(f"[NAVEGADOR] Aviso: não conseguiu fixar página: {e_fix}")
+                except Exception as e_hist:
+                    print(f"[NAVEGADOR] Aviso: não conseguiu registrar no histórico: {e_hist}")
+
+                return resposta_final
+
+            except Exception as e:
+                print(f"[NAVEGADOR] Erro ao analisar página: {e}")
+                # Fallback: devolve trecho do texto
+                trecho = texto_pagina[:2000]
+                return f"Li a página mas tive um erro ao analisar. Aqui tá o começo: {trecho}{'...' if len(texto_pagina) > 2000 else ''}"
+
+        elif sub_acao == "preencher_campo":
+            _nav.preencher_campo(seletor, valor)
+            return resposta_emily
+
+        elif sub_acao == "clicar_elemento":
+            _nav.clicar_elemento(seletor)
+            return resposta_emily
+
+        elif sub_acao == "scroll":
+            _nav.scroll(direcao, quantidade)
+            return resposta_emily
+
+        elif sub_acao == "baixar_mp3":
+            # ── Se URL não foi informada, pega a da aba atual ──
+            if not url:
+                url = _nav.obter_url_atual(timeout=5.0) or ""
+
+            if not url:
+                return "Não consegui detectar a URL da aba atual, Vitor. Me passa o link direto!"
+
+            # Tenta yt-dlp primeiro (melhor qualidade, com metadados e thumbnail)
+            resultado_mp3 = _baixar_mp3_com_ytdlp(url)
+            if resultado_mp3:
+                return resultado_mp3
+
+            # Fallback: yt-dlp não instalado
+            return (
+                "Não achei o yt-dlp instalado, Vitor! "
+                "Instala com: pip install yt-dlp — depois é só pedir de novo!"
+            )
+
+        elif sub_acao == "baixar_arquivo":
+            # ── Se URL não foi informada, pega a da aba atual ──
+            if not url:
+                url = _nav.obter_url_atual(timeout=5.0) or ""
+
+            if not url:
+                return "Não consegui detectar a URL da aba atual, Vitor. Me passa o link direto!"
+
+            # ── Tenta usar yt-dlp pra sites de vídeo (melhor qualidade, sem agente) ──
+            _SITES_VIDEO = ("youtube.com", "youtu.be", "vimeo.com", "twitch.tv",
+                            "dailymotion.com", "facebook.com/watch", "instagram.com")
+            eh_video = any(s in url.lower() for s in _SITES_VIDEO)
+
+            if eh_video:
+                resultado_ytdlp = _baixar_com_ytdlp(url)
+                if resultado_ytdlp:
+                    return resultado_ytdlp
+
+            # Fallback: baixa via extensão do navegador (qualquer URL)
+            _nav.baixar_arquivo(url)
+            return resposta_emily
+
+        elif sub_acao == "executar_js":
+            _nav.executar_js(codigo)
+            return resposta_emily
+
+        elif sub_acao == "screenshot_aba":
+            b64 = _nav.screenshot_aba(timeout=12.0)
+            if b64:
+                return f"Screenshot capturado! ({len(b64)} chars base64)"
+            return "Não consegui capturar o screenshot agora, Vitor."
+
+        else:
+            return f"Sub-ação '{sub_acao}' não reconhecida para controlar_navegador."
     
     if acao == "minimizar_app":
         alvo = resultado.get("alvo", "")
@@ -5049,6 +6040,36 @@ def _executar_acao_por_dict(resultado: dict) -> Optional[str]:
         r = _maximizar_app(alvo)
         return r if "Não achei" in r or "Não consegui" in r else resposta_emily
     
+    if acao == "discord_entrar_call":
+        if not _DISCORD_DISPONIVEL:
+           return "Módulo do Discord não disponível!"
+        canal   = resultado.get("canal", "")
+        servidor = resultado.get("servidor", "")
+        if not canal:
+           return "Me diz o nome do canal que você quer que eu entre, Vitor!"
+        return _discord_bot.entrar_em_call(canal, servidor)
+
+    if acao == "discord_sair_call":
+       if not _DISCORD_DISPONIVEL:
+          return "Módulo do Discord não disponível!"
+       return _discord_bot.sair_da_call()
+
+    if acao == "discord_listar_calls":
+       if not _DISCORD_DISPONIVEL:
+          return "Módulo do Discord não disponível!"
+       return _discord_bot.listar_calls()
+
+    if acao == "agente_ui":
+        objetivo = resultado.get("objetivo", "")
+        if not objetivo:
+            return "Me diz o que você quer que eu faça na tela, Vitor!"
+        if _callback_status:
+            _callback_status("agente_ui")
+        return agente_ui.iniciar_agente_ui(objetivo, callback_falar=callback_falar)
+
+    if acao == "organizar_downloads":
+        return _organizar_downloads_fn()
+
     return None
 
 def _executar_sequencia(acoes: list, resposta_inicial: str, callback_falar=None) -> str:
@@ -5070,7 +6091,7 @@ def _executar_sequencia(acoes: list, resposta_inicial: str, callback_falar=None)
 
         # Em _executar_sequencia, troca o bloco do resultado_passo por:
         try:
-            resultado_passo = _executar_acao_por_dict(acao_dict)
+            resultado_passo = _executar_acao_por_dict(acao_dict, callback_falar)
             if resultado_passo is None:
                 # Ação não reconhecida — avisa mas continua
                 erros.append(f"Passo {i} não sei fazer: {acao_dict.get('acao', '?')}")
@@ -5606,11 +6627,43 @@ def listar_speedruns() -> str:
 # PONTO DE ENTRADA PRINCIPAL
 # ─────────────────────────────────────────────
 
-def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
+def executar_comando(mensagem: str, callback_falar=None, acao_forcada: str = None) -> Optional[str]:
+    """
+    Executa um comando da Emily.
+    
+    Se acao_forcada for passado (pelo fallback inteligente), pula o filtro de
+    palavras-chave e força a LLM a interpretar a mensagem com aquela ação em mente.
+    """
     if not mensagem or not mensagem.strip():
         return None
 
     mensagem_normalizada = _normalizar(mensagem)
+
+    # ── Se vier do fallback inteligente, pula keywords e vai direto pra LLM ──
+    if acao_forcada:
+        print(f"[FALLBACK→AUTOMACAO] Executando acao_forcada='{acao_forcada}' para: '{mensagem}'")
+        # Injeta a ação esperada no texto pra ajudar a LLM a interpretar corretamente
+        mensagem_com_dica = f"{acao_forcada}: {mensagem}"
+        resultado = _interpretar_com_llm(mensagem_com_dica)
+        if not resultado or resultado.get("acao", "nenhuma") == "nenhuma":
+            # Tenta de novo só com a mensagem original mas sem filtro
+            resultado = _interpretar_com_llm(mensagem)
+        if not resultado or resultado.get("acao", "nenhuma") == "nenhuma":
+            return None
+
+        if "acoes" in resultado:
+            acoes = resultado.get("acoes", [])
+            if not acoes:
+                return None
+            resposta_inicial = resultado.get("resposta", f"Vou fazer {len(acoes)} coisas pra você!")
+            return _executar_sequencia(acoes, resposta_inicial, callback_falar)
+
+        acao = resultado.get("acao", "nenhuma")
+        resposta = _executar_acao_por_dict(resultado, callback_falar)
+        ERROS = ("Não achei", "Não encontrei", "Não consegui", "Não entendi", "Não reconheci")
+        if acao in ACOES_SILENCIOSAS and resposta and not any(e in resposta for e in ERROS):
+            return ""
+        return resposta
 
     if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_DESFAZER):
         return desfazer_ultima_acao()
@@ -5665,6 +6718,29 @@ def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
         monitor = int(monitor_match.group(1)) if monitor_match else 1
 
         return iniciar_agente(nome_jogo, monitor=monitor)
+    
+    if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_MONITOR_DOWNLOADS):
+       return iniciar_monitor_downloads()
+
+    if any(_contem_palavra(mensagem_normalizada, p) for p in KEYWORDS_PARAR_MONITOR_DOWNLOADS):
+       return parar_monitor_downloads()
+
+    # ── Organizar Downloads ──
+    if any(p in mensagem_normalizada for p in KEYWORDS_ORGANIZAR_DOWNLOADS):
+       return _organizar_downloads_fn()
+
+    # ── Limpar contexto de página fixada ──
+    if any(p in mensagem_normalizada for p in KEYWORDS_LIMPAR_PAGINA):
+        try:
+            import modelo as _modelo
+            if _modelo.tem_pagina_fixada():
+                _modelo.limpar_pagina_fixada()
+                return "Pronto, esqueci a página. Pode perguntar outra coisa!"
+            else:
+                return "Não tinha nenhuma página fixada aqui, Vitor."
+        except Exception as e_lp:
+            print(f"[AUTOMACAO] Erro ao limpar página: {e_lp}")
+            return "Não consegui limpar o contexto da página agora."
 
     if not _eh_possivel_comando(mensagem_normalizada):
         return None
@@ -5683,11 +6759,11 @@ def executar_comando(mensagem: str, callback_falar=None) -> Optional[str]:
 
     # ── Ação única: comportamento normal ──
     acao = resultado.get("acao", "nenhuma")
-    resposta = _executar_acao_por_dict(resultado)
+    resposta = _executar_acao_por_dict(resultado, callback_falar)
 
     # Se a ação é silenciosa e não deu erro, retorna None (sem falar)
     ERROS = ("Não achei", "Não encontrei", "Não consegui", "Não entendi", "Não reconheci")
     if acao in ACOES_SILENCIOSAS and resposta and not any(e in resposta for e in ERROS):
-        return None
+       return ""
 
     return resposta

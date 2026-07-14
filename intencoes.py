@@ -90,40 +90,15 @@ def _tem_palavra(texto: str, palavra: str) -> bool:
 
 
 def pede_encerramento(mensagem: str) -> bool:
-    texto = _normalizar_texto(mensagem)
-    if not texto:
-        return False
-
-    if any(frase in texto for frase in PHRASES_PEDIR_ENCERRAMENTO):
-        return True
-
-    if "emily" in texto:
-        return any(
-            _tem_palavra(texto, palavra)
-            for palavra in (
-                "fechar",
-                "encerrar",
-                "desligar",
-                "finalizar",
-                "sair",
-            )
-        )
-
-    return any(_tem_palavra(texto, palavra) for palavra in WORDS_PEDIR_ENCERRAMENTO)
+    """Desativado: a Emily não se encerra mais por comando de voz.
+    Mantido para compatibilidade com chamadas antigas."""
+    return False
 
 
 def confirma_encerramento(mensagem: str) -> bool:
-    texto = _normalizar_texto(mensagem)
-    if not texto:
-        return False
-
-    if any(frase in texto for frase in PHRASES_CONFIRMACAO_NEGATIVA):
-        return False
-
-    if any(frase in texto for frase in PHRASES_CONFIRMACAO_POSITIVA):
-        return True
-
-    return any(_tem_palavra(texto, palavra) for palavra in WORDS_CONFIRMACAO_POSITIVA)
+    """Desativado: a Emily não se encerra mais por comando de voz.
+    Mantido para compatibilidade com chamadas antigas."""
+    return False
 
     
 # ──────────────────────────────────────────────
