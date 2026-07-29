@@ -9,6 +9,7 @@ import interface
 import intencoes
 import memoria
 import modelo
+import navegador
 import pesquisa
 import visao
 import voz
@@ -19,6 +20,14 @@ import servidor
 import notificacoes
 import agente_ui
 import agente_jogo
+
+import unicodedata as _unicodedata
+
+def _normalizar_simples(t: str) -> str:
+    """Remove acentos e coloca em minúsculas — usado para comparar frases."""
+    t = _unicodedata.normalize("NFD", t)
+    t = "".join(c for c in t if _unicodedata.category(c) != "Mn")
+    return t.lower().strip()
 
 mem = memoria.carregar_memoria()
 modelo.atualizar_memoria(mem)
@@ -524,14 +533,55 @@ def processar_texto_digitado(texto):
                 return
 
             elif acao_fb == "ver_tela":
+                # ── Verifica primeiro se é "ler página do navegador" ──
+                # Frases que indicam leitura de página web, não captura de tela
+                _FRASES_LER_PAGINA = (
+                    "le essa pagina", "le a pagina", "le a pagina pra mim",
+                    "le essa pagina pra mim", "le o site", "le o conteudo",
+                    "le o conteudo dessa pagina", "le o que ta escrito",
+                    "le o que esta escrito", "le isso pra mim",
+                    "o que e essa pagina", "do que se trata",
+                    "do que trata essa pagina", "resume essa pagina",
+                    "resume o site", "resume o conteudo",
+                    "o que esse site diz", "o que ta escrito aqui",
+                    "o que esta escrito aqui", "analisa essa pagina",
+                    "o que e isso que eu to lendo", "me explica essa pagina",
+                    "qual o assunto dessa pagina", "qual o contexto",
+                    "qual e o assunto", "sobre o que e essa pagina",
+                    "sobre o que e isso", "explica essa pagina",
+                    "me fala sobre essa pagina",
+                )
+                _texto_nav = _normalizar_simples(texto)
+                _eh_ler_pagina = any(f in _texto_nav for f in _FRASES_LER_PAGINA)
+
+                if _eh_ler_pagina and navegador.esta_conectado():
+                    # Rota para ler_pagina via extensão
+                    janela.atualizar_status("ouvindo", "Lendo a página...")
+                    voz.falar("Deixa eu ler essa página pra você!")
+                    resultado_nav = automacao.executar_comando(
+                        f"lê essa página e responde: {texto}",
+                        callback_falar=voz.falar,
+                    )
+                    if resultado_nav:
+                        janela.atualizar_status("falando", resultado_nav)
+                        discord_bot.atualizar_status_discord("falando")
+                        voz.falar(resultado_nav)
+                    restaurar_status()
+                    emily_ocupada.clear()
+                    return
+
                 # ── Ver/analisar a tela — NÃO usa agente_ui, só captura e descreve ──
                 frase_ver = modelo.gerar_frase_analisando_tela(texto)
                 janela.atualizar_status("ouvindo", "Olhando a tela...")
                 voz.falar(frase_ver)
+                # Registra o pedido do usuário no histórico ANTES de analisar
+                modelo.historico.append({"role": "user", "content": texto})
+                modelo._limitar_historico()
                 imagem_tela = visao.capturar_tela()
                 if imagem_tela:
                     pergunta_tela = param_fb if param_fb else texto
-                    resposta_tela = modelo.analisar_tela_com_pergunta(imagem_tela, pergunta_tela)
+                    # analisar_tela_com_pergunta já registra a resposta no histórico
+                    resposta_tela = modelo.analisar_tela_com_pergunta(imagem_tela, pergunta_tela) or "Não consegui analisar a tela agora, Vitor."
                 else:
                     resposta_tela = "Não consegui capturar a tela agora, Vitor."
                 janela.atualizar_status("falando", resposta_tela)
@@ -649,9 +699,69 @@ servidor.definir_callback(processar_texto_digitado)
 # Conecta a voz da Emily ao servidor web: toda fala vira áudio no celular também
 voz.definir_callback_audio(servidor.receber_fala)
 
+
+# ─────────────────────────────────────────────────────────────────
+# NGROK — sobe automaticamente junto com a Emily
+# ─────────────────────────────────────────────────────────────────
+
+def iniciar_ngrok(porta: int = 5000) -> None:
+    """
+    Sobe o ngrok em background e exibe a URL pública no terminal.
+    Se o ngrok não estiver instalado ou falhar, loga o aviso e segue normalmente.
+    """
+    import subprocess
+    import urllib.request
+    import json as _json
+
+    try:
+        # Sobe o ngrok em background (sem travar o terminal)
+        subprocess.Popen(
+            ["ngrok", "http", str(porta)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        print("[NGROK] Aguardando o ngrok estabilizar...")
+
+        # Aguarda até 10 segundos para o ngrok subir
+        url_publica = None
+        for _ in range(10):
+            time.sleep(1)
+            try:
+                with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as resp:
+                    dados = _json.loads(resp.read().decode())
+                    tunnels = dados.get("tunnels", [])
+                    for t in tunnels:
+                        if t.get("proto") == "https":
+                            url_publica = t["public_url"]
+                            break
+                    if url_publica:
+                        break
+            except Exception:
+                # ngrok ainda não subiu, tenta de novo
+                continue
+
+        if url_publica:
+            print(f"\n{'='*55}")
+            print(f"  [NGROK] URL pública: {url_publica}")
+            print(f"{'='*55}\n")
+        else:
+            print("[NGROK] Aviso: não foi possível obter a URL pública. Verifique se o ngrok está instalado e autenticado.")
+
+    except FileNotFoundError:
+        print("[NGROK] Aviso: ngrok não encontrado. Instale em https://ngrok.com e adicione ao PATH.")
+    except Exception as erro_ngrok:
+        print(f"[NGROK] Aviso: falha ao iniciar o ngrok — {erro_ngrok}")
+
+
+# Inicia o ngrok antes das threads principais
+iniciar_ngrok()
+
 thread_servidor = threading.Thread(target=servidor.iniciar_servidor, daemon=True)
 thread_servidor.start()
 
+# ─── NAVEGADOR (WebSocket extensão Chrome/Brave) ───
+navegador.iniciar_servidor_websocket()
 
 # ─────────────────────────────────────────────────────────────────
 # CALLBACK DO DISCORD
@@ -780,7 +890,7 @@ def executar_leitura_de_tela():
         voz.falar(resposta)
 
     restaurar_status()
-
+    
 
 def rodar_emily():
     global modo_escrito_ativo
@@ -1170,10 +1280,14 @@ def rodar_emily():
                     frase_ver = modelo.gerar_frase_analisando_tela(entrada)
                     janela.atualizar_status("ouvindo", "Olhando a tela...")
                     voz.falar(frase_ver)
+                    # Registra o pedido do usuário no histórico ANTES de analisar
+                    modelo.historico.append({"role": "user", "content": entrada})
+                    modelo._limitar_historico()
                     imagem_tela = visao.capturar_tela()
                     if imagem_tela:
                         pergunta_tela = param_fb if param_fb else entrada
-                        resposta_tela = modelo.analisar_tela_com_pergunta(imagem_tela, pergunta_tela)
+                        # analisar_tela_com_pergunta já registra a resposta no histórico
+                        resposta_tela = modelo.analisar_tela_com_pergunta(imagem_tela, pergunta_tela) or "Não consegui analisar a tela agora, Vitor."
                     else:
                         resposta_tela = "Não consegui capturar a tela agora, Vitor."
                     janela.atualizar_status("falando", resposta_tela)
@@ -1293,6 +1407,7 @@ def loop_visao():
     COOLDOWN_COMENTARIO = 1
     ultimo_comentario = 0
     ultimo_evento_jogo = ""
+    assinatura_anterior = None
 
     while True:
         try:
@@ -1312,18 +1427,45 @@ def loop_visao():
                 time.sleep(2)
                 continue
 
-            # Captura rápida: 2 frames com intervalo mínimo, igual ao agente_ui
+            # ── Porteiro barato: só chama LLM se a tela mudou de verdade ──
+            # Antes daqui a Emily queimava uma chamada de visão a cada ~4,5s
+            # olhando tela parada, e a resposta era NAO na esmagadora maioria.
+            frame_triagem = visao.capturar_tela_triagem()
+            if not frame_triagem:
+                time.sleep(2)
+                continue
+
+            assinatura_atual = visao.assinatura_frame(frame_triagem)
+            if not visao.tela_mudou(assinatura_anterior, assinatura_atual):
+                assinatura_anterior = assinatura_atual
+                time.sleep(2)
+                continue
+            assinatura_anterior = assinatura_atual
+
+            # A triagem roda no frame de baixa resolução (~307 tokens em vez
+            # de ~1229). A análise de verdade continua em resolução cheia.
+            if modo_jogo_ativo.is_set():
+                vale_comentar = modelo.triar_tela_jogo(frame_triagem)
+            else:
+                vale_comentar = modelo.triar_tela(frame_triagem)
+
+            if not vale_comentar:
+                time.sleep(3)
+                continue
+
+            # Só agora paga a captura em resolução cheia
             imagens = visao.capturar_sequencia_telas_rapida(quantidade=2, intervalo=0.3)
-            frame_atual = imagens[0]
+            frame_atual = imagens[0] if imagens else None
+            if not frame_atual:
+                time.sleep(2)
+                continue
 
             if modo_jogo_ativo.is_set():
-                vale_comentar = modelo.triar_tela_jogo(frame_atual)
-                comentario = modelo.analisar_tela_jogo(frame_atual, contexto=[ultimo_evento_jogo]) if vale_comentar else None
+                comentario = modelo.analisar_tela_jogo(frame_atual, contexto=[ultimo_evento_jogo])
             else:
-                vale_comentar = modelo.triar_tela(frame_atual)
-                comentario = modelo.analisar_sequencia_telas(imagens) if vale_comentar else None
+                comentario = modelo.analisar_sequencia_telas(imagens)
 
-            if not vale_comentar or not comentario:
+            if not comentario:
                 time.sleep(3)
                 continue
 
@@ -1353,7 +1495,7 @@ def loop_visao():
         except Exception as erro:
             print(f"Erro no loop de visão: {erro}")
             time.sleep(5)
-
+            
 
 def toggle_visao():
     if visao_ativa.is_set():

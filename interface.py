@@ -13,16 +13,17 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QTextEdit,
-    QSizePolicy, QGridLayout, QGraphicsDropShadowEffect,
+    QSizePolicy, QGridLayout, QGraphicsDropShadowEffect, QScrollBar,
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, pyqtSignal, QObject, QPoint, QEvent,
+    Qt, QTimer, pyqtSignal, QObject, QPoint, QEvent, QMimeData,
+    QByteArray, QBuffer, QIODevice,
 )
 from PyQt6.QtWidgets import QFileIconProvider
 from PyQt6.QtCore import QFileInfo
 from PyQt6.QtGui import (
     QFont, QColor, QPixmap, QPainter, QPen, QBrush,
-    QPainterPath, QIcon, QCursor,
+    QPainterPath, QIcon, QCursor, QDragEnterEvent, QDropEvent, QClipboard,
 )
 
 if getattr(sys, 'frozen', False):
@@ -962,17 +963,60 @@ class PainelEmily(QWidget):
         self._add_chat_msg("emily","Oi Vitor! Tô aqui, pode falar 😊")
         return sc
 
+    # ── Área de preview de arquivos/imagens pendentes ──────────
+
+    def _build_preview_area(self):
+        """Área horizontal rolável com thumbnails dos arquivos pendentes."""
+        self._preview_scroll = QScrollArea()
+        self._preview_scroll.setFixedHeight(72)
+        self._preview_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._preview_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._preview_scroll.setWidgetResizable(True)
+        self._preview_scroll.setStyleSheet(f"""
+            QScrollArea {{ background:transparent; border:none; }}
+            QScrollBar:horizontal {{ height:3px; background:{BG_INPUT}; }}
+            QScrollBar::handle:horizontal {{ background:{BORDER}; border-radius:2px; }}
+        """)
+        self._preview_inner = QWidget()
+        self._preview_inner.setStyleSheet("background:transparent;")
+        self._preview_hlay = QHBoxLayout(self._preview_inner)
+        self._preview_hlay.setContentsMargins(0,4,0,4)
+        self._preview_hlay.setSpacing(6)
+        self._preview_hlay.addStretch()
+        self._preview_scroll.setWidget(self._preview_inner)
+        self._preview_scroll.setVisible(False)   # escondido até ter arquivos
+        return self._preview_scroll
+
     def _build_input_area(self):
+        # Inicializa a lista de arquivos pendentes
+        self._arquivos_pendentes = []   # lista de dicts: {id, path, is_image, widget}
+        self._prox_arq_id = 0
+
         area = QFrame()
         area.setStyleSheet(f"background:{BG_CENTER}; border-top:1px solid {BORDER};")
-        lay = QVBoxLayout(area); lay.setContentsMargins(14,10,14,10); lay.setSpacing(0)
+        lay = QVBoxLayout(area); lay.setContentsMargins(14,8,14,10); lay.setSpacing(6)
 
+        # ── Área de preview (aparece acima do input quando há arquivos) ──
+        lay.addWidget(self._build_preview_area())
+
+        # ── Caixa de input ──
         box = QFrame()
         box.setStyleSheet(f"background:{BG_INPUT}; border:1px solid {BORDER}; border-radius:10px;")
+        box.setAcceptDrops(True)
+        box.dragEnterEvent = self._drag_enter_input
+        box.dropEvent      = self._drop_input
         bl = QHBoxLayout(box); bl.setContentsMargins(6,5,6,5); bl.setSpacing(4)
 
-        for ico,tip,fn in [("📎","Anexar arquivo",lambda:self._abrir_arquivo()),
-                            ("🎁","Extras",None),("✨","Magia",None)]:
+        # Botão de anexo
+        self._btn_anexo = QPushButton("📎"); self._btn_anexo.setFixedSize(30,30)
+        self._btn_anexo.setFont(QFont("Segoe UI Emoji",13))
+        self._btn_anexo.setToolTip("Anexar arquivo (ou Ctrl+V para colar imagem)")
+        self._btn_anexo.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self._btn_anexo.setStyleSheet(f"background:transparent; color:{C_TEXT2}; border:none;")
+        self._btn_anexo.clicked.connect(self._abrir_arquivo)
+        bl.addWidget(self._btn_anexo)
+
+        for ico,tip,fn in [("🎁","Extras",None),("✨","Magia",None)]:
             b = QPushButton(ico); b.setFixedSize(30,30)
             b.setFont(QFont("Segoe UI Emoji",13)); b.setToolTip(tip)
             b.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -983,7 +1027,7 @@ class PainelEmily(QWidget):
         self._campo_texto = QTextEdit(); self._campo_texto.setFixedHeight(38)
         self._campo_texto.setFont(QFont("Segoe UI",10))
         self._campo_texto.setStyleSheet(f"QTextEdit {{ background:transparent; color:{C_TEXT}; border:none; padding:4px 2px; }}")
-        self._campo_texto.setPlaceholderText("Digite sua mensagem...")
+        self._campo_texto.setPlaceholderText("Digite ou cole uma imagem (Ctrl+V)...")
         self._campo_texto.installEventFilter(self)
         bl.addWidget(self._campo_texto, 1)
 
@@ -1006,6 +1050,144 @@ class PainelEmily(QWidget):
         self._btn_enviar.clicked.connect(self._enviar); bl.addWidget(self._btn_enviar)
         lay.addWidget(box)
         return area
+
+    # ── Gerenciamento de arquivos pendentes ─────────────────────
+
+    def _adicionar_arquivo_pendente(self, path: str):
+        """Adiciona um arquivo à fila de staging e cria seu card de preview."""
+        if len(self._arquivos_pendentes) >= 10:
+            return  # limite de 10 arquivos
+        arq_id = self._prox_arq_id
+        self._prox_arq_id += 1
+        ext = os.path.splitext(path)[1].lower()
+        is_image = ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp")
+
+        item = {"id": arq_id, "path": path, "is_image": is_image, "widget": None}
+        self._arquivos_pendentes.append(item)
+
+        # ── Cria o card de preview ──
+        card = QFrame()
+        card.setFixedSize(62, 62)
+        card.setStyleSheet(
+            f"background:{BG_CARD}; border:1px solid {PURPLE}; border-radius:8px;")
+        card.setObjectName(f"arq_card_{arq_id}")
+
+        cl = QVBoxLayout(card); cl.setContentsMargins(3,3,3,3); cl.setSpacing(2)
+
+        if is_image:
+            pix = QPixmap(path).scaled(
+                54, 42,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation)
+            img_lbl = QLabel(); img_lbl.setPixmap(pix)
+            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            img_lbl.setStyleSheet("background:transparent; border:none;")
+            cl.addWidget(img_lbl, 1)
+        else:
+            icon_map = {
+                ".pdf": "📄", ".py": "🐍", ".js": "📜", ".ts": "📜",
+                ".html": "🌐", ".css": "🎨", ".json": "📋",
+                ".txt": "📃", ".md": "📃", ".zip": "🗜", ".rar": "🗜",
+            }
+            ico_lbl = QLabel(icon_map.get(ext, "📎"))
+            ico_lbl.setFont(QFont("Segoe UI Emoji", 18))
+            ico_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            ico_lbl.setStyleSheet("background:transparent; border:none;")
+            cl.addWidget(ico_lbl, 1)
+
+        # Nome do arquivo truncado
+        nome_lbl = QLabel(os.path.basename(path)[:9] + ("…" if len(os.path.basename(path)) > 9 else ""))
+        nome_lbl.setFont(QFont("Segoe UI", 6))
+        nome_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        nome_lbl.setStyleSheet(f"color:{C_TEXT2}; background:transparent; border:none;")
+        cl.addWidget(nome_lbl)
+
+        # Botão X (overlay no canto superior direito)
+        btn_x = QPushButton("✕", card)
+        btn_x.setFixedSize(16, 16)
+        btn_x.move(46, 0)
+        btn_x.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_x.setStyleSheet(
+            f"QPushButton {{ background:{C_RED}; color:white; border-radius:8px; "
+            f"border:none; font-size:8pt; font-weight:bold; }}"
+            f"QPushButton:hover {{ background:#c0392b; }}")
+        btn_x.clicked.connect(lambda _, aid=arq_id: self._remover_arquivo_pendente(aid))
+
+        item["widget"] = card
+
+        # Insere antes do stretch
+        count = self._preview_hlay.count()
+        self._preview_hlay.insertWidget(count - 1, card)
+        self._atualizar_preview_visibilidade()
+
+    def _remover_arquivo_pendente(self, arq_id: int):
+        """Remove um arquivo pendente pelo id e destrói seu widget."""
+        for i, item in enumerate(self._arquivos_pendentes):
+            if item["id"] == arq_id:
+                w = item.get("widget")
+                if w:
+                    self._preview_hlay.removeWidget(w)
+                    w.setParent(None)
+                    w.deleteLater()
+                self._arquivos_pendentes.pop(i)
+                break
+        self._atualizar_preview_visibilidade()
+
+    def _atualizar_preview_visibilidade(self):
+        """Mostra ou esconde a preview area conforme houver arquivos pendentes."""
+        tem = len(self._arquivos_pendentes) > 0
+        self._preview_scroll.setVisible(tem)
+        # Atualiza visual do botão de anexo
+        self._btn_anexo.setStyleSheet(
+            f"background:transparent; color:{PURPLE_LT if tem else C_TEXT2}; border:none;"
+        )
+
+    def _limpar_arquivos_pendentes(self):
+        """Remove todos os arquivos pendentes e limpa a área de preview."""
+        for item in self._arquivos_pendentes:
+            w = item.get("widget")
+            if w:
+                self._preview_hlay.removeWidget(w)
+                w.setParent(None)
+                w.deleteLater()
+        self._arquivos_pendentes.clear()
+        self._atualizar_preview_visibilidade()
+
+    # ── Drag & Drop na caixa de input ───────────────────────────
+
+    def _drag_enter_input(self, e):
+        if e.mimeData().hasUrls() or e.mimeData().hasImage():
+            e.acceptProposedAction()
+
+    def _drop_input(self, e):
+        if e.mimeData().hasUrls():
+            for url in e.mimeData().urls():
+                path = url.toLocalFile()
+                if path and os.path.isfile(path):
+                    self._adicionar_arquivo_pendente(path)
+            e.acceptProposedAction()
+        elif e.mimeData().hasImage():
+            self._colar_imagem_do_clipboard_mime(e.mimeData())
+            e.acceptProposedAction()
+
+    # ── Clipboard paste (Ctrl+V) ────────────────────────────────
+
+    def _colar_imagem_do_clipboard_mime(self, mime: QMimeData):
+        """Salva a imagem do clipboard/drag como arquivo temporário e adiciona ao staging."""
+        pix = QPixmap()
+        if not pix.loadFromData(mime.data("image/png")):
+            img = mime.imageData()
+            if img is None:
+                return
+            pix = QPixmap.fromImage(img)
+        if pix.isNull():
+            return
+        import tempfile, time as _time
+        tmp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads_emily")
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_path = os.path.join(tmp_dir, f"clipboard_{int(_time.time()*1000)}.png")
+        pix.save(tmp_path, "PNG")
+        self._adicionar_arquivo_pendente(tmp_path)
 
     # ── Sidebar direita ─────────────────────────────────────────
 
@@ -1340,30 +1522,92 @@ class PainelEmily(QWidget):
             self._chat_scroll.verticalScrollBar().maximum()))
 
     def eventFilter(self, obj, event):
-        if obj is self._campo_texto and event.type()==QEvent.Type.KeyPress:
-            if event.key()==Qt.Key.Key_Return and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier):
-                self._enviar(); return True
+        if obj is self._campo_texto:
+            # Enter sem Shift → enviar
+            if event.type() == QEvent.Type.KeyPress:
+                if (event.key() == Qt.Key.Key_Return
+                        and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)):
+                    self._enviar()
+                    return True
+
+            # Ctrl+V → intercepta se tiver imagem no clipboard
+            if event.type() == QEvent.Type.KeyPress:
+                if (event.key() == Qt.Key.Key_V
+                        and (event.modifiers() & Qt.KeyboardModifier.ControlModifier)):
+                    clipboard = QApplication.clipboard()
+                    mime = clipboard.mimeData()
+                    if mime and (mime.hasImage() or mime.hasFormat("image/png")
+                                 or mime.hasFormat("image/bmp")):
+                        self._colar_imagem_do_clipboard_mime(mime)
+                        return True   # consome o evento, não insere texto
+                    # sem imagem → deixa o paste de texto normal acontecer
+
         return super().eventFilter(obj, event)
 
     def _enviar(self):
         txt = self._campo_texto.toPlainText().strip()
-        if not txt: return
-        self._campo_texto.clear(); self._add_chat_msg("user",txt)
-        if getattr(self,"_callback_texto",None):
-            threading.Thread(target=self._callback_texto,args=(txt,),daemon=True).start()
+        tem_arquivos = len(getattr(self, "_arquivos_pendentes", [])) > 0
+
+        if not txt and not tem_arquivos:
+            return
+
+        # ── 1) Envia arquivos do staging ──
+        if tem_arquivos:
+            arquivos_snap = list(self._arquivos_pendentes)
+
+            # Mostra no chat: imagens primeiro, depois arquivos genéricos
+            for arq in arquivos_snap:
+                if arq["is_image"]:
+                    self._add_img_msg(arq["path"], "user")
+                else:
+                    self._add_chat_msg("user", f"📎 {os.path.basename(arq['path'])}")
+
+            # Se tiver texto junto, mostra também
+            if txt:
+                self._add_chat_msg("user", txt)
+
+            self._campo_texto.clear()
+            self._limpar_arquivos_pendentes()
+
+            # Repassa cada arquivo ao callback
+            for arq in arquivos_snap:
+                path = arq["path"]
+                if getattr(self, "_callback_arquivo", None):
+                    threading.Thread(
+                        target=self._callback_arquivo,
+                        args=(path,),
+                        daemon=True
+                    ).start()
+
+            # Se tiver texto também, passa ao callback de texto
+            if txt and getattr(self, "_callback_texto", None):
+                threading.Thread(
+                    target=self._callback_texto,
+                    args=(txt,),
+                    daemon=True
+                ).start()
+            return
+
+        # ── 2) Só texto ──
+        self._campo_texto.clear()
+        self._add_chat_msg("user", txt)
+        if getattr(self, "_callback_texto", None):
+            threading.Thread(target=self._callback_texto, args=(txt,), daemon=True).start()
 
     def _abrir_arquivo(self):
+        """Abre o seletor de arquivo e adiciona ao staging (preview) em vez de enviar direto."""
         from PyQt6.QtWidgets import QFileDialog
-        path,_ = QFileDialog.getOpenFileName(self,"Anexar arquivo","",
-            "Imagens (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;Código (*.py *.js *.ts *.html *.css *.json *.txt *.md);;Todos (*.*)")
-        if not path: return
-        ext = os.path.splitext(path)[1].lower()
-        if ext in (".png",".jpg",".jpeg",".gif",".bmp",".webp"):
-            self._add_img_msg(path,"user")
-        else:
-            self._add_chat_msg("user",f"📎 {os.path.basename(path)}")
-        if getattr(self,"_callback_arquivo",None):
-            threading.Thread(target=self._callback_arquivo,args=(path,),daemon=True).start()
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Anexar arquivo(s)", "",
+            "Imagens (*.png *.jpg *.jpeg *.gif *.bmp *.webp);;"
+            "Código (*.py *.js *.ts *.html *.css *.json *.txt *.md);;"
+            "Documentos (*.pdf *.doc *.docx);;"
+            "Compactados (*.zip *.rar *.7z);;"
+            "Todos (*.*)"
+        )
+        for path in paths:
+            if path:
+                self._adicionar_arquivo_pendente(path)
 
     def _ativar_ptt(self):
         def _r():

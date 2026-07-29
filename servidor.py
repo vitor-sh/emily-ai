@@ -11,6 +11,7 @@ A função processar_texto_digitado() do main.py é injetada aqui
 pelo próprio main.py na hora de iniciar o servidor.
 """
 
+import base64
 import io
 import os
 import queue
@@ -28,6 +29,11 @@ _callback_processar = None
 # Guarda as últimas falas da Emily pra serem consumidas pelo celular.
 MAX_FALAS_NA_FILA = 50
 _falas: queue.Queue = queue.Queue(maxsize=MAX_FALAS_NA_FILA)
+
+# Fila de ações destinadas ao Android via Tasker.
+# Cada item é um dict: { "acao": str, "dados": dict }
+MAX_ACOES_ANDROID = 50
+_fila_acoes_android: queue.Queue = queue.Queue(maxsize=MAX_ACOES_ANDROID)
 
 def definir_callback(fn):
     """Chamado pelo main.py para conectar o servidor à Emily."""
@@ -267,6 +273,202 @@ def status():
         "ok": True,
         "emily_pronta": pronto,
         "mensagem": "Emily online!" if pronto else "Aguardando Emily iniciar..."
+    })
+
+
+# ─────────────────────────────────────────────────────────────────
+# UPLOAD DE ARQUIVOS / IMAGENS
+# ─────────────────────────────────────────────────────────────────
+
+# Pasta onde os uploads ficam salvos temporariamente
+_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads_emily")
+
+def _garantir_pasta_upload():
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+
+
+@app.route("/upload", methods=["POST"])
+def upload_arquivo():
+    """
+    Recebe arquivos (imagens, documentos, etc.) enviados pelo celular.
+
+    Aceita duas formas:
+      1. multipart/form-data  — campo 'arquivo' com o arquivo binário
+                                campo 'texto' (opcional) com mensagem adicional
+      2. application/json     — { "nome": "foto.png", "dados": "<base64>",
+                                   "tipo": "image/png", "texto": "opcional" }
+
+    Salva o arquivo em uploads_emily/ e repassa o texto + caminho à Emily.
+    """
+    _garantir_pasta_upload()
+
+    nome_arquivo  = None
+    caminho_final = None
+    texto_extra   = ""
+
+    # ── Forma 1: multipart/form-data ──
+    if request.content_type and "multipart/form-data" in request.content_type:
+        arquivo = request.files.get("arquivo")
+        texto_extra = request.form.get("texto", "").strip()
+
+        if not arquivo or arquivo.filename == "":
+            return jsonify({"ok": False, "erro": "Nenhum arquivo enviado."}), 400
+
+        # Sanitiza o nome do arquivo
+        nome_base  = os.path.basename(arquivo.filename)
+        nome_seguro = f"{int(time.time())}_{nome_base}"
+        caminho_final = os.path.join(_UPLOAD_DIR, nome_seguro)
+        arquivo.save(caminho_final)
+        nome_arquivo = nome_base
+
+    # ── Forma 2: JSON com base64 ──
+    elif request.content_type and "application/json" in request.content_type:
+        dados = request.get_json(silent=True)
+        if not dados or "dados" not in dados:
+            return jsonify({"ok": False, "erro": "Campos 'nome' e 'dados' são obrigatórios."}), 400
+
+        nome_arquivo  = dados.get("nome", f"arquivo_{int(time.time())}")
+        dados_b64     = dados.get("dados", "")
+        texto_extra   = dados.get("texto", "").strip()
+
+        # Remove prefixo data URI se houver (ex: "data:image/png;base64,...")
+        if "," in dados_b64:
+            dados_b64 = dados_b64.split(",", 1)[1]
+
+        try:
+            conteudo_bytes = base64.b64decode(dados_b64)
+        except Exception:
+            return jsonify({"ok": False, "erro": "Base64 inválido."}), 400
+
+        nome_seguro   = f"{int(time.time())}_{os.path.basename(nome_arquivo)}"
+        caminho_final = os.path.join(_UPLOAD_DIR, nome_seguro)
+        with open(caminho_final, "wb") as f:
+            f.write(conteudo_bytes)
+
+    else:
+        return jsonify({"ok": False, "erro": "Content-Type não suportado. Use multipart/form-data ou application/json."}), 415
+
+    if _callback_processar is None:
+        return jsonify({"ok": False, "erro": "Emily ainda não iniciou. Tenta em alguns segundos."}), 503
+
+    # Monta a mensagem que será passada à Emily
+    if texto_extra:
+        mensagem = f"[Arquivo recebido: {nome_arquivo}] {texto_extra} — caminho: {caminho_final}"
+    else:
+        mensagem = f"[Arquivo recebido: {nome_arquivo}] — caminho: {caminho_final}"
+
+    threading.Thread(
+        target=_callback_processar,
+        args=(mensagem,),
+        daemon=True
+    ).start()
+
+    return jsonify({
+        "ok": True,
+        "mensagem": f'Arquivo "{nome_arquivo}" recebido com sucesso.',
+        "caminho": caminho_final,
+    })
+
+
+# ─────────────────────────────────────────────────────────────────
+# INTEGRAÇÃO COM TASKER (ANDROID)
+# ─────────────────────────────────────────────────────────────────
+
+def enviar_acao_android(acao: str, dados: dict) -> None:
+    """
+    Coloca uma ação na fila pra o Tasker buscar via polling em /android/acao.
+    Chamada por outros módulos da Emily quando quiser pedir algo ao Android.
+
+    Exemplo:
+        enviar_acao_android("notificar", {"titulo": "Emily", "texto": "Pronto!"})
+    """
+    item = {"acao": acao, "dados": dados}
+    try:
+        # Se a fila estiver cheia, descarta a ação mais antiga
+        if _fila_acoes_android.full():
+            try:
+                _fila_acoes_android.get_nowait()
+            except queue.Empty:
+                pass
+        _fila_acoes_android.put_nowait(item)
+    except queue.Full:
+        pass
+
+
+@app.route("/android/acao")
+def android_proxima_acao():
+    """
+    Polling do Tasker: retorna a próxima ação pendente pra executar no Android.
+    Se não houver nada na fila, retorna 204 (sem conteúdo).
+
+    Resposta esperada:
+        { "acao": "notificar", "dados": { "titulo": "...", "texto": "..." } }
+    """
+    try:
+        item = _fila_acoes_android.get_nowait()
+        return jsonify(item)
+    except queue.Empty:
+        return ("", 204)
+
+
+@app.route("/android/evento", methods=["POST"])
+def android_receber_evento():
+    """
+    Recebe eventos do Android enviados pelo Tasker.
+    Espera JSON: { "tipo": "notificacao" | "bateria", "dados": { ... } }
+
+    Tipos suportados:
+      - notificacao: { "app": "WhatsApp", "titulo": "Fulano", "texto": "oi" }
+      - bateria:     { "nivel": 42 }
+    """
+    dados = request.get_json(silent=True)
+
+    if not dados or "tipo" not in dados:
+        return jsonify({"ok": False, "erro": "Manda os campos 'tipo' e 'dados' no JSON."}), 400
+
+    tipo = dados.get("tipo", "").strip()
+    info = dados.get("dados", {})
+
+    if _callback_processar is None:
+        return jsonify({"ok": False, "erro": "Emily ainda não iniciou. Tenta em alguns segundos."}), 503
+
+    # Formata a mensagem em português conforme o tipo do evento
+    if tipo == "notificacao":
+        app_nome = info.get("app", "Aplicativo desconhecido")
+        titulo   = info.get("titulo", "")
+        texto    = info.get("texto", "")
+        if titulo and texto:
+            mensagem = f"[Android] Notificação de {app_nome}: {titulo} disse: {texto}"
+        elif texto:
+            mensagem = f"[Android] Notificação de {app_nome}: {texto}"
+        else:
+            mensagem = f"[Android] Nova notificação de {app_nome}."
+
+    elif tipo == "bateria":
+        nivel = info.get("nivel", "?")
+        mensagem = f"[Android] Nível de bateria do celular: {nivel}%"
+
+    else:
+        mensagem = f"[Android] Evento desconhecido '{tipo}': {info}"
+
+    # Processa em thread separada pra não travar a resposta HTTP
+    threading.Thread(
+        target=_callback_processar,
+        args=(mensagem,),
+        daemon=True
+    ).start()
+
+    return jsonify({"ok": True, "mensagem": f"Evento '{tipo}' recebido."})
+
+
+@app.route("/android/status")
+def android_status():
+    """Confirma que o servidor está pronto pra se comunicar com o Tasker."""
+    return jsonify({
+        "ok": True,
+        "tasker_pronto": True,
+        "acoes_pendentes": _fila_acoes_android.qsize(),
+        "mensagem": "Servidor Emily pronto para integração com Tasker."
     })
 
 

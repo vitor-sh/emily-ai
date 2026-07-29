@@ -4,22 +4,15 @@ import os
 import json
 from dotenv import load_dotenv
 load_dotenv()
+import random
 import re
 import threading
 import unicodedata
 from typing import Dict, List, Optional
 
 import memoria as mem_module
-from openai import OpenAI
-
-import boto3
-_client = boto3.client(
-    "bedrock-runtime",
-    region_name="us-east-1",
-    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-)
-
+import base64
+import llm
 import pesquisa
 import visao
 
@@ -172,18 +165,87 @@ system_prompt = f"""
 Você é a Emily, assistente pessoal do Vitor.
 {EMILY_PERSONALIDADE}
 Não dê respostas absurdamente longas o tempo todo. Avalie o contexto pra decidir se deve falar muito ou pouco.
-/no_think
 """.strip()
 
-OLLAMA_TEXT_MODEL = "us.anthropic.claude-sonnet-4-6"
-OLLAMA_VISION_MODEL = "us.anthropic.claude-sonnet-4-6"
-AGENTE_UI_MODEL = "us.anthropic.claude-sonnet-4-6"
+# ─────────────────────────────────────────────
+# ROTAS DE LLM
+#
+# Qual modelo cada tarefa usa NÃO fica aqui — fica na tabela ROTAS
+# do llm.py. Aqui só ficam os nomes das rotas que este módulo usa,
+# pra trocar de modelo ser edição de uma linha no llm.py.
+#
+# As constantes antigas OLLAMA_TEXT_MODEL / OLLAMA_VISION_MODEL /
+# AGENTE_UI_MODEL saíram: o nome mentia (falavam Ollama e apontavam
+# pro Puter) e o conceito mudou de "modelo" pra "rota".
+# ─────────────────────────────────────────────
+ROTA_CONVERSA = "conversa"
+ROTA_VISAO = "visao"
+ROTA_TRIAGEM_VISUAL = "triagem_visual"
+ROTA_AGENTE_UI = "agente_ui"
+ROTA_CLASSIFICADOR = "classificador"
+ROTA_COMANDO = "comando"
+ROTA_EXTRACAO = "extracao"
+ROTA_DISCORD = "discord"
+
 MAX_HISTORICO_MENSAGENS = 20
 HABILITAR_EXTRAÇÃO_AUTOMÁTICA_FATOS = os.getenv("EMILY_EXTRACT_FACTS", "0").strip() == "1"
 
 historico: List[Message] = []
 aguardando_resposta = False
 memoria_atual = mem_module.carregar_memoria()
+
+# ─────────────────────────────────────────────
+# PÁGINA FIXADA — contexto persistente de leitura de navegador
+# Fica no system prompt enquanto durar a sessão.
+# Não vai pro histórico rotativo, então não acumula a cada pergunta.
+# ─────────────────────────────────────────────
+_pagina_fixada: Optional[dict] = None  # {"titulo", "url", "conteudo"}
+_LIMITE_PAGINA_FIXADA = 80000          # chars mantidos no system prompt
+
+
+def fixar_pagina(titulo: str, url: str, conteudo: str) -> None:
+    """Fixa o contexto de uma página lida. Substituí qualquer página anterior."""
+    global _pagina_fixada
+    _pagina_fixada = {
+        "titulo":   titulo or "",
+        "url":      url or "",
+        "conteudo": conteudo[:_LIMITE_PAGINA_FIXADA] if conteudo else "",
+        "chars_total": len(conteudo) if conteudo else 0,
+    }
+    print(f"[PÁGINA FIXADA] '{titulo}' — {len(_pagina_fixada['conteudo']):,} chars fixados no system prompt")
+
+
+def limpar_pagina_fixada() -> None:
+    """Remove a página fixada da sessão."""
+    global _pagina_fixada
+    _pagina_fixada = None
+    print("[PÁGINA FIXADA] Contexto de página removido")
+
+
+def tem_pagina_fixada() -> bool:
+    return _pagina_fixada is not None
+
+
+def _bloco_pagina_fixada() -> str:
+    """Retorna o bloco de contexto da página pra injetar no system prompt."""
+    if not _pagina_fixada:
+        return ""
+    partes = []
+    partes.append("\n\n━━━ CONTEXTO DE PÁGINA LIDA ━━━")
+    if _pagina_fixada["titulo"]:
+        partes.append(f"Título: {_pagina_fixada['titulo']}")
+    if _pagina_fixada["url"]:
+        partes.append(f"URL: {_pagina_fixada['url']}")
+    total = _pagina_fixada["chars_total"]
+    lidos = len(_pagina_fixada["conteudo"])
+    if total > lidos:
+        partes.append(f"Conteúdo ({total:,} chars totais, mostrando {lidos:,}):")
+    else:
+        partes.append(f"Conteúdo ({total:,} chars):")
+    partes.append(_pagina_fixada["conteudo"])
+    partes.append("━━━ FIM DO CONTEXTO DE PÁGINA ━━━")
+    partes.append("Use esse contexto para responder qualquer pergunta do Vitor sobre essa página.")
+    return "\n".join(partes)
 
 
 
@@ -211,103 +273,71 @@ def _limitar_historico() -> None:
         historico = historico[-MAX_HISTORICO_MENSAGENS:]
 
 
-def _chamar_llm(messages, model=None, max_tokens=None, stream=False, vision=False):
-    import base64
-    import json
-
-    modelo_usado = model or OLLAMA_TEXT_MODEL
-    system_msg = None
-    msgs_anthropic = []
-
-    for msg in messages:
-        role = msg.get("role", "user")
-
-        if role == "system":
-            system_msg = msg["content"]
-            continue
-
-        if role == "user" and "images" in msg:
-            conteudo = [{"type": "text", "text": str(msg["content"] or "")}]
-            for img in msg["images"]:
-                if isinstance(img, bytes):
-                    img_b64 = base64.b64encode(img).decode("utf-8")
-                else:
-                    img_b64 = str(img)
-                conteudo.append({
-                    "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}
-                })
-            msgs_anthropic.append({"role": "user", "content": conteudo})
-
-        elif role == "user" and isinstance(msg["content"], list):
-            conteudo_novo = []
-            for item in msg["content"]:
-                if item.get("type") == "text":
-                    conteudo_novo.append({"type": "text", "text": item["text"]})
-                elif item.get("type") == "image_url":
-                    url = item["image_url"]["url"]
-                    if url.startswith("data:"):
-                        header, data = url.split(",", 1)
-                        media_type = header.split(":")[1].split(";")[0]
-                        conteudo_novo.append({
-                            "type": "image",
-                            "source": {"type": "base64", "media_type": media_type, "data": data}
-                        })
-                elif item.get("type") == "image":
-                    conteudo_novo.append(item)
-                else:
-                    conteudo_novo.append({"type": "text", "text": str(item)})
-            msgs_anthropic.append({"role": "user", "content": conteudo_novo})
-
-        else:
-            msgs_anthropic.append({
-                "role": role,
-                "content": str(msg["content"] or "")
-            })
-
-    body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": max_tokens or 1024,
-        "messages": msgs_anthropic,
-    }
-    if system_msg:
-        body["system"] = system_msg
-
-    if stream:
-        def gerador():
-            resposta = _client.invoke_model_with_response_stream(
-                modelId=modelo_usado,
-                body=json.dumps(body),
-            )
-            for event in resposta["body"]:
-                chunk = json.loads(event["chunk"]["bytes"])
-                if chunk.get("type") == "content_block_delta":
-                    delta = chunk.get("delta", {})
-                    if delta.get("type") == "text_delta":
-                        yield delta.get("text", "")
-        return gerador()
-
-    resposta = _client.invoke_model(
-        modelId=modelo_usado,
-        body=json.dumps(body),
-    )
-    resultado = json.loads(resposta["body"].read())
-    return resultado["content"][0]["text"] if resultado.get("content") else ""
-
-
-def chamar_llm_simples(prompt: str, max_tokens: int = 400) -> str:
+def _inferir_rota(mensagens_canonicas, max_tokens, tem_imagem: bool) -> str:
     """
-    Chama o LLM com uma mensagem única (sem histórico de conversa).
-    Usado pela memória para extração de fatos em background.
+    Descobre qual rota usar quando o call site não informa.
+
+    Existe pra que módulos externos que chamam _chamar_llm sem saber de
+    rota (automacao.py) continuem funcionando sem alteração. Regra: saída
+    minúscula é classificador; presença de imagem manda pra visão.
+    """
+    curto = max_tokens is not None and max_tokens <= 32
+    if tem_imagem:
+        return ROTA_TRIAGEM_VISUAL if curto else ROTA_VISAO
+    return ROTA_CLASSIFICADOR if curto else ROTA_CONVERSA
+
+
+def _chamar_llm(messages, model=None, max_tokens=None, stream=False, vision=False,
+                usar_pesquisa=False, rota=None):
+    """
+    Adaptador fino sobre llm.py. Toda a decisão de provedor, formato de fio,
+    rate limit e retry vive lá.
+
+    A assinatura é preservada de propósito: automacao.py importa essa função
+    direto em dois lugares e não deve precisar saber que o provedor mudou.
+
+    rota   — nome de uma rota da tabela ROTAS do llm.py. Se não vier, é inferida.
+    model  — força um modelo específico ignorando o da rota. Uso raro.
+    vision — aceito por compatibilidade histórica. Nunca fez nada: a presença
+             de imagem é detectada pela própria mensagem.
+    usar_pesquisa — aceito por compatibilidade. Era grounding nativo do
+             provedor antigo; a pesquisa da Emily hoje é o pesquisa.py.
+
+    Propaga ErroLLM quando a chamada falha de vez. Os call sites já têm
+    try/except próprio, mas agora o llm.py deixa o motivo no log em vez de
+    a Emily simplesmente emudecer.
+    """
+    canonicas = llm.normalizar_mensagens(messages)
+    tem_imagem = bool(vision) or any(m.imagens for m in canonicas)
+    rota_final = rota or _inferir_rota(canonicas, max_tokens, tem_imagem)
+
+    return llm.chamar(
+        canonicas,
+        rota_nome=rota_final,
+        max_tokens=max_tokens,
+        stream=stream,
+        modelo=model,
+    )
+
+
+def chamar_llm_simples(prompt: str, max_tokens: int = 300, rota: str = ROTA_EXTRACAO) -> str:
+    """
+    Um prompt de texto, uma resposta de texto. Usado pelo memoria.py na
+    deduplicação semântica de fatos e na extração de fatos da conversa.
+
+    Essa função era chamada pelo memoria.py em dois lugares e NÃO EXISTIA
+    neste módulo. Os dois call sites morriam com AttributeError engolido por
+    try/except, então a deduplicação semântica nunca rodou de verdade e a
+    extração de fatos sempre devolvia lista vazia.
+
+    Devolve "" em caso de falha porque o memoria.py trata resposta falsa
+    como "não sei" e cai na heurística — comportamento correto aqui. O
+    motivo do erro fica registrado no log pelo llm.py.
     """
     try:
-        msgs = [
-            {"role": "system", "content": "Você é um extrator de informações. Responda apenas com o que foi pedido."},
-            {"role": "user",   "content": prompt},
-        ]
-        return _chamar_llm(msgs, max_tokens=max_tokens) or ""
-    except Exception as e:
-        print(f"[MODELO] chamar_llm_simples erro: {e}")
+        return llm.chamar_texto(prompt, rota_nome=rota, max_tokens=max_tokens)
+    except llm.ErroLLM as e:
+        print(f"[MODELO] chamar_llm_simples falhou: {e}")
         return ""
 
 
@@ -321,6 +351,33 @@ def _contexto_tela_formatado() -> str:
         return ""
     linhas = "\n".join(f"- {item}" for item in historico_tela)
     return f"\n\nO que você já viu antes na tela:\n{linhas}"
+
+
+def _formatar_contexto_conversa_para_visao(historico_conversa: list = None, max_msgs: int = 10) -> str:
+    """
+    Formata as últimas mensagens da conversa principal para passar como contexto
+    às funções de visão/análise de tela. Assim a Emily não perde o fio da meada
+    quando analisa a tela no meio de uma conversa.
+    """
+    fonte = historico_conversa if historico_conversa is not None else historico
+    if not fonte:
+        return ""
+
+    ultimas = fonte[-max_msgs:]
+    linhas = []
+    for msg in ultimas:
+        role = msg.get("role", "")
+        content = str(msg.get("content", ""))[:300].strip()
+        if not content:
+            continue
+        if role == "user":
+            linhas.append(f"Vitor: {content}")
+        elif role == "assistant":
+            linhas.append(f"Emily: {content}")
+
+    if not linhas:
+        return ""
+    return "\n\nContexto da conversa atual (use para manter coerência):\n" + "\n".join(linhas)
 
 
 def _registrar_resposta_tela(resposta: str) -> None:
@@ -378,7 +435,7 @@ Responda NAO para tudo isso:
         resposta_texto = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
             max_tokens=16,
-            vision=True,
+            rota=ROTA_TRIAGEM_VISUAL,
         ).strip().upper()
         print(f"[DEBUG triagem] Resultado: {resposta_texto}")
         return "SIM" in resposta_texto
@@ -425,7 +482,7 @@ Responda NAO para TUDO o que for normal:
         resposta_texto = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
             max_tokens=16,
-            vision=True,
+            rota=ROTA_TRIAGEM_VISUAL,
         ).strip().upper()
         print(f"[DEBUG triagem jogo] Resultado: {resposta_texto}")
         return "SIM" in resposta_texto
@@ -460,9 +517,8 @@ REGRAS:
 
         resposta = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=256,
-            vision=True,
         )
 
         if _contem_silencio(resposta):
@@ -491,9 +547,8 @@ Não fale exatamente a mesma coisa duas vezes seguidas."""
 
         resposta = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=2048,
-            vision=True,
         )
 
         if _contem_silencio(resposta):
@@ -519,9 +574,8 @@ Analise a sequência inteira pra entender o que está acontecendo antes de comen
 
         resposta = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": imagens}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=2048,
-            vision=True,
         )
 
         print(f"[DEBUG SEQUENCIA] Resposta bruta: {resposta[:200]}")
@@ -540,19 +594,23 @@ Analise a sequência inteira pra entender o que está acontecendo antes de comen
 
 def analisar_tela_com_pergunta(imagem_base64, pergunta):
     try:
+        ctx_conversa = _formatar_contexto_conversa_para_visao()
         instrucao = f"""{EMILY_PERSONALIDADE_VISAO}
-{_contexto_tela_formatado()}
+{_contexto_tela_formatado()}{ctx_conversa}
 
 Analise essa print da tela e responda especificamente sobre isso: {pergunta}
+Leve em conta o contexto da conversa acima para manter coerência com o que já foi discutido.
 Responda de forma natural e no seu estilo."""
 
         resposta = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=2048,
-            vision=True,
         )
-        return resposta.strip()
+        resposta = resposta.strip()
+        if resposta:
+            _registrar_resposta_tela(resposta)
+        return resposta or None
     except Exception as e:
        print(f"[ERRO VISÃO] {e}")
        return None
@@ -577,7 +635,7 @@ Se não houver instruções ou passos claros visíveis, retorne exatamente: SEM_
         texto = _chamar_llm(
     [{"role": "user", "content": prompt, "images": [imagem_base64]}],
     max_tokens=512,
-    vision=True,
+    rota=ROTA_VISAO,
 ).strip()
         print(f"[DEBUG leitura_tela] Instruções extraídas:\n{texto}")
         return texto
@@ -590,32 +648,40 @@ def traduzir_tela(instrucao_usuario: str) -> str:
     """
     Captura a tela, identifica o texto que o usuário quer traduzir
     baseado na instrução dele, e retorna a tradução em português.
+    Registra o pedido e a resposta no histórico para manter coerência.
     """
     try:
         imagem = visao.capturar_tela()
         if not imagem:
             return "Não consegui capturar a tela agora, Vitor!"
 
-        prompt = f"""Você é a Emily. O Vitor pediu: "{instrucao_usuario}"
+        ctx_conversa = _formatar_contexto_conversa_para_visao()
+
+        prompt = f"""Você é a Emily. O Vitor pediu: "{instrucao_usuario}"{ctx_conversa}
 
 Analise a tela e identifique QUAL texto ele quer traduzir seguindo essa lógica:
 - Se ele disse "isso", "isso aqui", "esse texto" → procure pelo texto que está selecionado/destacado, ou o mais em evidência visualmente
 - Se ele mencionou ordem ("primeiro texto", "segundo parágrafo") → siga a ordem de cima pra baixo na tela
 - Se ele disse "tudo" ou "a tela" → traduza todos os textos visíveis em destaque
 
-Formato da resposta:
+Leve em conta o contexto da conversa acima para manter coerência.
 Fale APENAS a tradução em português, sem mostrar o texto original.
 Não escreva "Tradução:" antes, fale direto o conteúdo traduzido.
-
 Seja direta. Se não achar nenhum texto relevante, diz isso em uma frase."""
 
         resposta = _chamar_llm(
             [{"role": "user", "content": prompt, "images": [imagem]}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=1024,
-            vision=True,
         )
-        return resposta.strip() or "Não encontrei nenhum texto pra traduzir na tela, Vitor!"
+        resultado = resposta.strip() or "Não encontrei nenhum texto pra traduzir na tela, Vitor!"
+
+        # Registra no histórico para manter coerência
+        historico.append({"role": "user", "content": instrucao_usuario})
+        historico.append({"role": "assistant", "content": f"[Traduziu da tela]: {resultado}"})
+        _limitar_historico()
+
+        return resultado
 
     except Exception as e:
         print(f"[DEBUG tradução] Erro: {e}")
@@ -648,7 +714,20 @@ def decidir_proxima_acao_ui(
         cabecalho_fixo = f"{contexto_fixo.strip()}\n\n" if contexto_fixo and contexto_fixo.strip() else ""
 
         prompt = f"""{cabecalho_fixo}Você é a Emily, controlando o PC do Vitor por visão computacional.
-Você analisa uma print da tela em 1280x720 e decide a próxima ação de UI para atingir o objetivo.
+Você analisa uma print da tela e decide a próxima ação de UI para atingir o objetivo.
+
+COMO APONTAR NA TELA — LEIA COM ATENÇÃO:
+A print tem uma GRADE 10x10 desenhada em cima, com o nome de cada célula
+escrito no centro dela. As colunas são as letras A até J, da esquerda para a
+direita. As linhas são os números 0 até 9, de cima para baixo. Então a célula
+se chama LETRA + NÚMERO: A0 é o canto superior esquerdo, J9 é o canto inferior
+direito, E4 fica no meio da tela.
+
+Para apontar onde clicar, informe o campo "celula" com o nome da célula que
+está SOBRE o elemento que você quer. Leia o rótulo escrito na grade, não
+estime coordenada. Exemplo: {{"acao": "clicar", "celula": "B3"}}.
+
+Se o elemento estiver entre duas células, escolha a que cobre o CENTRO dele.
 
 OBJETIVO DO VITOR:
 {objetivo}
@@ -662,18 +741,18 @@ CONTEXTO DE TELAS/JANELAS RECENTES:
 RESPONDA EXCLUSIVAMENTE COM UM ÚNICO OBJETO JSON. Nenhum texto, análise ou explicação fora do JSON. Se você responder qualquer coisa que não seja JSON puro, o sistema vai falhar.
 
 Ações possíveis:
-- "clicar": x, y (coordenadas dentro de 1280x720), descricao
-- "clicar_direito": x, y, descricao
-- "duplo_clique": x, y, descricao
-- "clicar_tarefa": x, y (coordenadas aproximadas na barra de tarefas), descricao, texto (nome do app). Preferido para alternar janelas abertas.
+- "clicar": celula (ex: "B3"), descricao
+- "clicar_direito": celula, descricao
+- "duplo_clique": celula, descricao
+- "clicar_tarefa": celula (célula na barra de tarefas, linha 9), descricao, texto (nome do app). Preferido para alternar janelas abertas.
 - "ativar_janela": texto (nome do app/janela a trazer para frente). Use quando souber o nome do app.
-- "digitar": x, y (opcional), texto (a palavra COMPLETA de uma vez)
-- "digitar_unicode": x, y (opcional), texto
+- "digitar": celula (opcional), texto (a palavra COMPLETA de uma vez)
+- "digitar_unicode": celula (opcional), texto
 - "pressionar": texto (enter, tab, esc, backspace), vezes (opcional, número de vezes pra repetir)
 - "apagar_tudo": descricao (seleciona tudo e apaga - útil pra limpar campo de texto de uma vez)
 - "atalho": texto (ctrl+v, alt+f4, ctrl+a)
-- "rolar": direcao (cima/baixo), x, y (coordenadas do CENTRO da área de conteúdo — obrigatório). O sistema já define a quantidade correta automaticamente, não precisa informar "quantidade".
-- "mover_mouse": x, y, descricao
+- "rolar": direcao (cima/baixo), celula (célula no CENTRO da área de conteúdo — obrigatório). O sistema já define a quantidade correta automaticamente, não precisa informar "quantidade".
+- "mover_mouse": celula, descricao
 - "esperar": tempo (segundos, padrão 1.5)
 - "trocar_janela": descricao (só se tiver CERTEZA de que são só duas janelas)
 - "abrir_app": texto (nome do app, ex: chrome, steam, edge)
@@ -681,11 +760,11 @@ Ações possíveis:
 - "erro": mensagem
 
 REGRAS CRÍTICAS:
-1. Coordenadas x, y sempre dentro de 1280x720.
-2. Ao clicar, retorne o CENTRO do botão/elemento, nunca a borda.
-3. A barra de tarefas fica na parte inferior (y geralmente entre 680 e 720).
-4. ABRIR/TROCAR APPS — NUNCA DESISTA: Se a primeira tentativa falhou, tente outra abordagem na seguinte ordem: (a) "ativar_janela" com o nome exato do app, (b) "abrir_app" com o nome do app — o sistema já conhece os executáveis, (c) "atalho" com "win+d" pra mostrar área de trabalho e procurar o ícone lá, (d) "clicar_tarefa" com coordenadas aproximadas do ícone na barra de tarefas (y=710, x varia), (e) "atalho" com "win" pra abrir menu Iniciar e digitar o nome. NUNCA tente abrir apps pelo Win+R ou barra de endereço do navegador. Se o histórico mostrar "FALHA na ação", você DEVE tentar uma das alternativas acima, nunca repita a ação que falhou.
-5. Para formulários, clique no centro de cada campo antes de digitar.
+1. Use SEMPRE "celula" com o nome lido da grade (A0 até J9). Nunca invente coordenada x, y.
+2. Ao clicar, escolha a célula que cobre o CENTRO do botão/elemento, nunca a borda.
+3. A barra de tarefas fica na última linha da grade, a linha 9 (células A9 até J9).
+4. ABRIR/TROCAR APPS — NUNCA DESISTA: Se a primeira tentativa falhou, tente outra abordagem na seguinte ordem: (a) "ativar_janela" com o nome exato do app, (b) "abrir_app" com o nome do app — o sistema já conhece os executáveis, (c) "atalho" com "win+d" pra mostrar área de trabalho e procurar o ícone lá, (d) "clicar_tarefa" com a célula do ícone na barra de tarefas (linha 9), (e) "atalho" com "win" pra abrir menu Iniciar e digitar o nome. NUNCA tente abrir apps pelo Win+R ou barra de endereço do navegador. Se o histórico mostrar "FALHA na ação", você DEVE tentar uma das alternativas acima, nunca repita a ação que falhou.
+5. Para formulários, clique na célula do centro de cada campo antes de digitar.
 6. Use "digitar_unicode" para textos com acentos/cedilha.
 7. Use "esperar" após carregamentos de tela.
 8. Se não encontrar o elemento depois de tentar alternar janela/abrir app, retorne erro.
@@ -697,7 +776,7 @@ REGRAS CRÍTICAS:
 14. Quando uma palavra de 5 letras estiver completa e correta na linha atual do jogo, o próximo passo é SEMPRE {{"acao": "pressionar", "texto": "enter"}}.
 15. Em jogos de palavras (como Termo/Wordle): cada tentativa é uma palavra de 5 letras. Após digitar e confirmar com enter, o jogo mostra as cores (verde=certa, amarelo=posição errada, cinza=não existe). Use essa informação para escolher a próxima palavra inteligentemente.
 16. Se a palavra digitada foi REJEITADA pelo jogo (não sumiu da linha, ou apareceu erro "palavra não existe"), apague com backspace e tente OUTRA palavra válida.
-17. ROLAR A PÁGINA: Se o conteúdo que você precisa ver/acessar não está visível na tela (cortado embaixo, lista incompleta, botão abaixo do visível, página com scroll), use "rolar" com direcao "baixo" e SEMPRE inclua x, y apontando pro CENTRO da área de conteúdo (não na barra lateral). Exemplo: {{"acao": "rolar", "direcao": "baixo", "quantidade": 5, "x": 640, "y": 360, "descricao": "Rolar página pra ver mais conteúdo"}}
+17. ROLAR A PÁGINA: Se o conteúdo que você precisa ver/acessar não está visível na tela (cortado embaixo, lista incompleta, botão abaixo do visível, página com scroll), use "rolar" com direcao "baixo" e SEMPRE inclua a celula apontando pro CENTRO da área de conteúdo (não na barra lateral). Exemplo: {{"acao": "rolar", "direcao": "baixo", "celula": "E4", "descricao": "Rolar página pra ver mais conteúdo"}}
 18. AÇÕES SEM CONFIRMAÇÃO VISUAL: Quando você clica em opções de menu de contexto (Copiar, Recortar, Colar, Renomear, Excluir, etc.) e o menu desaparece depois, isso SIGNIFICA QUE A AÇÃO FOI BEM-SUCEDIDA. NÃO repita a mesma ação. Se o menu de contexto sumiu após o clique, a operação foi concluída com sucesso. O mesmo vale para Ctrl+C, Ctrl+X, Ctrl+V — se você executou o atalho, ASSUMA QUE FUNCIONOU e prossiga para o próximo passo (como navegar até a pasta destino e colar). Nunca repita copiar/recortar mais de uma vez.
 19. DOWNLOADS NO NAVEGADOR (Brave/Chrome): Após clicar pra baixar um arquivo, observe o ícone de download no canto SUPERIOR DIREITO da barra do navegador (uma setinha pra baixo ↓). Se ele ficar azul/colorido (mesmo que levemente), significa que um download está em andamento ou terminou. SEMPRE clique nesse ícone pra abrir o painel de downloads e verificar: (a) se o download começou, (b) se já terminou, (c) pra qual pasta foi. Se o arquivo não aparecer no painel, volte pra página e tente novamente. Só prossiga pro próximo passo quando CONFIRMAR que o download terminou (100% ou mostrando "Concluído"/"Abrir pasta").
 20. VERIFICAÇÃO PÓS-AÇÃO: Após executar uma ação importante (definir wallpaper, instalar algo, aplicar configuração), VERIFIQUE se funcionou indo ver o resultado. Ex: definiu wallpaper? Minimize tudo (Win+D) e olhe a área de trabalho. Instalou algo? Veja se aparece no menu. NÃO fique repetindo a mesma ação — se já clicou em "Definir como plano de fundo" uma vez, ASSUMA QUE FUNCIONOU e vá verificar o resultado.
@@ -706,7 +785,8 @@ REGRAS CRÍTICAS:
 23. VALIDAÇÃO VISUAL: Sempre que abrir/baixar/selecionar um arquivo ou imagem, OLHE O CONTEÚDO VISUALMENTE e confirme que corresponde ao objetivo. Ex: se o objetivo é "wallpaper da Frieren" e a imagem aberta mostra outro personagem (Gojo, Naruto, etc), esse NÃO é o arquivo certo — feche, delete se necessário, e volte pra encontrar/baixar o correto. Use seu conhecimento visual de personagens, objetos e contextos pra validar. NUNCA assuma que um arquivo é correto só pelo nome — sempre confirme visualmente.
 
 Exemplo:
-{{"acao": "clicar", "x": 640, "y": 360, "descricao": "Clicar no botão Confirmar"}}
+{{"acao": "clicar", "celula": "E4", "descricao": "Clicar no botão Confirmar"}}
+{{"acao": "clicar", "celula": "A9", "descricao": "Clicar no menu Iniciar"}}
 {{"acao": "pressionar", "texto": "backspace", "descricao": "Apagar letra errada"}}
 {{"acao": "digitar", "texto": "fundo", "descricao": "Digitar nova tentativa"}}
 {{"acao": "pressionar", "texto": "enter", "descricao": "Confirmar palavra"}}
@@ -714,9 +794,8 @@ Exemplo:
 
         resposta = _chamar_llm(
             [{"role": "user", "content": prompt, "images": [imagem_base64]}],
-            model=AGENTE_UI_MODEL,
+            rota=ROTA_AGENTE_UI,
             max_tokens=2048,
-            vision=True,
         )
 
         resposta = resposta.strip()
@@ -774,9 +853,8 @@ Analise essa print da tela e só comente se acontecer algo REALMENTE interessant
 
         resposta = _chamar_llm(
             [{"role": "user", "content": instrucao, "images": [imagem_base64]}],
-            model=OLLAMA_VISION_MODEL,
+            rota=ROTA_VISAO,
             max_tokens=2048,
-            vision=True,
         )
 
         if _contem_silencio(resposta):
@@ -795,51 +873,53 @@ def _mensagem_pede_contexto_tela(mensagem: str) -> bool:
     if not texto:
         return False
 
-    frases_explicitas = (
+    # ── Frases EXPLÍCITAS que mencionam tela diretamente ──
+    frases_explicitas_tela = (
         "analisa minha tela", "analise minha tela", "analisa a minha tela",
         "analise a minha tela", "veja minha tela", "veja a minha tela",
         "olha minha tela", "olha a minha tela", "olha a tela",
+        "olha isso na minha tela", "olha isso aqui na minha tela",
+        "olha isso na tela", "olha aqui na tela", "olha aqui na minha tela",
+        "ve minha tela", "ve a minha tela", "ve a tela",
+        "ve isso na tela", "ve isso na minha tela",
         "analisar minha tela", "analisar a minha tela", "ver minha tela",
         "ver a minha tela", "ler minha tela", "ler a minha tela",
         "o que tem na minha tela", "o que tem na tela",
         "o que esta na minha tela", "o que esta na tela",
-        "o que esta na tela", "o que ta na tela",
-        # frases novas e mais naturais
-        "olha isso", "olha aqui", "olha la", "olha ai",
-        "o que e isso", "o que e isso aqui", "que e isso", "que personagem",
-        "que jogo", "que aplicativo", "que programa", "que site",
-        "o que aparece", "o que apareceu", "o que esta aparecendo",
+        "o que ta na tela", "o que ta na minha tela",
+        "o que aparece na tela", "o que apareceu na tela",
+        "o que esta aparecendo na tela",
         "na minha tela", "na tela agora",
-        "consegue ver", "consegue ler", "pode ver", "pode ler",
-        "ve ai", "ve aqui", "ve la", "le ai", "le aqui",
         "o que esta aberto", "o que tenho aberto",
+        "captura a tela", "captura minha tela", "tira um print",
+        "tira print", "faz um print", "faz print",
     )
-    if any(frase in texto for frase in frases_explicitas):
+    if any(frase in texto for frase in frases_explicitas_tela):
         return True
 
-    # Combinação: verbo visual + referência direta (ex: "olha isso aqui")
+    # Combinação: verbo visual + referência à TELA explícita (NÃO dispara só com "olha isso")
     termos_acao_visual = ("olha", "ve", "ver", "veja", "olhe", "analisa", "analise", "le", "ler", "leia", "mostra", "identifica")
+    termos_tela = ("tela", "print", "janela", "monitor", "terminal", "console")
     termos_referencia = ("aqui", "ai", "isso", "esse", "essa", "isto", "este", "esta", "la", "ali")
-    termos_tela = ("tela", "print", "janela", "monitor", "codigo", "codigo", "arquivo", "terminal", "console", "site", "pagina")
 
     tem_acao = any(t in texto for t in termos_acao_visual)
-    tem_ref = any(t in texto for t in termos_referencia)
     tem_tela = any(t in texto for t in termos_tela)
+    tem_ref = any(t in texto for t in termos_referencia)
 
-    # "olha isso" ou "ve aqui" — referência + ação visual, mesmo sem mencionar tela
-    if tem_acao and tem_ref:
+    # Só dispara se mencionar tela E tiver verbo visual — "olha a tela", "ve o terminal"
+    if tem_acao and tem_tela:
         return True
 
-    # "o que tem na tela" — referência à tela + qualquer ação
+    # "o que tem na tela" — referência à tela + referência direta
     if tem_tela and tem_ref:
         return True
 
-    # erros/bugs com referência
+    # erros/bugs COM referência explícita à tela ou terminal
     termos_problema = ("erro", "bug", "falha", "problema", "quebrou", "quebrada", "quebrado")
-    if any(t in texto for t in termos_problema) and (tem_tela or tem_ref):
+    if any(t in texto for t in termos_problema) and tem_tela:
         return True
 
-    if "linha" in texto and any(t in texto for t in ("erro", "codigo", "arquivo", "bloco", "trecho")):
+    if "linha" in texto and any(t in texto for t in ("erro", "codigo", "arquivo", "bloco", "trecho")) and tem_tela:
         return True
 
     if "?" in mensagem and tem_tela:
@@ -1007,48 +1087,51 @@ def avaliar_contexto_canal(historico_canal: str, ultima_mensagem: str, nome_auto
         print(f"[Modelo] Erro ao avaliar contexto do canal: {e}")
         return {"responder": False, "mencionar": "", "resposta": ""}
     
+# Abaixo desse tamanho a resposta vai sempre como mensagem única —
+# é o comprimento típico de uma linha de chat.
+_LIMITE_MSG_CURTA_DISCORD = 60
+# Nenhuma parte pode sair menor que isso, senão a quebra fica artificial.
+_MIN_PARTE_DISCORD = 15
+
+
 def quebrar_resposta_discord(resposta: str) -> list[str]:
     """
-    Decide se a resposta deve ser quebrada em múltiplas mensagens.
-    Retorna lista com uma ou mais partes.
+    Decide se a resposta deve ser quebrada em múltiplas mensagens, imitando
+    uma pessoa digitando no chat em rajadas.
+
+    Era uma chamada de LLM com max_tokens=300 só pra decidir onde cortar uma
+    string. Virou heurística: determinística, instantânea e de graça.
     """
-    try:
-        prompt = (
-            f"Você recebeu essa resposta pra mandar no Discord:\n\"{resposta}\"\n\n"
-            "Decida se ela deve ser mandada como UMA mensagem só ou quebrada em 2 ou 3 mensagens separadas, "
-            "igual uma pessoa real digitaria no chat — mandando uma parte, depois outra.\n\n"
-            "Quebre SE:\n"
-            "- A resposta tiver duas ideias distintas que fariam sentido separadas\n"
-            "- Ficar mais natural mandar em partes (ex: comentário + complemento)\n"
-            "- A resposta for um pouco mais longa e tiver uma pausa natural no meio\n\n"
-            "NÃO quebre SE:\n"
-            "- For uma frase curta ou resposta de uma linha só\n"
-            "- Quebrar deixaria as partes sem sentido sozinhas\n"
-            "- For uma resposta técnica que precisa ser lida junto\n\n"
-            "Responda APENAS com JSON puro:\n"
-            '{"partes": ["mensagem 1", "mensagem 2"]}'
-            "\nSe não quebrar, coloca a resposta inteira em partes[0] só."
-        )
-
-        resultado = _chamar_llm(
-            [{"role": "user", "content": prompt}],
-            max_tokens=300,
-        )
-
-        match = re.search(r'\{.*\}', resultado, re.DOTALL)
-        if not match:
-            return [resposta]
-
-        dados = json.loads(match.group())
-        partes = dados.get("partes", [resposta])
-
-        # Garante que não veio vazio ou com partes em branco
-        partes = [p.strip() for p in partes if p.strip()]
-        return partes if partes else [resposta]
-
-    except Exception as e:
-        print(f"[Modelo] Erro ao quebrar resposta: {e}")
+    texto = (resposta or "").strip()
+    if not texto:
         return [resposta]
+
+    # Se a própria resposta já veio em linhas separadas, respeita isso.
+    linhas = [linha.strip() for linha in texto.split("\n") if linha.strip()]
+    if len(linhas) > 1:
+        return linhas[:3]
+
+    if len(texto) <= _LIMITE_MSG_CURTA_DISCORD:
+        return [texto]
+
+    # Procura fronteiras de frase que deixem as duas partes com corpo.
+    fronteiras = [
+        m.end() for m in re.finditer(r"[.!?]+\s+", texto)
+        if _MIN_PARTE_DISCORD <= m.end() <= len(texto) - _MIN_PARTE_DISCORD
+    ]
+    if not fronteiras:
+        return [texto]
+
+    # Corta na fronteira mais perto do meio, pra não sobrar uma parte minúscula.
+    meio = len(texto) / 2
+    corte = min(fronteiras, key=lambda pos: abs(pos - meio))
+
+    primeira = texto[:corte].strip()
+    segunda = texto[corte:].strip()
+    if not primeira or not segunda:
+        return [texto]
+
+    return [primeira, segunda]
 
 def pede_para_entrar_call(texto: str) -> bool:
     """Detecta se a mensagem pede pra Emily entrar na call."""
@@ -1119,7 +1202,9 @@ Se não tiver nada importante, responda apenas: NADA""",
                     "content": f"Vitor disse: {mensagem_usuario}\nEmily respondeu: {resposta_emily}",
                 },
             ],
-            max_tokens=2048,
+            # Saída é uma lista curta de fatos, uma linha cada. 2048 era desperdício.
+            max_tokens=200,
+            rota=ROTA_EXTRACAO,
         )
         texto = resultado.strip()
         if "NADA" in texto.upper():
@@ -1179,6 +1264,10 @@ def conversar_stream(mensagem_usuario, callback, fila_frases=None, instrucao_ext
     system_com_memoria = system_prompt
     if contexto_memoria:
         system_com_memoria = system_prompt + "\n\n" + contexto_memoria
+    # ── Injeta contexto da página fixada (não vai pro histórico) ──
+    bloco_pagina = _bloco_pagina_fixada()
+    if bloco_pagina:
+        system_com_memoria = system_com_memoria + bloco_pagina
     if instrucao_extra:
         system_com_memoria = system_com_memoria + "\n\n" + instrucao_extra
 
@@ -1190,7 +1279,33 @@ def conversar_stream(mensagem_usuario, callback, fila_frases=None, instrucao_ext
             frase_tela = gerar_frase_analisando_tela(mensagem_usuario)
             callback(frase_tela)
             imagem = visao.capturar_tela()
-            resposta_completa = analisar_tela_com_pergunta(imagem, mensagem_usuario)
+            # analisar_tela_com_pergunta já registra no histórico via _registrar_resposta_tela
+            resposta_completa = analisar_tela_com_pergunta(imagem, mensagem_usuario) or ""
+
+            if fila_frases:
+                fila_frases.put(resposta_completa)
+                fila_frases.put(None)
+
+            # NÃO adiciona ao histórico aqui — já foi feito dentro de analisar_tela_com_pergunta
+            aguardando_resposta = resposta_completa.strip().endswith("?")
+            return resposta_completa
+
+        # ── PESQUISA NATIVA DO MODELO (grounding com Google Search) ──
+        elif not skip_pesquisa and precisa_pesquisar(mensagem_usuario):
+            frase_busca = gerar_frase_acao("pesquisar", mensagem_usuario)
+            if frase_busca:
+                callback(frase_busca)
+
+            mensagens = [{"role": "system", "content": system_com_memoria}] + historico[:-1] + [
+                {"role": "user", "content": mensagem_final}
+            ]
+
+            # Sem stream: grounding funciona melhor na chamada normal
+            resposta_completa = _chamar_llm(
+                mensagens,
+                rota=ROTA_CONVERSA,
+                max_tokens=None,
+            ) or ""
 
             if fila_frases:
                 fila_frases.put(resposta_completa)
@@ -1199,27 +1314,20 @@ def conversar_stream(mensagem_usuario, callback, fila_frases=None, instrucao_ext
             historico.append({"role": "assistant", "content": resposta_completa})
             _limitar_historico()
             aguardando_resposta = resposta_completa.strip().endswith("?")
+
+            threading.Thread(
+                target=_salvar_fatos_da_conversa,
+                args=(mensagem_usuario, resposta_completa),
+                daemon=True,
+            ).start()
+
             return resposta_completa
-            
-
-        elif not skip_pesquisa and precisa_pesquisar(mensagem_usuario):
-             callback("Abrindo o navegador...")
-             resultado = pesquisa.pesquisar(mensagem_usuario)
-
-             if fila_frases:
-                 fila_frases.put(resultado)
-                 fila_frases.put(None)
-
-             historico.append({"role": "assistant", "content": resultado})
-             _limitar_historico()
-             aguardando_resposta = False
-             return resultado
 
         mensagens = [{"role": "system", "content": system_com_memoria}] + historico[:-1] + [
             {"role": "user", "content": mensagem_final}
         ]
 
-        stream = _chamar_llm(mensagens, model=OLLAMA_TEXT_MODEL, max_tokens=None, stream=True)
+        stream = _chamar_llm(mensagens, rota=ROTA_CONVERSA, max_tokens=None, stream=True)
 
         buffer = ""
         for pedaco in stream:
@@ -1319,12 +1427,19 @@ def triagem_mensagem_discord(texto: str, nome: str, eh_dono: bool = False) -> bo
             "- For spam ou caracteres aleatórios\n"
             "Responda APENAS: SIM ou NAO"
         )
+        # Decisão SIM/NAO não precisa da personalidade inteira (~1.361 tokens)
+        # nem de 500 tokens de saída pra devolver três letras. As regras da
+        # decisão já estão no prompt do usuário.
         resposta = _chamar_llm(
             [
-                {"role": "system", "content": system_prompt},
+                {
+                    "role": "system",
+                    "content": "Você é um classificador. Responda APENAS com SIM ou NAO, sem mais nada.",
+                },
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=500,
+            max_tokens=16,
+            rota=ROTA_CLASSIFICADOR,
         )
         return resposta.strip().upper().startswith("SIM")
     except Exception as e:
@@ -1367,6 +1482,7 @@ def responder_mensagem_discord(
                 {"role": "user", "content": mensagem_usuario},
             ],
             max_tokens=100,
+            rota=ROTA_DISCORD,
         )
 
         return resposta.strip()
@@ -1397,7 +1513,9 @@ def _llm_confirma_visao(mensagem: str) -> bool:
                     "content": f'Mensagem: "{mensagem}"\n\nEssa mensagem pede para ver ou analisar a tela?',
                 },
             ],
-            max_tokens=5,
+            # 5 era apertado demais: alguns tokenizadores gastam um token só
+            # no espaço/quebra de linha antes da palavra.
+            max_tokens=8,
         )
         return "SIM" in resposta.upper()
     except Exception:
@@ -1461,79 +1579,150 @@ OUTROS:
 """
 
 # ─────────────────────────────────────────────
-# FRASES DINÂMICAS — geradas pela LLM pra soarem naturais
+# FRASES DE ENCHIMENTO — listas estáticas
+#
+# Antes cada uma dessas frases custava uma chamada de LLM com
+# max_tokens=40. Como elas são faladas ANTES da Emily começar a ação,
+# aquele round-trip de rede entrava direto na latência percebida da
+# assistente de voz — o usuário esperava a rede duas vezes por comando.
+#
+# Escritas no tom tsundere dela: coloquial, sem markdown, sem emoji,
+# sem asterisco de ação, e faladas por extenso porque isso vai pro TTS.
 # ─────────────────────────────────────────────
 
-_ESTILOS_FRASE_ACAO = {
+_FRASES_ACAO = {
     "pesquisar": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que vai pesquisar algo agora"
-        "{ctx}.\nExemplos de TOM (não copie, crie diferente): 'Deixa eu ver...', 'Um segundo, vou procurar', "
-        "'Tá bom, pesquisando', 'Aguenta aí'."
+        "Deixa eu ver isso",
+        "Calma, tô procurando",
+        "Já vou olhar, espera",
+        "Tá, pesquisando aqui",
+        "Aguenta aí que eu acho",
+        "Um segundo, procurando",
+        "Peraí, tô buscando",
+        "Nem isso você sabe, né? Deixa eu ver",
+        "Lá vou eu pesquisar pra você",
+        "Vou dar uma olhada na internet",
     ),
     "gerar_imagem": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que vai criar/gerar uma imagem agora"
-        "{ctx}.\nExemplos de TOM: 'Criando a imagem...', 'Deixa eu fazer isso', 'Um segundo', 'Vou criar'."
+        "Criando a imagem, calma",
+        "Tá, vou desenhar",
+        "Deixa eu fazer isso",
+        "Um segundo, gerando",
+        "Já tô criando, espera",
+        "Peraí que tô montando",
+        "Lá vou eu fazer arte pra você",
+        "Vou criar, aguenta",
     ),
     "traduzir": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que vai traduzir algo da tela"
-        "{ctx}.\nExemplos de TOM: 'Deixa eu ver...', 'Olhando aí...', 'Um segundo', 'Vou ver o que tem'."
+        "Deixa eu ver o que tá aí",
+        "Tá, vou traduzir",
+        "Olhando aqui, calma",
+        "Peraí que eu leio",
+        "Um segundo, traduzindo",
+        "Vou ver o que tá escrito",
+        "Nem inglês você lê? Deixa eu ver",
     ),
     "ativar_ui": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que ativou o modo de controle de tela"
-        "{ctx}.\nExemplos de TOM: 'Modo controle ativo!', 'Tô no controle', 'Ok, mandando na tela', 'Pode falar o que quer'."
+        "Modo controle ativado",
+        "Tô no comando da tela agora",
+        "Pronto, fala o que você quer que eu faça",
+        "Assumi o controle aqui",
+        "Tá, mandando na tela agora",
+        "Modo tela ligado, fala logo",
     ),
     "desativar_ui": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que saiu do modo controle de tela"
-        "{ctx}.\nExemplos de TOM: 'Saindo do controle', 'Tá bom, parei', 'Saí do modo tela', 'Ok, voltei'."
+        "Saí do controle",
+        "Tá bom, parei",
+        "Larguei a tela",
+        "Pronto, voltei ao normal",
+        "Desliguei o modo tela",
+        "Ok, saí",
     ),
     "agente_ui_iniciando": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que vai executar uma tarefa na tela agora"
-        "{ctx}.\nExemplos de TOM: 'Fazendo isso na tela', 'Vou lá fazer', 'Executando...', 'Tá bom, fazendo'."
+        "Tá, fazendo isso",
+        "Vou lá resolver",
+        "Deixa comigo",
+        "Executando, calma",
+        "Peraí que eu faço",
+        "Já vou fazer, espera",
+        "Lá vou eu fazer pra você",
     ),
     "agente_ui_parando": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que parou de controlar a tela"
-        "{ctx}.\nExemplos de TOM: 'Parei', 'Ok, parei tudo', 'Travei aqui', 'Tá, parei o que tava fazendo'."
+        "Parei",
+        "Tá, parei tudo",
+        "Larguei o que tava fazendo",
+        "Pronto, parei",
+        "Ok, travei aqui",
     ),
     "guardar_fato": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra confirmar que guardou/anotou uma informação"
-        "{ctx}.\nExemplos de TOM: 'Anotei!', 'Ok, guardei', 'Registrado', 'Vou lembrar disso'."
+        "Anotei",
+        "Tá, guardei",
+        "Registrado",
+        "Vou lembrar disso",
+        "Ok, anotado",
+        "Guardei aqui na memória",
     ),
     "modo_escrito_on": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que ativou o modo escrito"
-        "{ctx}.\nExemplos de TOM: 'Modo escrito ativado', 'Pode falar que eu escrevo', 'Tô escrevendo tudo'."
+        "Modo escrito ligado, pode falar",
+        "Tá, eu escrevo o que você falar",
+        "Pronto, digitando o que você disser",
+        "Modo escrito ativo",
     ),
     "modo_escrito_off": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que desativou o modo escrito"
-        "{ctx}.\nExemplos de TOM: 'Modo escrito desligado', 'Parei de escrever', 'Pronto, modo normal'."
+        "Parei de escrever",
+        "Modo escrito desligado",
+        "Pronto, voltei ao normal",
+        "Tá, chega de digitar",
     ),
     "abrir_app": (
-        "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily pra dizer que vai abrir um aplicativo/site/pasta agora"
-        "{ctx}.\nExemplos de TOM: 'Abrindo...', 'Vou abrir', 'Ok, abrindo aí', 'Um segundo'."
+        "Abrindo",
+        "Tá, vou abrir",
+        "Um segundo",
+        "Já vou abrir, calma",
+        "Peraí",
+        "Abrindo aqui",
     ),
 }
 
+_FRASES_ANALISANDO_TELA = (
+    "Deixa eu ver",
+    "Que foi agora? Deixa eu olhar",
+    "Tá, vou dar uma olhada",
+    "Um segundo, tô vendo",
+    "Peraí que eu olho",
+    "Ué, deixa eu ver isso",
+    "Calma, tô olhando",
+    "Já vou olhar",
+)
+
+# Guarda a última frase escolhida por categoria pra não repetir duas
+# vezes seguidas — uma das proibições da personalidade dela.
+_ultima_frase_por_tipo: Dict[str, str] = {}
+
+
+def _escolher_frase(chave: str, opcoes) -> str:
+    """Sorteia uma frase da lista evitando repetir a última daquela categoria."""
+    if not opcoes:
+        return ""
+    if len(opcoes) == 1:
+        return opcoes[0]
+    anterior = _ultima_frase_por_tipo.get(chave)
+    candidatas = [f for f in opcoes if f != anterior] or list(opcoes)
+    escolhida = random.choice(candidatas)
+    _ultima_frase_por_tipo[chave] = escolhida
+    return escolhida
+
+
 def gerar_frase_acao(tipo: str, contexto: str = "") -> str:
     """
-    Gera uma frase curta com a personalidade da Emily para cada tipo de ação.
-    Varia a cada chamada. tipo deve ser uma chave de _ESTILOS_FRASE_ACAO.
+    Devolve uma frase curta com a personalidade da Emily para cada tipo de ação.
+    Varia a cada chamada e nunca repete a anterior da mesma categoria.
+
+    O parâmetro contexto é aceito por compatibilidade com os call sites
+    existentes (main.py, agente_ui.py) mas não é mais usado — as frases
+    são genéricas de propósito, pra não custar chamada de rede.
     """
-    try:
-        template = _ESTILOS_FRASE_ACAO.get(tipo)
-        if not template:
-            return ""
-        ctx_str = f" (contexto: \"{contexto}\")" if contexto else ""
-        prompt = (
-            template.format(ctx=ctx_str) + "\n"
-            "Seja natural, no jeito da Emily — pode ser grossa, irônica, carinhosa ou bem-humorada. Varie sempre.\n"
-            "Responda APENAS com a frase, sem aspas nem explicação."
-        )
-        resposta = _chamar_llm(
-            [{"role": "user", "content": prompt}],
-            max_tokens=40,
-        )
-        return resposta.strip() or ""
-    except Exception:
-        return ""
+    return _escolher_frase(tipo, _FRASES_ACAO.get(tipo, ()))
 
 
 # ─────────────────────────────────────────────
@@ -1556,30 +1745,13 @@ def registrar_acao_no_historico(descricao_acao: str, resultado: str = "") -> Non
 
 def gerar_frase_analisando_tela(contexto: str = "") -> str:
     """
-    Gera uma frase curta com a personalidade da Emily pra falar
-    enquanto ela vai analisar a tela. Varia a cada chamada.
+    Devolve uma frase curta da Emily pra falar enquanto vai analisar a tela.
+    Essa é falada antes da captura, então precisa ser instantânea — por isso
+    é lista estática e não chamada de LLM.
+
+    O parâmetro contexto é aceito por compatibilidade e não é usado.
     """
-    try:
-        prompt = (
-            "Gere UMA frase curtíssima (máximo 8 palavras) no estilo da Emily, "
-            "pra dizer que vai olhar a tela agora"
-            + (f" porque o Vitor pediu: \"{contexto}\"" if contexto else "") + ".\n"
-            "Seja natural, no jeito dela — pode ser grossa, irônica, carinhosa ou bem-humorada. Varie sempre.\n"
-            "Exemplos do tipo de frase (NÃO copie, crie uma diferente):\n"
-            "- 'Deixa eu ver...'\n"
-            "- 'Que foi agora, deixa eu olhar'\n"
-            "- 'Tá bom, vou dar uma olhada'\n"
-            "- 'Um segundo, tô vendo'\n"
-            "- 'Ué, deixa eu ver isso'\n"
-            "Responda APENAS com a frase, sem aspas nem explicação."
-        )
-        resposta = _chamar_llm(
-            [{"role": "user", "content": prompt}],
-            max_tokens=40,
-        )
-        return resposta.strip() or "Deixa eu dar uma olhada..."
-    except Exception:
-        return "Deixa eu dar uma olhada..."
+    return _escolher_frase("analisando_tela", _FRASES_ANALISANDO_TELA) or "Deixa eu dar uma olhada"
 
 
 def avaliar_intencao_fallback(mensagem: str, historico_conversa: list = None) -> dict:
@@ -1640,6 +1812,7 @@ def avaliar_intencao_fallback(mensagem: str, historico_conversa: list = None) ->
                 {"role": "user", "content": prompt},
             ],
             max_tokens=200,
+            rota=ROTA_COMANDO,
         )
 
         match = re.search(r'\{.*\}', resultado, re.DOTALL)

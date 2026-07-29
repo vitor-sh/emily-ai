@@ -805,6 +805,16 @@ KEYWORDS_PARAR_MONITOR_DOWNLOADS = (
     "desliga o monitor", "cancela monitoramento",
 )
 
+KEYWORDS_LIMPAR_PAGINA = (
+    "esquece a página", "esquece a pagina", "esquece essa página", "esquece essa pagina",
+    "limpa o contexto da página", "limpa o contexto da pagina",
+    "limpa a página", "limpa a pagina",
+    "apaga o contexto da página", "apaga o contexto da pagina",
+    "esquece o site", "esquece a leitura", "esquece o que leu",
+    "sai do contexto da página", "sai do contexto da pagina",
+    "tira a página", "tira a pagina",
+)
+
 KEYWORDS_ORGANIZAR_DOWNLOADS = (
     "organiza os downloads", "organiza meus downloads",
     "organiza a pasta de downloads", "organiza downloads",
@@ -3575,6 +3585,86 @@ Exemplos:
 "deleta todos os selecionados" → {"acao": "deletar_selecionados", "resposta": "Jogando tudo na lixeira!"}
 "como tá o tempo?" → {"acao": "nenhuma"}
 
+=== CONTROLAR NAVEGADOR (extensão Chrome/Brave) ===
+Use `controlar_navegador` APENAS quando o usuário quiser interagir com uma página que já está aberta no navegador, ler/extrair conteúdo dela, ou executar algo dentro do browser via extensão.
+
+REGRA CRÍTICA — QUANDO NÃO USAR controlar_navegador:
+- "abre o youtube" / "vai no google" / "acessa o site X"  → use `abrir_site` (só navega, não precisa da extensão)
+- "toca uma música" / "coloca Bohemian Rhapsody"          → use `tocar_musica` (tem fluxo próprio)
+- "fecha a aba do Netflix" / "fecha essa aba"             → use `fechar_aba` (via Ctrl+W, mais simples)
+- "clica em X, preenche o formulário todo, navega pelo site" → use `agente_ui` (fluxo visual complexo)
+
+QUANDO USAR controlar_navegador:
+- Ler/extrair texto da página atual ("lê essa página", "o que tá escrito aqui", "resume esse site")
+- Baixar arquivo de uma URL ("baixa esse vídeo", "faz o download desse arquivo")
+- Rolar a página ("desce a página", "sobe a página", "rola pra baixo")
+- Tirar screenshot da aba ("tira print da aba", "screenshot do navegador")
+- Preencher UM campo específico com seletor CSS conhecido
+- Clicar num elemento específico com seletor CSS conhecido
+- Executar JavaScript na página
+
+{"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "texto da dúvida se quiser que Emily explique"}
+  → Lê o texto da página atual. Se "pergunta" for preenchida, Emily analisa e responde sobre o conteúdo.
+  → Preencha "pergunta" quando o usuário disser "me explica", "o que é isso", "resume", "o que significa", "analisa", etc.
+  → Deixe "pergunta" vazio quando o usuário só quiser ver o texto sem análise.
+
+  Exemplos:
+  "lê essa página"                              → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "", "resposta": "Lendo a página!"}
+  "lê essa página e me explica"                 → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "me explica o que está escrito nessa página", "resposta": "Lendo e explicando pra você!"}
+  "o que esse site está dizendo?"               → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "o que esse site está dizendo?", "resposta": "Deixa eu ler pra te contar!"}
+  "resume o conteúdo dessa página"              → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "resume o conteúdo dessa página", "resposta": "Resumindo pra você!"}
+  "o que é isso que eu tô lendo?"               → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "o que é isso que está escrito na página?", "resposta": "Vou ler e te contar!"}
+  "tem algo estranho nessa página, analisa"     → {"acao": "controlar_navegador", "sub_acao": "ler_pagina", "pergunta": "analisa o conteúdo dessa página e me diz se tem algo estranho", "resposta": "Analisando a página!"}
+
+{"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "url_ou_vazio"}
+  → Baixa o ÁUDIO de um vídeo como MP3. Use quando o usuário quiser baixar música/áudio de um site.
+  → Detecta a URL da aba automaticamente se não for informada.
+  → DIFERENÇA com baixar_arquivo: este gera MP3 com metadados e thumbnail embutidos.
+  → Use quando ouvir: "baixa essa música", "salva o áudio", "extrai o áudio", "baixa como mp3", "quero o mp3"
+  Exemplos:
+  "baixa essa música pra mim"                     → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando o áudio!"}
+  "salva esse áudio como mp3"                     → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Salvando o MP3!"}
+  "baixa essa música do youtube pra mim"          → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando como MP3!"}
+  "extrai o áudio desse vídeo"                    → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Extraindo o áudio!"}
+  "quero essa música no meu PC"                   → {"acao": "controlar_navegador", "sub_acao": "baixar_mp3", "url": "", "resposta": "Baixando a música!"}
+
+{"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "url_do_arquivo_ou_vazio"}
+  → Inicia o download de VÍDEO ou arquivo genérico. Use quando o usuário quiser o vídeo completo.
+  → Se o usuário não mencionar URL, deixe vazio — a URL será detectada automaticamente.
+  → Use quando ouvir: "baixa esse vídeo", "faz o download desse arquivo", "salva esse vídeo"
+  Exemplos:
+  "baixa esse vídeo"                  → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Iniciando o download!"}
+  "faz o download desse arquivo"      → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Baixando!"}
+  "baixa o arquivo de youtube.com/x"  → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "youtube.com/x", "resposta": "Baixando!"}
+  "salva esse vídeo no meu PC"        → {"acao": "controlar_navegador", "sub_acao": "baixar_arquivo", "url": "", "resposta": "Salvando o vídeo!"}
+
+{"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo|cima|esquerda|direita", "quantidade": 300}
+  → Rola a página. Use quando o usuário falar em rolar/descer/subir a página DENTRO do navegador.
+  → NÃO confunda com scroll em outras janelas — isso é EXCLUSIVO para a página do navegador.
+  Exemplos:
+  "desce a página"             → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo", "quantidade": 500, "resposta": "Rolando pra baixo!"}
+  "sobe a página"              → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "cima", "quantidade": 500, "resposta": "Rolando pra cima!"}
+  "rola bastante pra baixo"    → {"acao": "controlar_navegador", "sub_acao": "scroll", "direcao": "baixo", "quantidade": 1500, "resposta": "Rolando!"}
+
+{"acao": "controlar_navegador", "sub_acao": "screenshot_aba"}
+  → Tira um screenshot da aba atual do navegador.
+  Exemplos:
+  "tira um print da aba"           → {"acao": "controlar_navegador", "sub_acao": "screenshot_aba", "resposta": "Tirando screenshot!"}
+  "screenshot do navegador"        → {"acao": "controlar_navegador", "sub_acao": "screenshot_aba", "resposta": "Capturando!"}
+
+{"acao": "controlar_navegador", "sub_acao": "preencher_campo", "seletor": "css_selector", "valor": "valor"}
+  → Preenche UM campo específico num site via seletor CSS. Use APENAS quando o seletor for mencionado ou óbvio.
+  → Se for preencher um formulário inteiro ou fluxo complexo → use agente_ui.
+
+{"acao": "controlar_navegador", "sub_acao": "clicar_elemento", "seletor": "css_selector"}
+  → Clica num elemento específico via seletor CSS.
+  → Se for uma sequência de cliques ou navegação visual → use agente_ui.
+
+{"acao": "controlar_navegador", "sub_acao": "executar_js", "codigo": "javascript_aqui"}
+  → Executa JavaScript na página atual.
+  Exemplos:
+  "executa esse JS: alert('oi')"   → {"acao": "controlar_navegador", "sub_acao": "executar_js", "codigo": "alert('oi')", "resposta": "Executando o JS!"}
+
 {"acao": "agente_ui", "objetivo": "texto do que fazer na tela"}
   → Use quando o usuário pedir pra FAZER algo que envolva navegar visualmente pela interface, múltiplas ações subsequentes, ou tarefas complexas que precisam "ver a tela" pra executar.
   → O campo "objetivo" deve conter a intenção COMPLETA do usuário, descrita de forma clara e executável.
@@ -3760,6 +3850,8 @@ Exemplos:
                 {"role": "user", "content": mensagem}
             ],
             max_tokens=256,
+            # Saída é JSON estruturado, não conversa: rota determinística.
+            rota="comando",
         )
 
         if not texto.strip():
@@ -4799,6 +4891,229 @@ def _deletar_arquivos_da_pasta_fn(
     return resp
 
 # ─────────────────────────────────────────────────────────────────
+# DOWNLOAD VIA YT-DLP — sem agente, direto no terminal
+# ─────────────────────────────────────────────────────────────────
+
+def _baixar_mp3_com_ytdlp(url: str) -> Optional[str]:
+    """
+    Baixa o áudio de um vídeo como MP3 na melhor qualidade disponível usando yt-dlp.
+    Salva na pasta Músicas do usuário (ou Downloads como fallback).
+    Roda em thread separada pra não travar a Emily.
+    Retorna mensagem de status, ou None se yt-dlp não estiver instalado.
+    """
+    import shutil as _shutil
+
+    ytdlp_exe = _shutil.which("yt-dlp") or _shutil.which("yt-dlp.exe")
+    if not ytdlp_exe:
+        candidatos = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Scripts" / "yt-dlp.exe",
+            Path(os.environ.get("APPDATA", "")) / "Python" / "Scripts" / "yt-dlp.exe",
+            Path("C:/Python311/Scripts/yt-dlp.exe"),
+            Path("C:/Python312/Scripts/yt-dlp.exe"),
+        ]
+        for python_dir in Path("C:/Users").glob("*/AppData/Local/Programs/Python/*/Scripts/yt-dlp.exe"):
+            candidatos.append(python_dir)
+        for c in candidatos:
+            if c.exists():
+                ytdlp_exe = str(c)
+                break
+
+    if not ytdlp_exe:
+        print("[YTDLP-MP3] yt-dlp não encontrado.")
+        return None
+
+    # Salva em Músicas, com fallback pra Downloads
+    pasta_musicas = PASTA_MAP.get("musicas", [HOME / "Music"])[0]
+    if not pasta_musicas.exists():
+        pasta_musicas = PASTA_MAP.get("downloads", [HOME / "Downloads"])[0]
+
+    print(f"[YTDLP-MP3] Baixando áudio: {url}")
+    print(f"[YTDLP-MP3] Destino: {pasta_musicas}")
+
+    def _rodar():
+        try:
+            resultado = subprocess.run(
+                [
+                    ytdlp_exe,
+                    "--no-playlist",
+                    "-x",                          # extrai áudio
+                    "--audio-format", "mp3",       # converte pra MP3
+                    "--audio-quality", "0",        # melhor qualidade (0 = melhor, 9 = pior)
+                    "--embed-thumbnail",           # capa do álbum embutida no MP3
+                    "--add-metadata",              # metadados (artista, título, etc.)
+                    "-o", str(pasta_musicas / "%(title)s.%(ext)s"),
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if resultado.returncode == 0:
+                print("[YTDLP-MP3] Download de áudio concluído!")
+            else:
+                print(f"[YTDLP-MP3] Erro: {resultado.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            print("[YTDLP-MP3] Timeout ao baixar áudio.")
+        except Exception as e:
+            print(f"[YTDLP-MP3] Exceção: {e}")
+
+    threading.Thread(target=_rodar, daemon=True).start()
+    return "Baixando o áudio como MP3 na melhor qualidade! Vai aparecer na pasta Músicas quando terminar."
+
+
+def _baixar_com_ytdlp(url: str) -> Optional[str]:
+    """
+    Tenta baixar um vídeo usando yt-dlp na melhor qualidade disponível.
+    Salva na pasta Downloads do usuário.
+    Roda em thread separada pra não travar a Emily.
+    Retorna uma mensagem de status, ou None se yt-dlp não estiver instalado.
+    """
+    import shutil as _shutil
+
+    # Verifica se yt-dlp está instalado
+    ytdlp_exe = _shutil.which("yt-dlp") or _shutil.which("yt-dlp.exe")
+    if not ytdlp_exe:
+        # Tenta encontrar nos locais comuns do Python
+        candidatos = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python" / "Scripts" / "yt-dlp.exe",
+            Path(os.environ.get("APPDATA", "")) / "Python" / "Scripts" / "yt-dlp.exe",
+            Path("C:/Python311/Scripts/yt-dlp.exe"),
+            Path("C:/Python312/Scripts/yt-dlp.exe"),
+        ]
+        # Também tenta pelo pip
+        for python_dir in Path("C:/Users").glob("*/AppData/Local/Programs/Python/*/Scripts/yt-dlp.exe"):
+            candidatos.append(python_dir)
+        for c in candidatos:
+            if c.exists():
+                ytdlp_exe = str(c)
+                break
+
+    if not ytdlp_exe:
+        print("[YTDLP] yt-dlp não encontrado. Usando extensão como fallback.")
+        return None  # sinaliza pra usar fallback
+
+    # Pega a pasta Downloads real
+    pasta_downloads = PASTA_MAP.get("downloads", [HOME / "Downloads"])[0]
+
+    print(f"[YTDLP] Baixando: {url}")
+    print(f"[YTDLP] Destino: {pasta_downloads}")
+
+    def _rodar():
+        try:
+            resultado = subprocess.run(
+                [
+                    ytdlp_exe,
+                    "--no-playlist",           # não baixa playlist inteira
+                    "-f", "bestvideo+bestaudio/best",  # melhor qualidade disponível
+                    "--merge-output-format", "mp4",    # sempre sai como .mp4
+                    "-o", str(pasta_downloads / "%(title)s.%(ext)s"),
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minutos de timeout
+                encoding="utf-8",
+                errors="replace",
+            )
+            if resultado.returncode == 0:
+                print(f"[YTDLP] Download concluído!")
+            else:
+                print(f"[YTDLP] Erro: {resultado.stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            print("[YTDLP] Timeout ao baixar.")
+        except Exception as e:
+            print(f"[YTDLP] Exceção: {e}")
+
+    threading.Thread(target=_rodar, daemon=True).start()
+    return f"Baixando na melhor qualidade disponível! O arquivo vai aparecer nos seus Downloads quando terminar."
+
+
+# ─────────────────────────────────────────────────────────────────
+# DOWNLOAD PENDENTE VIA NAVEGADOR — fluxo com pergunta de qualidade
+# ─────────────────────────────────────────────────────────────────
+
+_download_pendente_nav_url: Optional[str] = None  # URL aguardando escolha de qualidade
+
+def _definir_download_pendente_nav(url: str) -> None:
+    global _download_pendente_nav_url
+    _download_pendente_nav_url = url
+
+def obter_download_pendente_nav() -> Optional[str]:
+    """Retorna a URL pendente de qualidade, ou None se não houver."""
+    return _download_pendente_nav_url
+
+def processar_resposta_qualidade_download(resposta_usuario: str) -> Optional[str]:
+    """
+    Chamado pelo main.py/interface quando o usuário responde à pergunta de qualidade.
+    Monta a URL com o parâmetro de qualidade e inicia o download.
+    Retorna a resposta da Emily ou None se não havia download pendente.
+    """
+    global _download_pendente_nav_url
+
+    url = _download_pendente_nav_url
+    if not url:
+        return None
+
+    _download_pendente_nav_url = None  # limpa o estado
+
+    try:
+        import navegador as _nav
+    except ImportError:
+        return "Módulo navegador não encontrado, Vitor!"
+
+    if not _nav.esta_conectado():
+        return "A extensão do navegador desconectou enquanto eu esperava, Vitor!"
+
+    resp_norm = _normalizar(resposta_usuario)
+
+    # Detecta a qualidade pedida
+    qualidade = None
+    if any(p in resp_norm for p in ("qualquer", "melhor", "maxima", "máxima", "tanto faz", "qualquer uma")):
+        qualidade = "best"
+    elif "4k" in resp_norm or "2160" in resp_norm:
+        qualidade = "2160p"
+    elif "1080" in resp_norm or "full hd" in resp_norm or "fullhd" in resp_norm:
+        qualidade = "1080p"
+    elif "720" in resp_norm or " hd" in resp_norm:
+        qualidade = "720p"
+    elif "480" in resp_norm:
+        qualidade = "480p"
+    elif "360" in resp_norm:
+        qualidade = "360p"
+    elif "240" in resp_norm:
+        qualidade = "240p"
+    elif "144" in resp_norm:
+        qualidade = "144p"
+    else:
+        # Não reconheceu → baixa na melhor disponível
+        qualidade = "best"
+
+    # Para YouTube, se a qualidade for específica, sugere yt-dlp
+    _SITES_VIDEO_YT = ("youtube.com", "youtu.be")
+    eh_youtube = any(s in url.lower() for s in _SITES_VIDEO_YT)
+
+    if eh_youtube and qualidade != "best":
+        # Inicia o download via extensão (o browser baixa o que o YouTube entregar)
+        # e avisa que para qualidade específica precisaria do yt-dlp
+        _nav.baixar_arquivo(url)
+        qualidade_texto = {
+            "2160p": "4K", "1080p": "1080p Full HD", "720p": "720p HD",
+            "480p": "480p", "360p": "360p", "240p": "240p", "144p": "144p",
+        }.get(qualidade, qualidade)
+        return (
+            f"Iniciando o download! Obs: o Brave vai baixar na melhor qualidade disponível. "
+            f"Se quiser especificamente {qualidade_texto}, precisa do yt-dlp instalado. "
+            f"Quer que eu te ensine a usar?"
+        )
+
+    # Para outros sites ou "qualquer" → baixa direto
+    _nav.baixar_arquivo(url)
+    return "Download iniciado! Te aviso quando terminar se o monitor de downloads estiver ativo."
+
+
+# ─────────────────────────────────────────────────────────────────
 # MÚSICA — YouTube + teclas de mídia do Windows
 # ─────────────────────────────────────────────────────────────────
 
@@ -5496,6 +5811,222 @@ def _executar_acao_por_dict(resultado: dict, callback_falar=None) -> Optional[st
         alvo = resultado.get("alvo", "")
         r = _fechar_aba_navegador(alvo)
         return r if any(f in r for f in ("Não consegui", "Não achei", "Não temos")) else resposta_emily
+
+    # ─── CONTROLAR NAVEGADOR via extensão WebSocket ────────────────────────
+    if acao == "controlar_navegador":
+        try:
+            import navegador as _nav
+        except ImportError:
+            return "Módulo navegador não encontrado, Vitor!"
+
+        sub_acao  = resultado.get("sub_acao", "")
+        url       = resultado.get("url", resultado.get("alvo", ""))
+        seletor   = resultado.get("seletor", "")
+        valor     = resultado.get("valor", "")
+        direcao   = resultado.get("direcao", "baixo")
+        quantidade = int(resultado.get("quantidade", 300))
+        codigo    = resultado.get("codigo", "")
+
+        if not _nav.esta_conectado():
+            return "A extensão do navegador não está conectada, Vitor. Instala a extensão Emily no Brave e abre uma aba!"
+
+        if sub_acao == "abrir_url":
+            _nav.abrir_url(url)
+            return resposta_emily
+
+        elif sub_acao == "fechar_aba":
+            _nav.fechar_aba()
+            return resposta_emily
+
+        elif sub_acao == "ler_pagina":
+            dados_pagina = _nav.ler_pagina(timeout=10.0)
+            if not dados_pagina:
+                return "Não consegui ler a página agora, Vitor. A extensão precisa estar conectada!"
+
+            texto_pagina = dados_pagina.get("texto", "")
+            imagens_pagina = dados_pagina.get("imagens", [])
+            url_pagina = dados_pagina.get("url", "")
+            titulo_pagina = dados_pagina.get("titulo", "")
+
+            if not texto_pagina and not imagens_pagina:
+                return "A página parece estar vazia ou bloqueada, Vitor."
+
+            pergunta = resultado.get("pergunta", "").strip()
+
+            # Se não tem pergunta, usa uma pergunta padrão — Emily sempre analisa o conteúdo
+            if not pergunta:
+                pergunta = "Do que se trata essa página? Resume o conteúdo principal pra mim."
+
+            try:
+                from modelo import _chamar_llm as _llm, EMILY_PERSONALIDADE
+
+                # Monta o contexto da página — usa até 80k chars de texto
+                _LIMITE_PAGINA = 80000
+                conteudo_pagina = texto_pagina[:_LIMITE_PAGINA]
+                contexto_pagina = ""
+                if titulo_pagina:
+                    contexto_pagina += f"Título: {titulo_pagina}\n"
+                if url_pagina:
+                    contexto_pagina += f"URL: {url_pagina}\n"
+                contexto_pagina += f"\n[Conteúdo da página]\n{conteudo_pagina}"
+
+                # Indica se o texto foi truncado
+                if len(texto_pagina) > _LIMITE_PAGINA:
+                    contexto_pagina += f"\n\n[NOTA: A página tem {len(texto_pagina):,} caracteres. Mostrando os primeiros {_LIMITE_PAGINA:,}.]"
+
+                # Adiciona descrição das imagens se existirem
+                if imagens_pagina:
+                    contexto_pagina += "\n\n[Imagens encontradas na página]\n"
+                    for i, img in enumerate(imagens_pagina[:5], 1):
+                        alt = img.get("alt", "")
+                        url_img = img.get("url", "")
+                        if alt:
+                            contexto_pagina += f"{i}. \"{alt}\" ({url_img})\n"
+                        else:
+                            contexto_pagina += f"{i}. Imagem sem descrição: {url_img}\n"
+
+                # Tenta analisar imagens com visão se a pergunta for sobre elas
+                analise_visual = ""
+                palavras_visual = ("imagem", "foto", "figura", "gráfico", "ilustração", "visual", "aparece", "mostra", "vejo", "vê")
+                pergunta_sobre_visual = any(p in pergunta.lower() for p in palavras_visual)
+
+                if imagens_pagina and pergunta_sobre_visual:
+                    try:
+                        from modelo import analisar_imagem_url
+                        analises_imgs = []
+                        for img_info in imagens_pagina[:3]:
+                            url_img = img_info.get("url", "")
+                            if url_img:
+                                desc = analisar_imagem_url(url_img, pergunta)
+                                if desc:
+                                    analises_imgs.append(f"- {desc}")
+                        if analises_imgs:
+                            analise_visual = "\n\n[Análise das imagens]\n" + "\n".join(analises_imgs)
+                    except Exception as e_vis:
+                        print(f"[NAVEGADOR] Erro ao analisar imagens: {e_vis}")
+
+                system = f"""{EMILY_PERSONALIDADE}
+Você recebeu o conteúdo COMPLETO de uma página web que o Vitor está acessando no navegador.
+Seu trabalho é ajudar o Vitor com o que ele pediu, usando TODO o conteúdo da página como base.
+
+REGRAS IMPORTANTES:
+- NÃO resuma a página por conta própria a não ser que o Vitor peça explicitamente um resumo.
+- Se o Vitor fez uma pergunta específica, responda DIRETAMENTE usando as informações da página.
+- Se o Vitor pediu ajuda com algo (código, erro, explicação), dê a ajuda completa.
+- Se o Vitor não fez uma pergunta clara, descreva brevemente o que a página contém e pergunte como pode ajudar.
+- Use TODO o contexto disponível — não ignore partes por serem longas ou técnicas.
+- Fale em português brasileiro coloquial, com a sua personalidade natural."""
+
+                mensagem_usuario = f"{contexto_pagina}{analise_visual}\n\n[Pedido do Vitor]\n{pergunta}"
+
+                print(f"[NAVEGADOR] Enviando {len(mensagem_usuario):,} chars pra LLM (página: {len(texto_pagina):,} chars)")
+
+                resposta_analise = _llm(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": mensagem_usuario},
+                    ],
+                    max_tokens=2000,
+                )
+                resposta_final = resposta_analise.strip() if resposta_analise else "Não consegui analisar o conteúdo, Vitor."
+
+                # ── Registra no histórico da conversa para manter contexto ──
+                # Guarda um resumo compacto do contexto (não o texto inteiro, que é gigante)
+                # para a Emily lembrar que leu a página nesta sessão
+                try:
+                    import modelo as _modelo
+                    _resumo_contexto = (
+                        f"[Leitura de página]\n"
+                        f"Título: {titulo_pagina or 'desconhecido'}\n"
+                        f"URL: {url_pagina or 'desconhecida'}\n"
+                        f"Conteúdo ({len(texto_pagina):,} chars lidos):\n{conteudo_pagina[:8000]}"
+                        + (f"\n...[{len(texto_pagina) - _LIMITE_PAGINA:,} chars adicionais não mostrados]" if len(texto_pagina) > _LIMITE_PAGINA else "")
+                    )
+                    _modelo.historico.append({"role": "user", "content": _resumo_contexto})
+                    _modelo.historico.append({"role": "assistant", "content": resposta_final})
+                    _modelo._limitar_historico()
+                    print(f"[NAVEGADOR] Contexto da página registrado no histórico ({len(_resumo_contexto):,} chars)")
+                    # ── Fixa a página no system prompt para perguntas futuras ──
+                    try:
+                        _modelo.fixar_pagina(titulo_pagina, url_pagina, texto_pagina)
+                    except Exception as e_fix:
+                        print(f"[NAVEGADOR] Aviso: não conseguiu fixar página: {e_fix}")
+                except Exception as e_hist:
+                    print(f"[NAVEGADOR] Aviso: não conseguiu registrar no histórico: {e_hist}")
+
+                return resposta_final
+
+            except Exception as e:
+                print(f"[NAVEGADOR] Erro ao analisar página: {e}")
+                # Fallback: devolve trecho do texto
+                trecho = texto_pagina[:2000]
+                return f"Li a página mas tive um erro ao analisar. Aqui tá o começo: {trecho}{'...' if len(texto_pagina) > 2000 else ''}"
+
+        elif sub_acao == "preencher_campo":
+            _nav.preencher_campo(seletor, valor)
+            return resposta_emily
+
+        elif sub_acao == "clicar_elemento":
+            _nav.clicar_elemento(seletor)
+            return resposta_emily
+
+        elif sub_acao == "scroll":
+            _nav.scroll(direcao, quantidade)
+            return resposta_emily
+
+        elif sub_acao == "baixar_mp3":
+            # ── Se URL não foi informada, pega a da aba atual ──
+            if not url:
+                url = _nav.obter_url_atual(timeout=5.0) or ""
+
+            if not url:
+                return "Não consegui detectar a URL da aba atual, Vitor. Me passa o link direto!"
+
+            # Tenta yt-dlp primeiro (melhor qualidade, com metadados e thumbnail)
+            resultado_mp3 = _baixar_mp3_com_ytdlp(url)
+            if resultado_mp3:
+                return resultado_mp3
+
+            # Fallback: yt-dlp não instalado
+            return (
+                "Não achei o yt-dlp instalado, Vitor! "
+                "Instala com: pip install yt-dlp — depois é só pedir de novo!"
+            )
+
+        elif sub_acao == "baixar_arquivo":
+            # ── Se URL não foi informada, pega a da aba atual ──
+            if not url:
+                url = _nav.obter_url_atual(timeout=5.0) or ""
+
+            if not url:
+                return "Não consegui detectar a URL da aba atual, Vitor. Me passa o link direto!"
+
+            # ── Tenta usar yt-dlp pra sites de vídeo (melhor qualidade, sem agente) ──
+            _SITES_VIDEO = ("youtube.com", "youtu.be", "vimeo.com", "twitch.tv",
+                            "dailymotion.com", "facebook.com/watch", "instagram.com")
+            eh_video = any(s in url.lower() for s in _SITES_VIDEO)
+
+            if eh_video:
+                resultado_ytdlp = _baixar_com_ytdlp(url)
+                if resultado_ytdlp:
+                    return resultado_ytdlp
+
+            # Fallback: baixa via extensão do navegador (qualquer URL)
+            _nav.baixar_arquivo(url)
+            return resposta_emily
+
+        elif sub_acao == "executar_js":
+            _nav.executar_js(codigo)
+            return resposta_emily
+
+        elif sub_acao == "screenshot_aba":
+            b64 = _nav.screenshot_aba(timeout=12.0)
+            if b64:
+                return f"Screenshot capturado! ({len(b64)} chars base64)"
+            return "Não consegui capturar o screenshot agora, Vitor."
+
+        else:
+            return f"Sub-ação '{sub_acao}' não reconhecida para controlar_navegador."
     
     if acao == "minimizar_app":
         alvo = resultado.get("alvo", "")
@@ -6199,6 +6730,19 @@ def executar_comando(mensagem: str, callback_falar=None, acao_forcada: str = Non
     # ── Organizar Downloads ──
     if any(p in mensagem_normalizada for p in KEYWORDS_ORGANIZAR_DOWNLOADS):
        return _organizar_downloads_fn()
+
+    # ── Limpar contexto de página fixada ──
+    if any(p in mensagem_normalizada for p in KEYWORDS_LIMPAR_PAGINA):
+        try:
+            import modelo as _modelo
+            if _modelo.tem_pagina_fixada():
+                _modelo.limpar_pagina_fixada()
+                return "Pronto, esqueci a página. Pode perguntar outra coisa!"
+            else:
+                return "Não tinha nenhuma página fixada aqui, Vitor."
+        except Exception as e_lp:
+            print(f"[AUTOMACAO] Erro ao limpar página: {e_lp}")
+            return "Não consegui limpar o contexto da página agora."
 
     if not _eh_possivel_comando(mensagem_normalizada):
         return None

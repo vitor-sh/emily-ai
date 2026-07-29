@@ -27,38 +27,44 @@ def _desenhar_grade(imagem: Image.Image) -> Image.Image:
     largura_celula = w / GRADE_COLS
     altura_celula = h / GRADE_LINHAS
 
-    # Tenta carregar uma fonte legível; fallback pra fonte padrão
+    # Negrito de propósito: foi a fonte usada na medição de acerto da grade.
     try:
-        fonte = ImageFont.truetype("arial.ttf", 16)
+        fonte = ImageFont.truetype("arialbd.ttf", 16)
     except Exception:
         try:
-            fonte = ImageFont.truetype("segoeui.ttf", 16)
+            fonte = ImageFont.truetype("arial.ttf", 16)
         except Exception:
-            fonte = ImageFont.load_default()
+            try:
+                fonte = ImageFont.truetype("segoeuib.ttf", 16)
+            except Exception:
+                fonte = ImageFont.load_default()
 
-    # Linhas da grade
+    # Linhas da grade. Espessura 2 e alfa 170 em vez de 1 e 90: o rótulo
+    # precisa sobreviver ao reescalonamento que o encoder de visão do
+    # modelo faz na imagem antes de olhar pra ela.
     for i in range(1, GRADE_COLS):
         x = int(i * largura_celula)
-        draw.line([(x, 0), (x, h)], fill=(255, 0, 0, 90), width=1)
+        draw.line([(x, 0), (x, h)], fill=(255, 0, 0, 170), width=2)
     for i in range(1, GRADE_LINHAS):
         y = int(i * altura_celula)
-        draw.line([(0, y), (w, y)], fill=(255, 0, 0, 90), width=1)
+        draw.line([(0, y), (w, y)], fill=(255, 0, 0, 170), width=2)
 
-    # Rótulos das células
+    # Rótulos das células. Amarelo sobre caixa preta quase opaca: foi essa
+    # combinação que mediu 12/12 de acerto de localização no teste, contra
+    # o branco em alfa 140 que estava aqui antes.
     letras = "ABCDEFGHIJ"
     for lin in range(GRADE_LINHAS):
         for col in range(GRADE_COLS):
             cx = int(col * largura_celula + largura_celula / 2)
             cy = int(lin * altura_celula + altura_celula / 2)
             texto = f"{letras[col]}{lin}"
-            # Fundo escuro semi-transparente pra melhorar leitura
             bbox = draw.textbbox((0, 0), texto, font=fonte)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.rectangle(
-                [(cx - tw // 2 - 2, cy - th // 2 - 2), (cx + tw // 2 + 2, cy + th // 2 + 2)],
-                fill=(0, 0, 0, 140)
+                [(cx - tw // 2 - 5, cy - th // 2 - 5), (cx + tw // 2 + 5, cy + th // 2 + 5)],
+                fill=(0, 0, 0, 215)
             )
-            draw.text((cx - tw // 2, cy - th // 2), texto, font=fonte, fill=(255, 255, 255, 255))
+            draw.text((cx - tw // 2, cy - th // 2), texto, font=fonte, fill=(255, 255, 0, 255))
 
     return img
 
@@ -68,7 +74,11 @@ def celula_para_centro(celula: str) -> tuple[int, int]:
     Converte identificador de célula (ex: "B3") em coordenadas centrais (x, y)
     na escala da imagem 1280x720.
     """
-    celula = celula.strip().upper()
+    # Os modelos costumam devolver a célula com sujeira em volta: aspas,
+    # ponto final ("H8."), crase, espaço. Medido de verdade: o
+    # llama-3.2-11b responde 'H8.' e o 90b responde 'J1.'. Sem essa
+    # limpeza a célula era descartada como inválida.
+    celula = "".join(c for c in str(celula).upper() if c.isalnum())
     if len(celula) < 2:
         return 0, 0
 
@@ -194,3 +204,89 @@ def capturar_sequencia_telas_rapida(quantidade=3, intervalo=0.6):
                 print(f"[VISAO] Erro ao capturar sequência: {e}")
             time.sleep(intervalo)
     return imagens
+
+# ─────────────────────────────────────────────────────────────────
+# TRIAGEM DE BAIXO CUSTO
+# A triagem só precisa decidir SIM/NAO — não precisa de resolução
+# cheia. 640x360 custa ~307 tokens de imagem contra ~1229 de
+# 1280x720, com a mesma taxa de acerto pra "aconteceu algo grande?".
+# A resolução cheia continua sendo usada nas análises de verdade.
+# ─────────────────────────────────────────────────────────────────
+
+TRIAGEM_W = 640
+TRIAGEM_H = 360
+TRIAGEM_QUALIDADE = 70
+
+# Lado da miniatura usada pra assinar o frame e comparar com o anterior.
+ASSINATURA_LADO = 32
+
+# Diferença média (0-255) entre duas assinaturas a partir da qual
+# consideramos que a tela realmente mudou. Valor baixo porque a
+# maior parte do ruído de compressão fica bem abaixo de 1.
+LIMIAR_TELA_MUDOU = 2.0
+
+
+def capturar_tela_triagem():
+    """
+    Captura a tela em resolução reduzida, só pra triagem SIM/NAO.
+    Bem mais barato em tokens que capturar_tela().
+    """
+    try:
+        with mss.mss() as sct:
+            monitor = sct.monitors[monitor_atual]
+            screenshot = sct.grab(monitor)
+            img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+            img = img.resize((TRIAGEM_W, TRIAGEM_H))
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=TRIAGEM_QUALIDADE)
+            buffer.seek(0)
+            return base64.b64encode(buffer.read()).decode("utf-8")
+    except Exception as e:
+        if _tela_bloqueada_pelo_uac():
+            print("[VISAO] UAC ativo — captura de triagem bloqueada.")
+        else:
+            print(f"[VISAO] Erro ao capturar tela para triagem: {e}")
+        return None
+
+
+def assinatura_frame(imagem_base64: str):
+    """
+    Reduz um frame base64 a uma miniatura 32x32 em escala de cinza e
+    devolve a lista de luminâncias. Serve pra comparar frames sem
+    gastar chamada de LLM.
+    Retorna None se não der pra processar.
+    """
+    if not imagem_base64:
+        return None
+    try:
+        dados = base64.b64decode(imagem_base64)
+        img = Image.open(BytesIO(dados)).convert("L")
+        img = img.resize((ASSINATURA_LADO, ASSINATURA_LADO))
+        return list(img.getdata())
+    except Exception as e:
+        print(f"[VISAO] Erro ao assinar frame: {e}")
+        return None
+
+
+def diferenca_assinaturas(assinatura_a, assinatura_b) -> float:
+    """
+    Diferença média absoluta entre duas assinaturas, de 0 a 255.
+    Retorna 255.0 (diferença máxima) se alguma assinatura faltar,
+    pra nunca suprimir um frame por falta de dado.
+    """
+    if not assinatura_a or not assinatura_b:
+        return 255.0
+    if len(assinatura_a) != len(assinatura_b):
+        return 255.0
+    total = sum(abs(a - b) for a, b in zip(assinatura_a, assinatura_b))
+    return total / len(assinatura_a)
+
+
+def tela_mudou(assinatura_anterior, assinatura_atual, limiar: float = LIMIAR_TELA_MUDOU) -> bool:
+    """
+    True se a tela mudou o suficiente pra valer uma chamada de LLM.
+    Na primeira execução (sem assinatura anterior) sempre retorna True.
+    """
+    if assinatura_anterior is None:
+        return True
+    return diferenca_assinaturas(assinatura_anterior, assinatura_atual) >= limiar

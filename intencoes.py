@@ -100,7 +100,7 @@ def confirma_encerramento(mensagem: str) -> bool:
     Mantido para compatibilidade com chamadas antigas."""
     return False
 
-    
+
 # ──────────────────────────────────────────────
 # MODO ESCRITO
 # ──────────────────────────────────────────────
@@ -148,5 +148,3 @@ def desativar_modo_escrito(mensagem: str) -> bool:
     if not texto:
         return False
     return any(frase in texto for frase in PHRASES_DESATIVAR_MODO_ESCRITO)
-
-    return restante

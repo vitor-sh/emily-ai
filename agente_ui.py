@@ -225,10 +225,35 @@ def _tentar_abrir_app(nome: str) -> bool:
 
 def _obter_coordenadas(acao_dict: dict) -> tuple[Optional[int], Optional[int]]:
     """
-    Extrai coordenadas x, y da ação. Retorna (None, None) se não houver.
+    Extrai coordenadas x, y da ação, na escala da imagem 1280x720.
+
+    Aceita duas formas, nessa ordem de prioridade:
+
+    1. "celula" — identificador da grade desenhada na print, tipo "B3".
+       É a forma preferida. Apontar uma célula rotulada é muito mais fácil
+       para um modelo de visão do que estimar x=647, y=382 no olho, e o
+       erro fica limitado ao tamanho da célula em vez de ser ilimitado.
+    2. "x" e "y" — coordenada crua. Fica como fallback porque o modelo
+       às vezes responde assim mesmo e porque ações antigas usam isso.
+
+    Retorna (None, None) se não vier nenhuma das duas.
     """
+    celula = acao_dict.get("celula")
+    if celula:
+        x, y = visao.celula_para_centro(str(celula))
+        # celula_para_centro devolve (0, 0) para célula inválida. A célula
+        # A0 legítima cai em (64, 36), então (0, 0) só acontece em erro.
+        if (x, y) != (0, 0):
+            return x, y
+        print(f"[AGENTE_UI] Célula inválida do modelo: {celula!r}")
+
     if "x" in acao_dict and "y" in acao_dict:
-        return int(acao_dict["x"]), int(acao_dict["y"])
+        try:
+            return int(acao_dict["x"]), int(acao_dict["y"])
+        except (TypeError, ValueError):
+            print(f"[AGENTE_UI] Coordenadas inválidas: "
+                  f"x={acao_dict.get('x')!r} y={acao_dict.get('y')!r}")
+
     return None, None
 
 
@@ -643,8 +668,12 @@ def _loop_agente(objetivo: str) -> None:
             except Exception:
                 break
 
-        # 1. Captura a tela atual (alta resolução)
-        imagem = visao.capturar_tela()
+        # 1. Captura a tela com a grade de precisão desenhada em cima.
+        # A grade 10x10 rotulada A0-J9 já existia em visao.py e nunca era
+        # usada: o agente mandava a print limpa e pedia coordenada crua.
+        # Com a grade, o modelo aponta uma célula e o erro fica limitado
+        # ao tamanho dela (128x72) em vez de ser ilimitado.
+        imagem = visao.capturar_tela_com_grade()
         if not imagem:
             # Se a captura falhou, pode ser UAC ou outro bloqueio de segurança.
             # Esperamos um pouco e tentamos de novo, mas não travamos a thread.
@@ -653,7 +682,7 @@ def _loop_agente(objetivo: str) -> None:
                 for _ in range(20):  # espera até ~20 segundos pela resposta do UAC
                     time.sleep(1)
                     if not visao._tela_bloqueada_pelo_uac():
-                        imagem = visao.capturar_tela()
+                        imagem = visao.capturar_tela_com_grade()
                         if imagem:
                             break
                 if not imagem:
