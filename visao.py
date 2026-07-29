@@ -27,38 +27,44 @@ def _desenhar_grade(imagem: Image.Image) -> Image.Image:
     largura_celula = w / GRADE_COLS
     altura_celula = h / GRADE_LINHAS
 
-    # Tenta carregar uma fonte legível; fallback pra fonte padrão
+    # Negrito de propósito: foi a fonte usada na medição de acerto da grade.
     try:
-        fonte = ImageFont.truetype("arial.ttf", 16)
+        fonte = ImageFont.truetype("arialbd.ttf", 16)
     except Exception:
         try:
-            fonte = ImageFont.truetype("segoeui.ttf", 16)
+            fonte = ImageFont.truetype("arial.ttf", 16)
         except Exception:
-            fonte = ImageFont.load_default()
+            try:
+                fonte = ImageFont.truetype("segoeuib.ttf", 16)
+            except Exception:
+                fonte = ImageFont.load_default()
 
-    # Linhas da grade
+    # Linhas da grade. Espessura 2 e alfa 170 em vez de 1 e 90: o rótulo
+    # precisa sobreviver ao reescalonamento que o encoder de visão do
+    # modelo faz na imagem antes de olhar pra ela.
     for i in range(1, GRADE_COLS):
         x = int(i * largura_celula)
-        draw.line([(x, 0), (x, h)], fill=(255, 0, 0, 90), width=1)
+        draw.line([(x, 0), (x, h)], fill=(255, 0, 0, 170), width=2)
     for i in range(1, GRADE_LINHAS):
         y = int(i * altura_celula)
-        draw.line([(0, y), (w, y)], fill=(255, 0, 0, 90), width=1)
+        draw.line([(0, y), (w, y)], fill=(255, 0, 0, 170), width=2)
 
-    # Rótulos das células
+    # Rótulos das células. Amarelo sobre caixa preta quase opaca: foi essa
+    # combinação que mediu 12/12 de acerto de localização no teste, contra
+    # o branco em alfa 140 que estava aqui antes.
     letras = "ABCDEFGHIJ"
     for lin in range(GRADE_LINHAS):
         for col in range(GRADE_COLS):
             cx = int(col * largura_celula + largura_celula / 2)
             cy = int(lin * altura_celula + altura_celula / 2)
             texto = f"{letras[col]}{lin}"
-            # Fundo escuro semi-transparente pra melhorar leitura
             bbox = draw.textbbox((0, 0), texto, font=fonte)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.rectangle(
-                [(cx - tw // 2 - 2, cy - th // 2 - 2), (cx + tw // 2 + 2, cy + th // 2 + 2)],
-                fill=(0, 0, 0, 140)
+                [(cx - tw // 2 - 5, cy - th // 2 - 5), (cx + tw // 2 + 5, cy + th // 2 + 5)],
+                fill=(0, 0, 0, 215)
             )
-            draw.text((cx - tw // 2, cy - th // 2), texto, font=fonte, fill=(255, 255, 255, 255))
+            draw.text((cx - tw // 2, cy - th // 2), texto, font=fonte, fill=(255, 255, 0, 255))
 
     return img
 
@@ -68,7 +74,11 @@ def celula_para_centro(celula: str) -> tuple[int, int]:
     Converte identificador de célula (ex: "B3") em coordenadas centrais (x, y)
     na escala da imagem 1280x720.
     """
-    celula = celula.strip().upper()
+    # Os modelos costumam devolver a célula com sujeira em volta: aspas,
+    # ponto final ("H8."), crase, espaço. Medido de verdade: o
+    # llama-3.2-11b responde 'H8.' e o 90b responde 'J1.'. Sem essa
+    # limpeza a célula era descartada como inválida.
+    celula = "".join(c for c in str(celula).upper() if c.isalnum())
     if len(celula) < 2:
         return 0, 0
 

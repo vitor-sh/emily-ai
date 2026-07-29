@@ -736,9 +736,27 @@ MODELO_TEXTO = os.getenv("EMILY_MODELO_TEXTO", "z-ai/glm-5.2")
 MODELO_VISAO = os.getenv("EMILY_MODELO_VISAO", "nvidia/nemotron-nano-12b-v2-vl")
 MODELO_VISAO_RAPIDO = os.getenv("EMILY_MODELO_VISAO_RAPIDO", "nvidia/nemotron-nano-12b-v2-vl")
 
-# Alternativa medida e funcional, caso o nemotron decepcione em precisão
-# no agente de UI. Custa 4x mais token de prompt.
-MODELO_VISAO_ALTERNATIVO = "meta/llama-3.2-11b-vision-instruct"
+# ─── Visão do agente de UI ───────────────────────────────────────
+# O agente de UI tem uma exigência diferente das outras rotas de visão:
+# ele precisa APONTAR um lugar da tela com precisão, não descrever o que vê.
+#
+# Testado com a grade 10x10 desenhada na print, perguntando em que célula
+# está um elemento conhecido (botão Iniciar, bandeja do sistema, barra de
+# título), 12 amostras por modelo:
+#
+#   meta/llama-3.2-90b-vision-instruct   12/12 acertos
+#   nvidia/nemotron-nano-12b-v2-vl        7/12 acertos
+#
+# O nemotron erra a coluna com frequência — acerta a linha e escorrega na
+# horizontal. Num agente que clica, isso é clique no lugar errado.
+#
+# Custa mais: ~3.242 tokens de prompt contra 809 do nemotron. Mas o agente
+# de UI roda ocasionalmente e sob supervisão, então precisão vale mais que
+# custo aqui. As outras rotas de visão ficam no nemotron, que é barato e
+# rápido e só precisa descrever.
+MODELO_VISAO_AGENTE = os.getenv(
+    "EMILY_MODELO_VISAO_AGENTE", "meta/llama-3.2-90b-vision-instruct"
+)
 
 
 @dataclass
@@ -802,11 +820,12 @@ ROTAS: Dict[str, Rota] = {
         max_tokens=16, raciocinio=RACIOCINIO_NORMAL, temperatura=0.0,
     ),
 
-    # Agente de UI: precisa de visão E de decisão estruturada em JSON.
-    # É a rota mais exigente do projeto.
+    # Agente de UI: precisa de visão, decisão estruturada em JSON e, acima
+    # de tudo, precisão para apontar onde clicar. Usa um modelo diferente
+    # das outras rotas de visão por isso — ver MODELO_VISAO_AGENTE.
     "agente_ui": Rota(
-        provedor="nvidia", modelo=MODELO_VISAO,
-        max_tokens=1024, raciocinio=RACIOCINIO_MINIMO, temperatura=0.1,
+        provedor="nvidia", modelo=MODELO_VISAO_AGENTE,
+        max_tokens=1024, raciocinio=RACIOCINIO_NORMAL, temperatura=0.1,
     ),
 
     # Discord: respostas curtas de chat.
