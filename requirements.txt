@@ -64,5 +64,33 @@ webdriver-manager==4.1.2
 python-dotenv==1.2.2
 numpy==2.4.6
 
+# ── Gateway do Kiro (LLM principal desde a migração) ───────────────
+#
+# ATENÇÃO: estas NÃO são dependências da Emily, são do SUBPROCESSO.
+# O gateway roda como `python main.py` dentro de kiro_gateway/, com um
+# interpretador SEPARADO do executável da Emily. Consequência prática:
+# empacotar a Emily com PyInstaller não leva estas libs para o subprocesso —
+# elas precisam estar instaladas no Python do sistema que o gateway.py vai
+# usar (ver EMILY_GATEWAY_PYTHON no README).
+#
+# Ficam listadas aqui porque `pip install -r requirements.txt` no ambiente de
+# desenvolvimento é o que deixa tudo funcionando de uma vez.
+fastapi==0.139.0
+uvicorn==0.49.0
+httpx==0.28.1
+loguru==0.7.3
+tiktoken==0.12.0
+pydantic==2.13.3
+
+# ── Desenvolvimento e teste (não vão para o executável) ────────────
+#
+# A suíte fica em testes/ e roda com:
+#   python -m pytest testes/ -q
+#
+# São 84 testes de propriedade cobrindo o ciclo de vida do gateway, as
+# tabelas de rotas e o tool calling. Nenhum toca a rede.
+pytest==9.1.1
+hypothesis==6.165.1
+
 # ── Só para gerar o executável (opcional) ──────────────────────────
 # pyinstaller==6.21.0

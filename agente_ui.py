@@ -54,6 +54,11 @@ IMG_H = 720
 # Limite de segurança: se passar disso algo deu errado
 MAX_PASSOS = 50
 
+# Passos seguidos sem decisão válida antes de desistir. Cada passo já tenta o
+# modelo 3 vezes, então 3 aqui significa 9 tentativas — o bastante pra saber
+# que o modelo não vai colaborar com essa tarefa.
+MAX_PASSOS_SEM_DECISAO = 3
+
 # Histórico de telas/contexto recente para o agente não "esquecer" onde estava
 _contexto_telas: list[str] = []
 _MAX_CONTEXTOS = 5
@@ -83,13 +88,15 @@ def _escalar_coordenadas(x: int, y: int) -> tuple[int, int]:
     y_real = y_imagem * (1080 / 720)  = y * 1.5
     """
     try:
-        import mss
-        with mss.mss() as sct:
-            monitor      = sct.monitors[visao.monitor_atual]
-            largura_real = monitor["width"]
-            altura_real  = monitor["height"]
-            offset_x     = monitor["left"]   # deslocamento horizontal (pra multi-monitor)
-            offset_y     = monitor["top"]    # deslocamento vertical
+        # geometria_atual traduz o número humano do monitor pro índice do mss.
+        # Indexar sct.monitors[visao.monitor_atual] direto — como era antes —
+        # apontava pro monitor errado, porque o mss não enumera o primário
+        # como 1. O clique ia pra outra tela.
+        monitor      = visao.geometria_atual()
+        largura_real = monitor["width"]
+        altura_real  = monitor["height"]
+        offset_x     = monitor["left"]   # deslocamento horizontal (pra multi-monitor)
+        offset_y     = monitor["top"]    # deslocamento vertical
 
         x_real = int(x * largura_real / IMG_W) + offset_x
         y_real = int(y * altura_real  / IMG_H) + offset_y
@@ -441,12 +448,10 @@ def _executar_acao(acao_dict: dict) -> bool:
                 _fazer_scroll(rx, ry)
             else:
                 # Sem coordenadas: usa o centro da tela
-                import mss
                 try:
-                    with mss.mss() as sct:
-                        monitor = sct.monitors[visao.monitor_atual]
-                        cx = monitor["left"] + monitor["width"]  // 2
-                        cy = monitor["top"]  + monitor["height"] // 2
+                    monitor = visao.geometria_atual()
+                    cx = monitor["left"] + monitor["width"]  // 2
+                    cy = monitor["top"]  + monitor["height"] // 2
                     pyautogui.click(cx, cy)
                     time.sleep(0.2)
                     _fazer_scroll(cx, cy)
@@ -639,6 +644,13 @@ def _loop_agente(objetivo: str) -> None:
 
     print(f"\n[AGENTE_UI] === Iniciando: '{objetivo}' ===")
 
+    # Passos seguidos em que o modelo não devolveu decisão utilizável. Sem esse
+    # freio, um modelo que recusa a tarefa ("Não posso ajudar com isso") ou
+    # responde conversando ("Olá, Vitor. Como posso ajudar?") fazia o agente
+    # varrer os 50 passos inteiros, três chamadas por passo, clicando no que
+    # aparecesse pela frente quando por acaso saía um JSON.
+    passos_sem_decisao = 0
+
     for passo in range(1, MAX_PASSOS + 1):
 
         # Verifica se o usuário pediu pra parar
@@ -706,13 +718,27 @@ def _loop_agente(objetivo: str) -> None:
             time.sleep(0.5)
 
         if not decisao:
-            # Se falhou 3 vezes seguidas, pula esse passo e tenta de novo no próximo
-            print("[AGENTE_UI] Modelo falhou 3x seguidas, pulando passo...")
+            passos_sem_decisao += 1
+            print(f"[AGENTE_UI] Modelo falhou 3x seguidas "
+                  f"({passos_sem_decisao}/{MAX_PASSOS_SEM_DECISAO} passos sem decisão)")
+
+            if passos_sem_decisao >= MAX_PASSOS_SEM_DECISAO:
+                # Desistir é melhor que continuar: o agente controla o mouse de
+                # verdade, e insistir sem decisão válida só produz clique
+                # aleatório na tela do Vitor.
+                print("[AGENTE_UI] ✗ Abortando: o modelo não está conseguindo "
+                      "decidir os passos dessa tarefa.")
+                _falar("Vitor, não tô conseguindo fazer isso vendo a tela. "
+                       "Me explica de outro jeito ou pede de outra forma.")
+                break
+
             historico.append(f"Passo {passo}: FALHA - modelo não retornou JSON válido")
             if len(historico) > 8:
                 historico = historico[-8:]
             time.sleep(1.0)
             continue
+
+        passos_sem_decisao = 0
 
         tipo_acao = decisao.get("acao", "")
         descricao = decisao.get("descricao", "")

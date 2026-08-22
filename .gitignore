@@ -6,6 +6,20 @@
 .env.*
 
 # ─────────────────────────────────────────────────────────────────
+# KIRO GATEWAY — credenciais e estado do proxy local
+#
+# O .env acima já cobre kiro_gateway/.env (padrão sem barra casa em
+# qualquer nível), mas credentials.json guarda o refresh token da conta
+# Kiro e state.json guarda estatística de uso por conta. Nenhum dos dois
+# pode ir pro GitHub.
+# ─────────────────────────────────────────────────────────────────
+kiro_gateway/.env
+kiro_gateway/credentials.json
+kiro_gateway/state.json
+kiro_gateway/*.log
+kiro_gateway/debug_logs/
+
+# ─────────────────────────────────────────────────────────────────
 # DADOS PESSOAIS E CACHE LOCAL gerados pela Emily
 # ─────────────────────────────────────────────────────────────────
 

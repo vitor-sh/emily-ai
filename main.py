@@ -1,4 +1,5 @@
 import queue
+import os
 import re
 import threading
 import time
@@ -32,8 +33,48 @@ def _normalizar_simples(t: str) -> str:
 mem = memoria.carregar_memoria()
 modelo.atualizar_memoria(mem)
 
+# ─────────────────────────────────────────────
+# GATEWAY DO KIRO
+#
+# O LLM da Emily é um processo local desde a migração pro plano pago do
+# Kiro. Subir aqui, e não na primeira chamada, é de propósito: o custo de
+# boot (uns 5s) sai enquanto a interface carrega, e não no meio da
+# primeira frase que o Vitor falar.
+#
+# Em try/except porque emudecer a Emily inteira por causa do LLM é pior
+# que a falha: sem isso, um login expirado do Kiro impediria interface,
+# voz, Discord e automação de subir. A falha é falada e a Emily continua.
+#
+# Se falhar aqui, a próxima chamada de LLM tenta de novo — o garantir() é
+# idempotente e o ProvedorKiro o chama sozinho.
+# ─────────────────────────────────────────────
+try:
+    import gateway
+
+    gateway.garantir()
+except Exception as _erro_gateway:  # noqa: BLE001
+    _motivo = getattr(_erro_gateway, "motivo", type(_erro_gateway).__name__)
+    _detalhe = getattr(_erro_gateway, "detalhe", str(_erro_gateway))
+    print(f"[MAIN] gateway do Kiro indisponível ({_motivo})")
+    print(f"[MAIN] {_detalhe}")
+    try:
+        _frase = _erro_gateway.frase() if hasattr(_erro_gateway, "frase") else None
+        if _frase:
+            voz.falar(_frase)
+    except Exception as _erro_voz:  # noqa: BLE001
+        print(f"[MAIN] não consegui falar o aviso de gateway: {_erro_voz}")
+
 automacao.inicializar()
 discord_bot.inicializar()
+
+# Escuta do chat do Minecraft. Fica num try porque é o serviço mais novo e o que
+# mais depende de coisa de fora (painel de hospedagem, servidor ligado): se ele
+# não subir, a Emily inteira não pode deixar de abrir por causa disso.
+try:
+    import mine_jogo
+    mine_jogo.inicializar()
+except Exception as _erro_mc:  # noqa: BLE001
+    print(f"[MAIN] não consegui ligar a escuta do Minecraft: {_erro_mc}")
 
 janela = interface.JanelaEmily()
 automacao.definir_callback_status(janela.atualizar_status)
@@ -98,6 +139,8 @@ visao_ativa = threading.Event()
 modo_escrito_ativo = False
 modo_ui_ativo = False
 modo_jogo_ativo = threading.Event()
+modo_assistir_tela_ativo = threading.Event()
+timer_assistir_tela = None
 
 ultimo_uso_usuario = 0
 COOLDOWN_VISAO = 10
@@ -131,6 +174,16 @@ FRASES_DESATIVAR_JOGO = (
     "para de olhar meu jogo",
     "para de reagir",
     "para de comentar o jogo",
+)
+
+FRASES_DESATIVAR_ASSISTIR_TELA = (
+    "para de olhar minha tela",
+    "para de olhar a tela",
+    "para de assistir a tela",
+    "para de assistir minha tela",
+    "pode parar de olhar",
+    "pode parar de assistir",
+    "desativa assistir tela",
 )
 
 # ─── MODO JOGO (AGENTE DE JOGOS) ───
@@ -265,6 +318,132 @@ def _desativar_modo_ui():
     janela.atualizar_status("aguardando")
 
 
+# ─────────────────────────────────────────────
+# HANDLERS DAS FERRAMENTAS DE MODO
+#
+# As ferramentas de automação (abrir app, pesquisar, ver tela) chamam o código
+# de automacao.py direto. Já os MODOS da Emily mexem em estado global daqui:
+# threads, eventos e status da janela. Então ferramentas.py não os conhece —
+# o main.py registra um handler e a ferramenta chama o que foi registrado.
+#
+# Estes handlers só mudam o estado e devolvem uma frase factual. Não falam:
+# quem fala é o modelo, que recebe esse retorno e comenta no jeito da Emily.
+# Se eles falassem, a Emily diria duas coisas seguidas.
+# ─────────────────────────────────────────────
+
+def _registrar_ferramentas_de_modo():
+    import ferramentas
+
+    def escrito_on():
+        global modo_escrito_ativo
+        modo_escrito_ativo = True
+        return "Modo escrito ligado. Agora digito o que o Vitor falar."
+
+    def escrito_off():
+        global modo_escrito_ativo
+        modo_escrito_ativo = False
+        return "Modo escrito desligado."
+
+    def ui_on():
+        global modo_ui_ativo
+        modo_ui_ativo = True
+        modelo.registrar_acao_no_historico("Ativou o modo controle de tela (UI)")
+        janela.atualizar_status("falando")
+        return "Modo de controle de tela ligado."
+
+    def ui_off():
+        global modo_ui_ativo
+        modo_ui_ativo = False
+        agente_ui.parar_agente_ui()
+        modelo.registrar_acao_no_historico("Desativou o modo controle de tela (UI)")
+        return "Modo de controle de tela desligado."
+
+    def jogo_on():
+        if modo_assistir_tela_ativo.is_set():
+            return "Eu já estou assistindo sua tela! Pare o monitoramento contínuo primeiro se quiser o modo jogo."
+        modo_jogo_ativo.set()
+        visao_ativa.set()
+        janela.atualizar_status("monitorando")
+        return "Monitoramento de jogo ligado. Só vou falar quando algo marcante acontecer."
+
+    def jogo_off():
+        modo_jogo_ativo.clear()
+        visao_ativa.clear()
+        return "Monitoramento de jogo desligado."
+
+    def assistir_tela_on(duracao_segundos=120):
+        global timer_assistir_tela
+        if modo_jogo_ativo.is_set():
+            return "O monitoramento de jogo já está ligado, não posso iniciar os dois juntos."
+        
+        modo_assistir_tela_ativo.set()
+        visao_ativa.set()
+        janela.atualizar_status("monitorando")
+        
+        if timer_assistir_tela is not None:
+            timer_assistir_tela.cancel()
+            
+        timer_assistir_tela = threading.Timer(duracao_segundos, _timeout_assistir_tela)
+        timer_assistir_tela.start()
+        
+        return f"Tô de olho na sua tela! Vou ficar acompanhando por {duracao_segundos} segundos."
+
+    def _timeout_assistir_tela():
+        if modo_assistir_tela_ativo.is_set():
+            assistir_tela_off(motivo_timeout=True)
+
+    def assistir_tela_off(motivo_timeout=False):
+        global timer_assistir_tela
+        modo_assistir_tela_ativo.clear()
+        
+        if not modo_jogo_ativo.is_set():
+            visao_ativa.clear()
+            janela.atualizar_status("aguardando")
+            
+        if timer_assistir_tela is not None:
+            timer_assistir_tela.cancel()
+            timer_assistir_tela = None
+            
+        if motivo_timeout:
+            def _falar_timeout():
+                for _ in range(30):
+                    if not emily_ocupada.is_set() and not voz.falar_ativo.is_set():
+                        break
+                    time.sleep(0.5)
+                emily_ocupada.set()
+                try:
+                    janela.atualizar_status("falando", "Tempo esgotado")
+                    voz.falar("Parei de olhar a tela, o tempo acabou.")
+                    restaurar_status()
+                finally:
+                    emily_ocupada.clear()
+            threading.Thread(target=_falar_timeout, daemon=True).start()
+            
+        return "Parei de olhar a tela, só te escutando agora."
+
+    def discord_on():
+        discord_bot.ativar_escuta_discord()
+        return "Escuta do Discord ligada."
+
+    def discord_off():
+        discord_bot.desativar_escuta_discord()
+        return "Escuta do Discord desligada."
+
+    ferramentas.registrar_handler("ativar_modo_escrito", escrito_on)
+    ferramentas.registrar_handler("desativar_modo_escrito", escrito_off)
+    ferramentas.registrar_handler("ativar_modo_controle_tela", ui_on)
+    ferramentas.registrar_handler("desativar_modo_controle_tela", ui_off)
+    ferramentas.registrar_handler("ativar_monitoramento_jogo", jogo_on)
+    ferramentas.registrar_handler("desativar_monitoramento_jogo", jogo_off)
+    ferramentas.registrar_handler("assistir_tela", assistir_tela_on)
+    ferramentas.registrar_handler("parar_assistir_tela", assistir_tela_off)
+    ferramentas.registrar_handler("ativar_escuta_discord", discord_on)
+    ferramentas.registrar_handler("desativar_escuta_discord", discord_off)
+
+    print(f"[MAIN] {len(ferramentas.CATALOGO)} ferramentas disponíveis, "
+          f"8 handlers de modo registrados")
+
+
 def _processar_modo_ui(texto: str) -> bool:
     """Processa a entrada quando o modo de controle de tela está ativo.
     Retorna True se tratou a entrada, False se deve continuar o fluxo normal."""
@@ -313,10 +492,23 @@ def restaurar_status():
     discord_bot.atualizar_status_discord("aguardando")
 
 
+# Responder por voz o que foi pedido por ESCRITO. Desligado.
+#
+# Ligue com EMILY_FALAR_TEXTO_DIGITADO=1 no .env se algum dia quiser as duas
+# coisas. O padrão é não falar porque foi o que o Vitor pediu: ele digita
+# enquanto joga de headset e a fala em cima do jogo incomoda.
+FALAR_TEXTO_DIGITADO = os.getenv("EMILY_FALAR_TEXTO_DIGITADO", "0").strip() == "1"
+
+
 def processar_texto_digitado(texto):
     global ultimo_uso_usuario, modo_ui_ativo
     ultimo_uso_usuario = time.time()
     emily_ocupada.set()
+    # Silencia a voz por todo o turno escrito. No finally, sempre — se sair por
+    # exceção e o mudo ficar preso, a Emily emudece pro resto da sessão, e um
+    # bug de enfeite viraria um bug de "ela não fala mais".
+    if not FALAR_TEXTO_DIGITADO:
+        voz.mudo.set()
     try:
         texto_norm = texto.lower().strip()
 
@@ -387,6 +579,45 @@ def processar_texto_digitado(texto):
         # ─── PEDIDO DE JOGO ───
         if _pedido_para_jogar(texto):
             _iniciar_agente_jogo(texto)
+            restaurar_status()
+            emily_ocupada.clear()
+            return
+
+        # ─── TOOL CALLING (caminho novo, texto digitado) ───
+        if modelo.TOOL_CALLING_ATIVO:
+            _fila_tc = queue.Queue()
+            _buf_tc = []
+
+            # Liga o indicador no chat ANTES da primeira ida ao modelo — a
+            # espera que ninguém vê acontecer é justamente essa.
+            janela.progresso_evento("inicio", {})
+
+            def _gerar_tc():
+                r = modelo.conversar_com_ferramentas(
+                    texto,
+                    callback=lambda f: janela.atualizar_status("falando", f),
+                    fila_frases=_fila_tc,
+                    on_progresso=janela.progresso_evento,
+                )
+                if r:
+                    _buf_tc.append(r)
+
+            def _falar_tc():
+                voz.falar_stream(
+                    _fila_tc,
+                    lambda f: janela.atualizar_status("falando", f),
+                )
+
+            discord_bot.atualizar_status_discord("falando")
+            _t_g = threading.Thread(target=_gerar_tc, daemon=True)
+            _t_f = threading.Thread(target=_falar_tc, daemon=True)
+            _t_g.start()
+            _t_f.start()
+            _t_g.join()
+            _t_f.join()
+
+            if _buf_tc:
+                memoria.processar_conversa_async(texto, _buf_tc[0])
             restaurar_status()
             emily_ocupada.clear()
             return
@@ -689,6 +920,10 @@ def processar_texto_digitado(texto):
         restaurar_status()
     finally:
         emily_ocupada.clear()
+        # Solta a voz de volta SEMPRE, inclusive se estourou exceção no meio.
+        # Mudo preso emudeceria a Emily até reiniciar.
+        voz.mudo.clear()
+        janela.progresso_evento("fim", {})
 
 
 janela.callback_texto = processar_texto_digitado
@@ -1100,11 +1335,14 @@ def rodar_emily():
 
             # ─── MODO JOGO (monitoramento de tela pra reagir) ───
             if not modo_jogo_ativo.is_set() and any(frase in entrada_lower for frase in FRASES_ATIVAR_JOGO):
-                modo_jogo_ativo.set()
-                visao_ativa.set()
-                resposta = "Tô de olho no jogo agora, Vitor. Só vou falar quando acontecer algo importante."
-                janela.atualizar_status("monitorando", resposta)
-                voz.falar(resposta)
+                if modo_assistir_tela_ativo.is_set():
+                    voz.falar("Eu já estou assistindo sua tela! Pare o monitoramento contínuo primeiro se quiser o modo jogo.")
+                else:
+                    modo_jogo_ativo.set()
+                    visao_ativa.set()
+                    resposta = "Tô de olho no jogo agora, Vitor. Só vou falar quando acontecer algo importante."
+                    janela.atualizar_status("monitorando", resposta)
+                    voz.falar(resposta)
                 restaurar_status()
                 emily_ocupada.clear()
                 continue
@@ -1119,9 +1357,62 @@ def rodar_emily():
                 emily_ocupada.clear()
                 continue
 
+            if modo_assistir_tela_ativo.is_set() and any(frase in entrada_lower for frase in FRASES_DESATIVAR_ASSISTIR_TELA):
+                # O handler já limpa os eventos e atualiza a interface.
+                # _chamar_handler vive em ferramentas.py (não em main.py), e é lá
+                # que ficam registrados os handlers de modo — por isso a chamada
+                # é qualificada com o módulo.
+                import ferramentas
+                resposta = ferramentas._chamar_handler("parar_assistir_tela")
+
+                janela.atualizar_status("falando", resposta)
+                voz.falar(resposta)
+                restaurar_status()
+                emily_ocupada.clear()
+                continue
+
             # ─── PEDIDO DE JOGO ───
             if _pedido_para_jogar(entrada):
                 _iniciar_agente_jogo(entrada)
+                restaurar_status()
+                emily_ocupada.clear()
+                continue
+
+            # ─── TOOL CALLING (caminho novo) ───
+            # O modelo lê a conversa inteira e decide sozinho se responde ou
+            # age, sem palavra-chave e sem classificador de confiança. Isso
+            # substitui de uma vez o executar_comando por keyword, o fallback
+            # de intenção e o conversar_stream.
+            # Desligue com EMILY_TOOL_CALLING=0 pra voltar ao caminho antigo.
+            if modelo.TOOL_CALLING_ATIVO:
+                _fila_tc = queue.Queue()
+                _buf_tc = []
+
+                def _gerar_tc():
+                    r = modelo.conversar_com_ferramentas(
+                        entrada,
+                        callback=lambda f: janela.atualizar_status("falando", f),
+                        fila_frases=_fila_tc,
+                    )
+                    if r:
+                        _buf_tc.append(r)
+
+                def _falar_tc():
+                    voz.falar_stream(
+                        _fila_tc,
+                        lambda f: janela.atualizar_status("falando", f),
+                    )
+
+                discord_bot.atualizar_status_discord("falando")
+                _t_g = threading.Thread(target=_gerar_tc, daemon=True)
+                _t_f = threading.Thread(target=_falar_tc, daemon=True)
+                _t_g.start()
+                _t_f.start()
+                _t_g.join()
+                _t_f.join()
+
+                if _buf_tc:
+                    memoria.processar_conversa_async(entrada, _buf_tc[0])
                 restaurar_status()
                 emily_ocupada.clear()
                 continue
@@ -1191,11 +1482,14 @@ def rodar_emily():
                     continue
 
                 elif acao_fb == "ativar_modo_jogo":
-                    modo_jogo_ativo.set()
-                    visao_ativa.set()
-                    resposta = "Tô de olho no jogo agora, Vitor. Só vou falar quando acontecer algo importante."
-                    janela.atualizar_status("monitorando", resposta)
-                    voz.falar(resposta)
+                    if modo_assistir_tela_ativo.is_set():
+                        voz.falar("Eu já estou assistindo sua tela! Pare o monitoramento contínuo primeiro se quiser o modo jogo.")
+                    else:
+                        modo_jogo_ativo.set()
+                        visao_ativa.set()
+                        resposta = "Tô de olho no jogo agora, Vitor. Só vou falar quando acontecer algo importante."
+                        janela.atualizar_status("monitorando", resposta)
+                        voz.falar(resposta)
                     restaurar_status()
                     emily_ocupada.clear()
                     continue
@@ -1436,62 +1730,68 @@ def loop_visao():
                 continue
 
             assinatura_atual = visao.assinatura_frame(frame_triagem)
-            if not visao.tela_mudou(assinatura_anterior, assinatura_atual):
+            
+            # Checa se a tela mudou o suficiente
+            mudou = visao.tela_mudou(assinatura_anterior, assinatura_atual)
+            
+            # Se a gente tá assistindo a tela (modo assistir), queremos logar
+            # se o frame passou no filtro ou se foi barrado
+            if modo_assistir_tela_ativo.is_set():
+                if not mudou:
+                    print("[VIDEO] frame descartado pelo pré-filtro (sem mudança suficiente)")
+                else:
+                    print("[VIDEO] frame enviado para Live API")
+            
+            if not mudou:
                 assinatura_anterior = assinatura_atual
                 time.sleep(2)
                 continue
             assinatura_anterior = assinatura_atual
 
-            # A triagem roda no frame de baixa resolução (~307 tokens em vez
-            # de ~1229). A análise de verdade continua em resolução cheia.
-            if modo_jogo_ativo.is_set():
-                vale_comentar = modelo.triar_tela_jogo(frame_triagem)
+            # No modo Vertex Gemini com Live API, o streaming de vídeo do modo jogo
+            # acontece pela mesma sessão contínua do áudio.
+            # Se for modo_jogo ou assistir_tela, não chama o analisar_tela_jogo, apenas empurra o frame 
+            # de triagem pro websocket da Live API!
+            if modo_jogo_ativo.is_set() or modo_assistir_tela_ativo.is_set():
+                if hasattr(voz, "_enviar_frame_live"):
+                    # Empurra o frame de baixa resolução para a Live API 
+                    voz._enviar_frame_live.put(frame_triagem)
+                    # Não gera fala local aqui, a Live API vai falar sozinha caso aconteça algo
+                time.sleep(1.0) # Taxa de atualização ~1 FPS no modo jogo Live
+                continue
             else:
                 vale_comentar = modelo.triar_tela(frame_triagem)
 
-            if not vale_comentar:
-                time.sleep(3)
-                continue
+                if not vale_comentar:
+                    time.sleep(3)
+                    continue
 
-            # Só agora paga a captura em resolução cheia
-            imagens = visao.capturar_sequencia_telas_rapida(quantidade=2, intervalo=0.3)
-            frame_atual = imagens[0] if imagens else None
-            if not frame_atual:
-                time.sleep(2)
-                continue
+                # Só agora paga a captura em resolução cheia
+                imagens = visao.capturar_sequencia_telas_rapida(quantidade=2, intervalo=0.3)
+                frame_atual = imagens[0] if imagens else None
+                if not frame_atual:
+                    time.sleep(2)
+                    continue
 
-            if modo_jogo_ativo.is_set():
-                comentario = modelo.analisar_tela_jogo(frame_atual, contexto=[ultimo_evento_jogo])
-            else:
                 comentario = modelo.analisar_sequencia_telas(imagens)
 
-            if not comentario:
-                time.sleep(3)
-                continue
+                if not comentario:
+                    time.sleep(3)
+                    continue
 
-            # Evita repetir o mesmo comentário de jogo em sequência
-            if modo_jogo_ativo.is_set() and comentario == ultimo_evento_jogo:
-                time.sleep(3)
-                continue
-            if modo_jogo_ativo.is_set():
-                ultimo_evento_jogo = comentario
-
-            if not emily_ocupada.is_set() and not voz.falar_ativo.is_set():
-                emily_ocupada.set()
-                ultimo_comentario = time.time()
-                try:
-                    janela.atualizar_status("falando", comentario)
-                    discord_bot.atualizar_status_discord("falando")
-                    voz.falar(comentario)
-                finally:
-                    emily_ocupada.clear()
-                    if modo_jogo_ativo.is_set():
-                        janela.atualizar_status("monitorando")
-                    else:
+                if not emily_ocupada.is_set() and not voz.falar_ativo.is_set():
+                    emily_ocupada.set()
+                    ultimo_comentario = time.time()
+                    try:
+                        janela.atualizar_status("falando", comentario)
+                        discord_bot.atualizar_status_discord("falando")
+                        voz.falar(comentario)
+                    finally:
+                        emily_ocupada.clear()
                         janela.atualizar_status("aguardando")
-                    discord_bot.atualizar_status_discord("aguardando")
+                        discord_bot.atualizar_status_discord("aguardando")
 
-            time.sleep(3)
+                time.sleep(3)
         except Exception as erro:
             print(f"Erro no loop de visão: {erro}")
             time.sleep(5)
@@ -1539,6 +1839,12 @@ signal.signal(signal.SIGTERM, ao_encerrar)
 signal.signal(signal.SIGBREAK, ao_encerrar)  # Windows
 
 atexit.register(encerrar_tudo)
+
+if modelo.TOOL_CALLING_ATIVO:
+    _registrar_ferramentas_de_modo()
+else:
+    print("[MAIN] Tool calling desligado (EMILY_TOOL_CALLING=0). "
+          "Usando o caminho antigo de palavra-chave.")
 
 thread_visao = threading.Thread(target=loop_visao, daemon=True)
 thread_visao.start()
