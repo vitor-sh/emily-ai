@@ -1053,13 +1053,15 @@ class Api:
     # ── Identidade e tela inicial ─────────────────────────────────
 
     def uso_contexto(self) -> dict:
-        import contexto_chat, uso_codex, llm, modelo
+        """Medidor de contexto do modelo ATUAL. Local e instantâneo: o uso da
+        assinatura Codex saiu daqui (levava até 15 s e travava o medidor)."""
+        import contexto_chat, llm, modelo
         key=getattr(self._j, '_cid', None) or "normal"
         cfg=llm.rota('conversa')
         state=contexto_chat.state(key)
         if not modelo.web_turno_ativo(key) or not state:
             state=contexto_chat.display(key,cfg.modelo,modelo._mensagens_para_turno()+list(modelo.historico))
-        return {"context":state,"usage":uso_codex.desktop_usage()}
+        return {"context":state}
 
     def perfil(self) -> dict:
         if self._demo_ativo():

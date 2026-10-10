@@ -85,10 +85,7 @@ function oficina() {
       { nome: 'Brave', cor: '#FB542B', letra: 'B', tinta: '#fff', existe: true },
     ]),
     abrir_app: () => true,
-    uso_contexto: () => ({context:{percent:37.5},usage:{accounts:[{label:'Conta de amostra',windows:[
-      {label:'5 horas',used_percent:9,resets_at:'2026-10-08T06:30:08'},
-      {label:'Semanal',used_percent:1,resets_at:'2026-10-15T01:30:08'}
-    ]}],updated_at:Math.floor(Date.now()/1000)}}),
+    uso_contexto: () => ({context:{percent:37.5, used:375000, limit:1000000, effective_limit:950000, model:'kr/claude-sonnet-5.5', source:'Catálogo do provedor omniroute'}}),
     estado_automacao: () => ({ monitor_downloads: true, monitor_discord: false,
       mudo: false, autonomia_experimental: false,
       audio_preprocess_denoise: true, audio_preprocess_normalize: true,
@@ -122,32 +119,35 @@ function oficina() {
         abas: [{indice: 0, url: urlNavegadorOficina, titulo: 'Prévia', ativa: true}]};
     },
     set_toggle: () => true, organizar_downloads: () => 'Separei 23 arquivos por tipo.',
-    estado_modelo: () => ({
-      provedor: 'omniroute', modelo: 'kr/claude-sonnet-5.5', raciocinio: 'baixo',
-      modelos: [
-        { id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5', sobre: 'Kiro (Oracle)' },
-        { id: 'kr/claude-opus-5.5', nome: 'Claude Opus 5.5', sobre: 'Kiro (Oracle) · 2º' },
-        { id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5', sobre: 'Kiro (Oracle) · 3º' },
-      ],
-      provedores: [
-        { id: 'omniroute', nome: 'Kiro (Oracle)',
-          modelos: [
-            { id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5', sobre: 'Kiro (Oracle)' },
-            { id: 'kr/claude-opus-5.5', nome: 'Claude Opus 5.5', sobre: 'Kiro (Oracle) · 2º' },
-            { id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5', sobre: 'Kiro (Oracle) · 3º' },
-          ] },
-      ],
-      niveis: [
-        { id: 'baixo', nome: 'Baixo' }, { id: 'medio', nome: 'Médio' }, { id: 'alto', nome: 'Alto' },
-      ],
-    }),
+    estado_modelo: () => {
+      const m = (id, nome, ctx) => ({ id, nome, sobre: ctx });
+      const modelos = [
+        m('kr/claude-sonnet-5.5', 'Claude Sonnet 5.5', '1M de contexto'),
+        m('kr/claude-opus-5.5', 'Claude Opus 5.5', '1M de contexto'),
+        m('kr/claude-opus-5', 'Claude Opus 5', '1M de contexto'),
+        m('kr/claude-sonnet-5', 'Claude Sonnet 5', '1M de contexto'),
+        m('kr/claude-opus-4.8', 'Claude Opus 4.8', '1M de contexto'),
+        m('kr/claude-sonnet-4.6', 'Claude Sonnet 4.6', '1M de contexto'),
+        m('kr/claude-sonnet-4.5', 'Claude Sonnet 4.5', '200k de contexto'),
+        m('kr/claude-haiku-4.5', 'Claude Haiku 4.5', '200k de contexto'),
+      ];
+      return {
+        provedor: 'omniroute', modelo: 'kr/claude-sonnet-5.5', raciocinio: 'medio',
+        modelos, provedores: [{ id: 'omniroute', nome: 'Kiro (Oracle)', modelos }],
+        niveis: [
+          { id: 'desligado', nome: 'Sem raciocínio' }, { id: 'baixo', nome: 'Baixo' }, { id: 'medio', nome: 'Médio' },
+          { id: 'alto', nome: 'Alto' }, { id: 'extra_alto', nome: 'Extra alto' }, { id: 'maximo', nome: 'Máximo' },
+        ],
+      };
+    },
     visual_modelo_estado: () => ({provedor: 'omniroute', modelo: 'kr/claude-opus-5', raciocinio: 'medio',
       provedores: [{id: 'omniroute', nome: 'Kiro (Oracle)', modelos: [
         {id: 'kr/claude-opus-5', nome: 'Claude Opus 5'}, {id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5'},
         {id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5'},
       ]}]}),
     visual_modelo_niveis: () => [
-      {id: 'baixo', nome: 'Baixo'}, {id: 'medio', nome: 'Médio'}, {id: 'alto', nome: 'Alto'},
+      {id: 'desligado', nome: 'Sem raciocínio'}, {id: 'baixo', nome: 'Baixo'}, {id: 'medio', nome: 'Médio'},
+      {id: 'alto', nome: 'Alto'}, {id: 'extra_alto', nome: 'Extra alto'}, {id: 'maximo', nome: 'Máximo'},
     ],
     visual_modelo_definir: () => true,
     definir_provedor_e_modelo: () => true,
@@ -4069,7 +4069,6 @@ const CONFIG_GRUPOS = [
     { id: 'voz', titulo: 'Voz e áudio', ico: 'voz', busca: 'volume microfone ruído silero delegação' },
     { id: 'visual', titulo: 'Agente visual', ico: 'monitor', busca: 'modelo thinking raciocínio tela teclado' },
     { id: 'discord', titulo: 'Modelo do Discord', ico: 'chat', busca: 'respostas cérebro modelo' },
-    { id: 'modelos', titulo: 'Modelos', ico: 'cerebro', busca: 'cotas codex horas semanal assinatura api provedores limites' },
   ] },
   { nome: 'Dados', paginas: [
     { id: 'memoria', titulo: 'Memória', ico: 'cerebro', busca: 'você pessoas discord unificada fatos' },
@@ -4365,10 +4364,6 @@ async function montarConfig() {
            ${svg(ICO.seta, 'sel-chev')}
          </button>
        </div>`, '', '', 'discord') +
-    secao('Modelos',
-      `<div class="cfg-modelos-intro">Acompanhe seus limites de uso aqui. Conexões de API poderão aparecer nesta página futuramente.</div>
-       <div id="cfg-modelos-uso" aria-live="polite">Consultando limites…</div>`,
-      'Os limites são da conta Codex inteira, incluindo outros dispositivos.', '', 'modelos') +
     secao('Memória',
       `<div class="mem-abas">
         <button class="mem-aba ativa" data-mem="voce" role="tab" aria-selected="true">
@@ -5292,8 +5287,8 @@ function ligarConfig() {
       ativo: p.modelos.some(m => m.provedorReal === escolhido?.provedor && m.id === escolhido?.id),
       acao: () => menuModelosVisual(p),
     })), { classe: 'popover-modelos-chat' });
-    const menuModelosVisual = p => abrirPop(vm, [
-      { rotulo: `← ${p.nome}`, classe: 'cabecalho', acao: menuGruposVisual },
+    const menuModelosVisual = (p, comVoltar = true) => abrirPop(vm, [
+      ...(comVoltar ? [{ rotulo: `← ${p.nome}`, classe: 'cabecalho', acao: menuGruposVisual }] : []),
       ...p.modelos.map(m => ({
         icone: ICO.cerebro, marca: marcaDoModelo(m.id) || p.marca,
         rotulo: m.nome, sub: m.sobre, selecionavel: true,
@@ -5304,7 +5299,7 @@ function ligarConfig() {
         },
       })),
     ], { classe: 'popover-modelos-chat' });
-    vm.onclick = menuGruposVisual;
+    vm.onclick = () => (grupos.length === 1 ? menuModelosVisual(grupos[0], false) : menuGruposVisual());
     vr.onclick = () => abrirPop(vr, niveis.map(n => ({
       icone: ICONES_RACIOCINIO[n.id] || ICO.cerebro,
       rotulo: n.nome, sub: DETALHES_RACIOCINIO[n.id] || '', selecionavel: true,
@@ -5434,7 +5429,7 @@ function ligarConfig() {
           _rotDiscord();
           toast('Discord voltou ao modelo padrão');
         } },
-      ...(dm.modelos || []).map(m => ({
+      ...[...(dm.modelos || [])].sort((a, b) => ordemModeloChat(a) - ordemModeloChat(b)).map(m => ({
         icone: ICO.cerebro,
         // A família do modelo, não a rota (cx/kr), determina a marca.
         marca: marcaDoModelo(m.id),
@@ -5447,7 +5442,7 @@ function ligarConfig() {
           _rotDiscord();
           toast(`Discord: ${m.nome || m.id}`);
         } })),
-    ]);
+    ], { classe: 'popover-modelos-chat' });
   };
 
   $$('.chave').forEach(ch => ch.onclick = async () => {
@@ -5590,7 +5585,9 @@ const ehClaudeChat = m => /(?:^|\/)claude-/i.test(m.id || '');
 const ordemModeloChat = m => {
   const texto = `${m.id || ''} ${m.nome || ''}`.toLowerCase();
   const versao = texto.match(/(?:claude[-\s]*(?:opus|sonnet|haiku|fable)?[-\s]*)(\d+)(?:[.\-](\d+))?/);
-  return versao ? 10000 - (Number(versao[1]) * 100 + Number(versao[2] || 0)) : 20000;
+  if (!versao) return 20000;
+  const porte = /opus|fable/.test(texto) ? 0 : /sonnet/.test(texto) ? 1 : 2;
+  return (10000 - (Number(versao[1]) * 100 + Number(versao[2] || 0))) * 10 + porte;
 };
 function provedoresChat(provedores = _provedoresDisp) {
   const grupos = [];
@@ -5648,10 +5645,14 @@ function pintarSeletores() {
   if (ei) ei.innerHTML = svg(ICONES_RACIOCINIO[_racioAtual] || ICO.cerebro);
 }
 function menuModelo() {
-  // Sem lista de provedores (modo legado), popover de uma página só.
-  if (!_provedoresDisp || _provedoresDisp.length <= 1) {
+  const grupos = provedoresChat();
+  // Um grupo só (ex.: todos os Claude do Kiro): abre direto a lista de modelos,
+  // com o ícone da marca e o mais novo em cima.
+  if (grupos.length === 1) { menuModelosProvedor(grupos[0], false); return; }
+  // Sem provedores (modo legado), cai na lista plana de uma página só.
+  if (!grupos.length) {
     abrirPop($('#sel-modelo'), _modelosDisp.map(m => ({
-      icone: ICO.cerebro, marca: marcaDoModelo(m.id) || marcaProvedorChat(_provedoresDisp[0]),
+      icone: ICO.cerebro, marca: marcaDoModelo(m.id),
       rotulo: m.nome, sub: m.sobre, selecionavel: true,
       ativo: m.id === _modeloAtual,
       acao: async () => {
@@ -5659,7 +5660,7 @@ function menuModelo() {
         if (ok) { await carregarSeletores(); window.EmilyUsage?.refresh(); toast(`Modelo: ${m.nome}`); }
         else toast('Não consegui trocar o modelo', 'erro');
       },
-    })));
+    })), { classe: 'popover-modelos-chat' });
     return;
   }
   menuProvedores();
@@ -5673,12 +5674,12 @@ function menuProvedores() {
     acao: () => menuModelosProvedor(p),
   })), { classe: 'popover-modelos-chat' });
 }
-function menuModelosProvedor(provedor) {
+function menuModelosProvedor(provedor, comVoltar = true) {
   abrirPop($('#sel-modelo'), [
-    { rotulo: `← ${provedor.nome}`,
+    ...(comVoltar ? [{ rotulo: `← ${provedor.nome}`,
       classe: 'cabecalho',
       acao: () => menuProvedores(),
-    },
+    }] : []),
     ...provedor.modelos.map(m => ({
       icone: ICO.cerebro, marca: marcaDoModelo(m.id) || provedor.marca,
       rotulo: m.nome, sub: m.sobre, selecionavel: true,
@@ -7277,29 +7278,6 @@ window.EmilyUsage = (() => {
       root.style.left=`${Math.max(8,Math.min(rect.left,innerWidth-root.offsetWidth-8))}px`;
       root.style.top=`${Math.max(8,rect.top-root.offsetHeight-10)}px`;
     }
-    const box=document.getElementById('cfg-modelos-uso');
-    if(!box)return;
-    box.replaceChildren();
-    const add=(tag,value,parent=box)=>{const el=document.createElement(tag);el.textContent=value;parent.appendChild(el);return el;};
-    add('h3','Assinatura Codex');
-    if(usage.stale)add('p',usage.error || 'Exibindo última leitura; atualização indisponível.');
-    if(!(usage.accounts||[]).length)add('p',usage.error || 'Consultando limites…');
-    for(const account of usage.accounts||[]){
-      const card=add('div','');card.className='modelo-uso-conta';
-      if(usage.accounts.length>1)add('h4',account.label,card);
-      for(const w of account.windows||[]){
-        const row=add('div','',card);row.className='modelo-uso-janela';
-        const header=add('div','',row);header.className='modelo-uso-cab';
-        add('strong',w.label,header);
-        const pct=Number(w.used_percent),hasPct=w.used_percent != null && Number.isFinite(pct),safe=hasPct?Math.max(0,Math.min(100,pct)):0;
-        add('span',hasPct?`${pct}% usado`:'Indisponível',header);
-        const track=add('div','',row);track.className='modelo-uso-barra';track.setAttribute('role','progressbar');track.setAttribute('aria-label',w.label);track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');track.setAttribute('aria-valuenow',String(safe));
-        const fill=add('i','',track);fill.style.width=safe+'%';
-        if(w.resets_at){const d=new Date(w.resets_at);if(!Number.isNaN(+d))add('small','Renova em '+d.toLocaleString('pt-BR'),row);}
-      }
-    }
-    if(usage.updated_at){const date=new Date(usage.updated_at*1000);if(!Number.isNaN(+date))add('small','Atualizado às '+date.toLocaleTimeString('pt-BR'));}
-    add('small','Atualização automática a cada 30 segundos com o chat aberto.');
   }
   async function refresh(){if(pending||document.hidden||!pontePronta())return;pending=true;const cid=ESTADO.atual;try{const result=await api('uso_contexto');if(result && cid===ESTADO.atual){acceptContext(result.context);data.usage=result.usage;render();}}catch(_){if(data.usage){data.usage.stale=true;render();}}finally{pending=false;}}
   function init(){const button=document.getElementById('btn-uso-contexto');if(!button||button.dataset.ready)return;button.dataset.ready='1';button.onclick=()=>{const p=panel();p.hidden=!p.hidden;button.setAttribute('aria-expanded',String(!p.hidden));render();refresh();};

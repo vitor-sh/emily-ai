@@ -51,6 +51,20 @@ def catalogo(provider):
             _CACHE[provider]=(time.time()-3300,cached[1] if cached and cached[2]==identity else {},identity)
             return _CACHE[provider][1]
 
+def catalogo_em_cache(provider):
+    """Último catálogo conhecido do provedor (memória ou disco), sem rede."""
+    with _LOCK:
+        cached=_CACHE.get(provider)
+        if cached and cached[1]:return dict(cached[1])
+    try:
+        import llm
+        obj=llm.PROVEDORES.get(provider)
+        if obj is None:return {}
+        ident=hashlib.sha256((provider+str(getattr(obj,'base_url',''))).encode()).hexdigest()
+        saved=json.loads((CACHE_ROOT/(ident+'.json')).read_text())
+        return {k:v for k,v in saved['limits'].items() if isinstance(v,int) and 1024<=v<=10000000}
+    except (OSError,ValueError,KeyError,TypeError,AttributeError):return {}
+
 def provedor(model):
     import llm
     mid=str(model or '').lower()

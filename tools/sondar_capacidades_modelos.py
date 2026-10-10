@@ -74,10 +74,13 @@ def ferramentas(modelo):
     return f"OK ({t:.1f}s) {f['name']}({f.get('arguments', '')[:40]})"
 
 
-def esforco(modelo, nivel):
-    ok, r, t = _post({"model": modelo, "max_tokens": 30, "reasoning_effort": nivel,
-                      "messages": [{"role": "user", "content": "Diga só: ok"}]})
-    return f"{'aceito' if ok else 'recusado'}({t:.1f}s)"
+def esforco(modelo, nivel, temperatura=None):
+    corpo = {"model": modelo, "max_tokens": 30, "reasoning_effort": nivel,
+             "messages": [{"role": "user", "content": "Diga só: ok"}]}
+    if temperatura is not None:
+        corpo["temperature"] = temperatura  # o chat da Emily manda 0.85
+    ok, r, t = _post(corpo)
+    return f"{'aceito' if ok else 'recusado: ' + str(r)[:90]}({t:.1f}s)"
 
 
 if __name__ == "__main__":
@@ -87,5 +90,7 @@ if __name__ == "__main__":
         print(f"\n== {modelo}", flush=True)
         print(f"  imagem:      {imagem(modelo)}", flush=True)
         print(f"  ferramentas: {ferramentas(modelo)}", flush=True)
+        print("  c/ temp.0.85: " + " ".join(f"{n}={esforco(modelo, n, 0.85)}"
+                                          for n in ("none", "high", "max")), flush=True)
         print("  esforço:     " + " ".join(f"{n}={esforco(modelo, n)}"
-                                          for n in ("none", "low", "medium", "high")), flush=True)
+                                          for n in ("none", "low", "medium", "high", "xhigh", "max")), flush=True)

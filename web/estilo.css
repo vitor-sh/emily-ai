@@ -3694,16 +3694,6 @@ input[type=checkbox], input[type=radio], input[type=range] { accent-color: var(-
 #btn-uso-contexto .contexto-trilha { stroke:rgba(255,255,255,.28); }
 #btn-uso-contexto .contexto-progresso { stroke:#f4a66b; stroke-linecap:round; stroke-dasharray:100.53; stroke-dashoffset:calc(100.53 - 1.0053 * var(--contexto-progresso, 0)); transition:stroke-dashoffset .4s ease; }
 .cfg-modelos-intro { color:var(--txt-2); font-size:13px; line-height:1.6; margin:0 0 24px; }
-#cfg-modelos-uso { display:grid; gap:14px; }
-#cfg-modelos-uso > h3 { font-size:17px; margin:0; }
-#cfg-modelos-uso p, #cfg-modelos-uso small { color:var(--txt-2); line-height:1.5; margin:0; }
-.modelo-uso-conta { display:grid; gap:15px; }
-.modelo-uso-conta h4 { font-size:13px; margin:0; }
-.modelo-uso-janela { padding:19px; border:1px solid rgba(255,255,255,.1); background:rgba(255,255,255,.035); border-radius:16px; }
-.modelo-uso-cab { display:flex; justify-content:space-between; gap:12px; align-items:center; font-size:14px; margin-bottom:15px; }
-.modelo-uso-cab span { color:var(--txt-2); font-variant-numeric:tabular-nums; }
-.modelo-uso-barra { height:9px; border-radius:99px; background:rgba(255,255,255,.13); overflow:hidden; margin-bottom:10px; }
-.modelo-uso-barra i { display:block; height:100%; border-radius:inherit; background:linear-gradient(90deg,#f2c4aa,#e78b65); transition:width .4s ease; }
 .passo-contexto.trabalhando .passo-fala-marca { animation:pulsar-contexto 1.4s ease-in-out infinite; }
 @keyframes pulsar-contexto { 50% { opacity:.35; } }
 

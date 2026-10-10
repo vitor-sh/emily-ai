@@ -810,6 +810,12 @@ def desfazer_atualizacao(reiniciar: bool = True) -> str:
 def _reiniciar() -> None:
     """Reinicia a Emily: substitui o processo inteiro, sem vestígio."""
     _log("reiniciando o processo…")
+    # O execv herda o ambiente. As variáveis EMILY_PROVEDOR_* vêm do .env (que
+    # esta atualização pode ter trocado) e load_dotenv não sobrescreve o que já
+    # existe: sem isto, a Emily reabria com o provedor e os modelos da execução
+    # anterior (10/10/2026: seletor vazio depois de trocar o Codex pelo Kiro).
+    for _nome in [n for n in os.environ if n.startswith("EMILY_PROVEDOR_")]:
+        os.environ.pop(_nome, None)
     try:
         os.execv(sys.executable, [sys.executable] + sys.argv[1:])
     except OSError as e:

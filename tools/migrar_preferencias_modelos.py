@@ -5,6 +5,7 @@ openai; escolhas que já estão no Kiro ficam como estão. Usa o módulo
 preferencias, que grava de forma atômica e respeita a sincronização.
 Uso: python3 tools/migrar_preferencias_modelos.py [--aplicar]
 """
+import json
 import sys
 from pathlib import Path
 
@@ -17,6 +18,15 @@ ALVO = {
 }
 
 
+def _cru() -> dict:
+    """O que está GRAVADO no arquivo. preferencias.obter() devolve o valor já
+    corrigido em memória, e por isso escondia a escolha antiga que continuava lá."""
+    try:
+        return json.loads(preferencias.ARQUIVO.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
 def _obsoleto(provedor: str, modelo: str) -> bool:
     return (provedor or "").strip().lower() == "openai" or (modelo or "").startswith("cx/")
 
@@ -24,21 +34,25 @@ def _obsoleto(provedor: str, modelo: str) -> bool:
 def main():
     aplicar = "--aplicar" in sys.argv
     mudancas = {}
+    cru = _cru()
     for (chave_prov, chave_mod), (prov, mod) in ALVO.items():
-        if _obsoleto(preferencias.obter(chave_prov) or "", preferencias.obter(chave_mod) or ""):
+        if _obsoleto(cru.get(chave_prov) or "", cru.get(chave_mod) or ""):
             mudancas[chave_prov], mudancas[chave_mod] = prov, mod
-    discord = preferencias.obter("modelo_discord") or ""
+    discord = cru.get("modelo_discord") or ""
     if discord.startswith("cx/"):
         mudancas["modelo_discord"] = ""  # vazio = padrão da rota (o Sonnet 5.5)
     # Raciocínios só do GPT-6 não existem nos Claude: cai pro equivalente.
     for chave in ("raciocinio", "visual_raciocinio"):
-        if (preferencias.obter(chave) or "") in {"desligado", "extra_alto", "maximo"}:
-            mudancas[chave] = "alto" if preferencias.obter(chave) != "desligado" else "baixo"
+        atual = cru.get(chave) or ""
+        # Os Claude do Kiro aceitam os seis níveis; só reage a modelo que ficou obsoleto.
+        if atual in {"desligado", "extra_alto", "maximo"} and _obsoleto(
+                cru.get(chave.replace("raciocinio", "provedor")) or "", cru.get(chave.replace("raciocinio", "modelo")) or ""):
+            mudancas[chave] = "alto" if atual != "desligado" else "baixo"
     if not mudancas:
         print("nada a migrar")
         return
     for k, v in mudancas.items():
-        print(f"{k}: {preferencias.obter(k)!r} -> {v!r}")
+        print(f"{k}: {cru.get(k)!r} -> {v!r}")
     if aplicar:
         print("aplicado" if preferencias.definir(**mudancas) else "FALHOU ao gravar")
     else:

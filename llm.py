@@ -1910,10 +1910,18 @@ def _modelos_de_secao(pid: str) -> List[str]:
     deles. Serve pra montar cadeias de fallback ENTRE provedores (ex.: as
     rotas claude caírem pro Qwen quando o proxy claude morre).
     """
-    prefixo = f"EMILY_PROVEDOR_{pid.upper()}_"
-    csv = os.getenv(prefixo + "MODELOS", "")
-    modelos = [m.strip() for m in csv.split(",") if m.strip()]
-    padrao = os.getenv(prefixo + "MODELO", "").strip()
+    cfg = PROVEDORES_CONFIG.get(pid)
+    if cfg is not None:
+        # A seção lida do arquivo vale mais que o ambiente do processo: um
+        # reinício por exec herda as variáveis da execução anterior, e elas
+        # podem ser de um .env que já mudou.
+        modelos = [m for m in cfg.modelos_csv if m]
+        padrao = (cfg.modelo_padrao or "").strip()
+    else:
+        prefixo = f"EMILY_PROVEDOR_{pid.upper()}_"
+        csv = os.getenv(prefixo + "MODELOS", "")
+        modelos = [m.strip() for m in csv.split(",") if m.strip()]
+        padrao = os.getenv(prefixo + "MODELO", "").strip()
     if padrao and padrao not in modelos:
         modelos.insert(0, padrao)
     return modelos
@@ -1954,7 +1962,8 @@ if PROVEDOR_ROTAS == "claude":
 else:
     _modelos_rotas = _modelos_de_secao(PROVEDOR_ROTAS)
     MODELO_ROTAS = (os.getenv("EMILY_ROTAS_MODELO", "").strip()
-                    or os.getenv(f"EMILY_PROVEDOR_{PROVEDOR_ROTAS.upper()}_MODELO", "").strip()
+                    or (PROVEDORES_CONFIG[PROVEDOR_ROTAS].modelo_padrao
+                        if PROVEDOR_ROTAS in PROVEDORES_CONFIG else "").strip()
                     or _modelos_rotas[0])
     MODELO_ROTAS_RAPIDO = (os.getenv("EMILY_ROTAS_MODELO_RAPIDO", "").strip()
                            or next((m for m in _modelos_rotas if "haiku" in m.lower()), MODELO_ROTAS))
@@ -2191,7 +2200,25 @@ def _resolver_tabela(nome: Optional[str]) -> Tuple[str, Dict[str, Rota]]:
     )
 
 
-TABELA_ATIVA, ROTAS = _resolver_tabela(os.getenv("EMILY_PROVEDOR_LLM"))
+def _provedor_llm_efetivo() -> Optional[str]:
+    """EMILY_PROVEDOR_LLM, trocado pelo provedor das rotas se o pedido não tem modelos.
+
+    Uma seção sem modelo nenhum (a assinatura acabou, o .env foi esvaziado) deixava
+    o seletor do chat vazio e a conversa sem modelo. Cair no provedor das rotas
+    internas mantém a Emily utilizável e avisa no log.
+    """
+    pedido = os.getenv("EMILY_PROVEDOR_LLM")
+    pid = (pedido or "").strip().lower()
+    cfg = PROVEDORES_CONFIG.get(pid)
+    if (cfg is not None and cfg.tipo != "ollama"
+            and not (cfg.modelos_csv or cfg.modelo_padrao)
+            and PROVEDOR_ROTAS != pid and PROVEDOR_ROTAS in PROVEDORES):
+        _log(f"EMILY_PROVEDOR_LLM='{pid}' não tem modelos; usando '{PROVEDOR_ROTAS}'")
+        return PROVEDOR_ROTAS
+    return pedido
+
+
+TABELA_ATIVA, ROTAS = _resolver_tabela(_provedor_llm_efetivo())
 
 if TABELA_ATIVA != TABELA_PADRAO:
     _log(f"tabela de rotas ATIVA: '{TABELA_ATIVA}' (via EMILY_PROVEDOR_LLM)")
@@ -2461,6 +2488,23 @@ def _nome_limpo_modelo(modelo_id: str) -> str:
     return resultado or (modelo_id or "")
 
 
+def _janelas_conhecidas(pid: str) -> Dict[str, int]:
+    """Janelas de contexto já conhecidas do provedor (memória/disco, sem rede)."""
+    try:
+        from limites_modelos import catalogo_em_cache
+        return catalogo_em_cache(pid)
+    except Exception:  # noqa: BLE001 - o rótulo é só um enfeite
+        return {}
+
+
+def _rotulo_janela(tokens: Optional[int]) -> str:
+    if not tokens:
+        return ""
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:g}M de contexto"
+    return f"{tokens // 1000}k de contexto"
+
+
 def _modelos_provedor(pid: str) -> List[dict]:
     """
     Modelos do provedor `pid` no formato do seletor ({id, nome, sobre}).
@@ -2488,16 +2532,15 @@ def _modelos_provedor(pid: str) -> List[dict]:
         if not candidatos and cfg.modelo_padrao:
             candidatos = [cfg.modelo_padrao]
 
+        janelas = _janelas_conhecidas(pid)
         saida = []
-        for i, mid in enumerate(candidatos):
+        for mid in candidatos:
             mid = mid.strip()
             if not mid:
                 continue
-            # Primeiro modelo: sem sufixo " · default", vira a opção visível
-            # como "selecionada por padrão". Os outros ganham essa tag.
-            sobre = cfg.nome_exibicao
-            if i > 0:
-                sobre = f"{cfg.nome_exibicao} · {i+1}º"
+            # O subtítulo mostra a janela de contexto quando o catálogo do
+            # provedor já foi consultado; senão, o nome do provedor.
+            sobre = _rotulo_janela(janelas.get(mid.lower())) or cfg.nome_exibicao
             saida.append({"id": mid, "nome": _nome_limpo_modelo(mid), "sobre": sobre})
         return saida
 
@@ -2558,9 +2601,19 @@ NIVEIS_RACIOCINIO_GPT6 = [
 ]
 
 
+def _modelo_claude_kiro(modelo: str) -> bool:
+    """Claude servido pelo Kiro via OmniRoute (ids kr/claude-* ou kiro/claude-*)."""
+    return bool(re.match(r"^(?:kr|kiro)/claude-", (modelo or "").lower()))
+
+
 def niveis_raciocinio(modelo: str = "") -> list:
-    """Níveis disponíveis para o modelo do chat, sem opções que ele rejeita."""
-    niveis = (NIVEIS_RACIOCINIO_GPT6 if _modelo_gpt6(modelo)
+    """Níveis disponíveis para o modelo do chat, sem opções que ele rejeita.
+
+    Os Claude do Kiro publicam effort_tiers none..max no catálogo e aceitaram os
+    seis valores em chamadas reais (10/10/2026); os demais Claude seguem com os
+    três da interface porque o relay deles não foi medido.
+    """
+    niveis = (NIVEIS_RACIOCINIO_GPT6 if (_modelo_gpt6(modelo) or _modelo_claude_kiro(modelo))
               else NIVEIS_RACIOCINIO_INTERFACE)
     return [dict(n) for n in niveis
             if not (_modelo_gpt6_sem_none(modelo)
