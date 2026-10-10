@@ -1,0 +1,10 @@
+local.properties
+**/build/
+.gradle/
+app/google-services.json
+*.jks
+*.keystore
+.private-migration/
+
+.signing/
+output/releases/

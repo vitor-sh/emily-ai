@@ -347,18 +347,17 @@ def _decidir_teclas(imagem_b64: str, nome_jogo: str) -> Optional[dict]:
         # jogo nunca decidiu tecla nenhuma. Agora vai por rota própria, que
         # combina visão com saída estruturada em JSON.
         #
-        # A rota era ROTA_AGENTE_UI até a migração pro Kiro. Ganhou rota
-        # própria porque o agente de UI passou a usar o Opus 5, que custa
-        # 2,2x de crédito por chamada, e ESTA função dispara em laço
-        # enquanto o Vitor joga. Precisão de apontar não importa aqui — o
-        # que se pede é uma tecla, não uma coordenada.
+        # A rota era ROTA_AGENTE_UI antes. Ganhou rota própria porque o
+        # agente de UI pode usar um modelo mais caro, e ESTA função dispara
+        # em laço enquanto o Vitor joga. Precisão de apontar não importa
+        # aqui — o que se pede é uma tecla, não uma coordenada.
         resposta = modelo._chamar_llm(
             [
                 {"role": "system", "content": _system_prompt_jogo()},
                 {"role": "user", "content": prompt, "images": [imagem_b64]},
             ],
             max_tokens=2048,
-            rota=modelo.ROTA_AGENTE_JOGO,
+            rota=modelo.ROTA_AGENTE_JOGO_GMI,
         )
 
         print(f"[AGENTE] Resposta bruta do modelo: {resposta[:400]}")

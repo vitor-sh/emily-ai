@@ -1,6 +1,10 @@
 """
 interface.py — Emily AI · Painel de Controle Moderno (PyQt6)
 Design: Dark glassmorphism, tema roxo/azul, bordas iluminadas
+
+LEGADO: a instalação padrão usa interface_web.py. Este módulo existe somente
+como fallback e para o modo explícito EMILY_UI=qt; novas funções da interface
+principal devem ser implementadas na interface web.
 """
 
 import os
@@ -2343,6 +2347,7 @@ class PainelEmily(QWidget):
         lay.addWidget(self._sec("Automação")); lay.addWidget(self._build_automacao()); lay.addWidget(self._hsep())
         lay.addWidget(self._sec("Modos",plus=True)); lay.addWidget(self._build_modos()); lay.addWidget(self._hsep())
         lay.addWidget(self._sec("Macros",plus=True)); lay.addWidget(self._build_macros()); lay.addWidget(self._hsep())
+        lay.addWidget(self._sec("TV")); lay.addWidget(self._build_tv()); lay.addWidget(self._hsep())
         lay.addWidget(self._sec("Sistema")); lay.addWidget(self._build_sistema())
         lay.addStretch(); sc.setWidget(inner)
         ol = QVBoxLayout(side); ol.setContentsMargins(0,0,0,0); ol.addWidget(sc)
@@ -2409,6 +2414,38 @@ class PainelEmily(QWidget):
         self._toggle_discord.toggled.connect(self._toggle_discord_monitor)
         lay.addWidget(row("💬","Monitorar Discord",arrow=False,right=self._toggle_discord))
 
+        try:
+            import preferencias
+            autonomia_inicial = bool(preferencias.obter("autonomia_experimental", False))
+        except Exception:
+            autonomia_inicial = False
+        self._toggle_autonomia = ToggleSwitch()
+        self._toggle_autonomia.set_state(autonomia_inicial)
+        self._toggle_autonomia.toggled.connect(self._toggle_autonomia_experimental)
+        lay.addWidget(row("⚡", "Autonomia experimental", arrow=False,
+                          right=self._toggle_autonomia))
+
+        # O mesmo trio da interface web. São independentes de propósito: dá pra
+        # comparar Whisper cru, RNNoise, loudnorm e Silero sem editar o .env.
+        for atributo, chave, icone, rotulo in (
+            ("_toggle_audio_denoise", "audio_preprocess_denoise", "🎙️",
+             "Redução de ruído (RNNoise)"),
+            ("_toggle_audio_normalize", "audio_preprocess_normalize", "🔊",
+             "Normalizar volume"),
+            ("_toggle_audio_vad", "audio_preprocess_vad", "✂️",
+             "Cortar silêncio (Silero VAD)"),
+        ):
+            try:
+                ligado = bool(preferencias.obter(chave, True))
+            except Exception:
+                ligado = True
+            toggle = ToggleSwitch()
+            toggle.set_state(ligado)
+            toggle.toggled.connect(
+                lambda on, chave=chave: self._toggle_audio_preprocess(chave, on))
+            setattr(self, atributo, toggle)
+            lay.addWidget(row(icone, rotulo, arrow=False, right=toggle))
+
         lay.addWidget(row("📂","Atalhos de Pastas"))
         return w
 
@@ -2426,14 +2463,28 @@ class PainelEmily(QWidget):
             try:
                 import discord_bot
                 if on:
-                    discord_bot._escuta_discord_ativa.set()
-                    print("[Discord] Monitoramento de chats ATIVADO pela interface.")
+                    discord_bot.ativar_escuta_discord()
                 else:
-                    discord_bot._escuta_discord_ativa.clear()
-                    print("[Discord] Monitoramento de chats DESATIVADO pela interface.")
+                    discord_bot.desativar_escuta_discord()
             except Exception as e:
                 print(f"[Discord] toggle monitor: {e}")
         threading.Thread(target=_r, daemon=True).start()
+
+    def _toggle_autonomia_experimental(self, on: bool):
+        try:
+            import preferencias
+            preferencias.definir(autonomia_experimental=bool(on))
+            print(f"[AUTONOMIA] modo experimental {'ATIVADO' if on else 'DESATIVADO'} pela interface.")
+        except Exception as e:
+            print(f"[AUTONOMIA] não salvei preferência: {e}")
+
+    def _toggle_audio_preprocess(self, chave: str, on: bool):
+        try:
+            import preferencias
+            preferencias.definir(**{chave: bool(on)})
+            print(f"[AUDIO-PRE] {chave} {'ATIVADO' if on else 'DESATIVADO'} pela interface.")
+        except Exception as e:
+            print(f"[AUDIO-PRE] não salvei {chave}: {e}")
 
     def _cmd_organizar(self):
         try:
@@ -2535,6 +2586,331 @@ class PainelEmily(QWidget):
         try:
             import automacao; automacao.parar_speedrun()
         except Exception as e: print(f"[MACRO] stop: {e}")
+
+    # ── Seção TV (dispositivos salvos, pareamento e conexão) ─────
+
+    def _build_tv(self):
+        w = QWidget(); w.setStyleSheet("background:transparent;")
+        lay = QVBoxLayout(w); lay.setContentsMargins(0,0,0,0); lay.setSpacing(4)
+
+        topo = QHBoxLayout(); topo.setContentsMargins(0,0,0,0)
+        topo.addStretch()
+        add = QPushButton("＋ Adicionar")
+        add.setStyleSheet(f"background:transparent; color:{PURPLE_LT}; border:none; font-size:8pt;")
+        add.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        add.clicked.connect(self._tv_dialogo_adicionar)
+        topo.addWidget(add)
+        lay.addLayout(topo)
+
+        # container que segura a lista — permite limpar e reconstruir
+        self._tv_container = QWidget()
+        self._tv_container.setStyleSheet("background:transparent;")
+        self._tv_layout = QVBoxLayout(self._tv_container)
+        self._tv_layout.setContentsMargins(0,0,0,0)
+        self._tv_layout.setSpacing(4)
+        lay.addWidget(self._tv_container)
+
+        self._tv_status_lbl = QLabel("")
+        self._tv_status_lbl.setFont(QFont("Segoe UI", 8))
+        self._tv_status_lbl.setWordWrap(True)
+        self._tv_status_lbl.setStyleSheet(f"color:{C_TEXT3}; background:transparent; border:none;")
+        lay.addWidget(self._tv_status_lbl)
+
+        self._carregar_tv()
+        return w
+
+    def _carregar_tv(self):
+        """Limpa e reconstrói a lista de TVs a partir do controle_tv."""
+        while self._tv_layout.count():
+            item = self._tv_layout.takeAt(0)
+            wdg = item.widget() if item else None
+            if wdg is not None:
+                wdg.setParent(None)
+                wdg.deleteLater()
+        try:
+            import controle_tv as tv
+            dispositivos = tv.listar_dispositivos()
+        except Exception as e:
+            aviso = QLabel(f"Controle de TV indisponível: {e}")
+            aviso.setWordWrap(True)
+            aviso.setStyleSheet(f"color:{C_TEXT3}; background:transparent; border:none;")
+            self._tv_layout.addWidget(aviso)
+            return
+        if not dispositivos:
+            vazio = QLabel("Nenhuma TV salva. Adicione o IP dela.")
+            vazio.setFont(QFont("Segoe UI", 8))
+            vazio.setStyleSheet(f"color:{C_TEXT3}; background:transparent; border:none;")
+            self._tv_layout.addWidget(vazio)
+            return
+        for d in dispositivos:
+            self._tv_layout.addWidget(self._tv_row(d))
+
+    def _tv_row(self, d: dict) -> QFrame:
+        """Card de uma TV salva: clique conecta; ✎ edita; × remove."""
+        card = QFrame()
+        selecionada = bool(d.get("ativa"))
+        card.setStyleSheet(
+            f"background:{BG_CARD}; border:1px solid "
+            f"{PURPLE if selecionada else BORDER}; border-radius:8px;")
+        card.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        rl = QHBoxLayout(card); rl.setContentsMargins(9,7,7,7); rl.setSpacing(6)
+
+        cl = QVBoxLayout(); cl.setContentsMargins(0,0,0,0); cl.setSpacing(1)
+        tl = QLabel(d.get("nome") or "TV")
+        tl.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+        tl.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
+        cl.addWidget(tl)
+        tipo = f" · {d['tipo']}" if d.get("tipo") else ""
+        pareada = "pareada" if d.get("pareada") else "não pareada"
+        sub = QLabel(f"{d.get('ip','')}{tipo} · {pareada}")
+        sub.setFont(QFont("Segoe UI", 8))
+        sub.setStyleSheet(f"color:{C_TEXT2}; background:transparent; border:none;")
+        cl.addWidget(sub)
+        rl.addLayout(cl, 1)
+
+        # clique no corpo (nome/IP) conecta; os botões ficam por cima
+        card.mousePressEvent = lambda _e, did=d["id"]: self._tv_conectar(did)
+
+        ed = QPushButton("✎"); ed.setFixedSize(20, 20)
+        ed.setStyleSheet(
+            f"QPushButton {{ background:transparent; color:{C_TEXT3}; border:none; font-size:10pt; }}"
+            f"QPushButton:hover {{ color:{PURPLE_LT}; }}")
+        ed.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        ed.setToolTip("Editar nome, IP e tipo")
+        ed.clicked.connect(lambda _, did=d["id"]: self._tv_dialogo_editar(did))
+        rl.addWidget(ed)
+
+        rm = QPushButton("×"); rm.setFixedSize(20, 20)
+        rm.setStyleSheet(
+            f"QPushButton {{ background:transparent; color:{C_TEXT3}; border:none; font-size:11pt; }}"
+            f"QPushButton:hover {{ color:{C_RED}; }}")
+        rm.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        rm.setToolTip("Remover da lista")
+        rm.clicked.connect(lambda _, did=d["id"]: self._tv_remover(did))
+        rl.addWidget(rm)
+        return card
+
+    def _tv_thread(self, alvo, *args):
+        """Roda um método do controle_tv fora da UI e devolve o resultado."""
+        import controle_tv as tv
+        return getattr(tv, alvo)(*args)
+
+    def _tv_conectar(self, id_dispositivo: str):
+        """Conecta fora da thread da UI; o resultado volta por QTimer.singleShot."""
+        self._tv_status("Conectando…")
+        def trabalho():
+            import controle_tv as tv
+            r = tv.conectar_dispositivo(id_dispositivo)
+            def atualizar():
+                if r.get("ok"):
+                    self._tv_status(r.get("mensagem", "Conectada ✓"), ok=True)
+                elif r.get("precisa_parear"):
+                    self._tv_status("Precisa parear — confirme o IP em ✎ e use "
+                                    "'Parear na TV'.")
+                else:
+                    self._tv_status(r.get("mensagem", "Falhou"), erro=True)
+                self._carregar_tv()
+            QTimer.singleShot(0, atualizar)
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _tv_status(self, texto: str, ok: bool = False, erro: bool = False):
+        cor = C_GREEN if ok else (C_RED if erro else C_TEXT2)
+        self._tv_status_lbl.setStyleSheet(
+            f"color:{cor}; background:transparent; border:none;")
+        self._tv_status_lbl.setText(texto)
+
+    def _tv_dialogo_adicionar(self):
+        dlg, f_nome, f_ip, f_tipo, botoes = self._tv_dialogo_campos(None)
+        from PyQt6.QtWidgets import QPushButton
+
+        def salvar_e_fechar(quer_parear: bool):
+            nome, ip, tipo = f_nome.text().strip(), f_ip.text().strip(), f_tipo.text().strip()
+            if not ip:
+                self._tv_status("Informe o IP da TV.", erro=True)
+                return
+            try:
+                import controle_tv as tv
+                d = tv.salvar_dispositivo(nome, ip, tipo)
+            except ValueError as e:
+                self._tv_status(str(e), erro=True)
+                return
+            dlg.accept()
+            self._carregar_tv()
+            if quer_parear:
+                self._tv_parear(d["id"])
+            else:
+                self._tv_status(f"TV salva: {d['nome']} ({d['ip']})", ok=True)
+
+        b_parear = QPushButton("Salvar e parear")
+        b_parear.setProperty("secundario", True)
+        b_parear.clicked.connect(lambda: salvar_e_fechar(True))
+        botoes.addWidget(b_parear)
+        b_salvar = QPushButton("Salvar")
+        b_salvar.clicked.connect(lambda: salvar_e_fechar(False))
+        botoes.addWidget(b_salvar)
+        dlg.layout().addLayout(botoes)
+        dlg.exec()
+
+    def _tv_dialogo_editar(self, id_dispositivo: str):
+        import controle_tv as tv
+        d = tv._achar_dispositivo(id_dispositivo)
+        if not d:
+            self._tv_status("Dispositivo não encontrado.", erro=True)
+            return
+        dlg, f_nome, f_ip, f_tipo, botoes = self._tv_dialogo_campos(d)
+        from PyQt6.QtWidgets import QPushButton
+
+        def salvar():
+            try:
+                tv.editar_dispositivo(id_dispositivo, f_nome.text(),
+                                      f_ip.text(), f_tipo.text())
+            except ValueError as e:
+                self._tv_status(str(e), erro=True)
+                return
+            dlg.accept()
+            self._carregar_tv()
+            self._tv_status("TV atualizada ✓", ok=True)
+
+        b_parear = QPushButton("Parear na TV")
+        b_parear.setProperty("secundario", True)
+        b_parear.setToolTip("A TV vai mostrar um código; digite-o no próximo passo")
+        b_parear.clicked.connect(lambda: (dlg.accept(), self._tv_parear(id_dispositivo)))
+        botoes.addWidget(b_parear)
+        b_salvar = QPushButton("Salvar")
+        b_salvar.clicked.connect(salvar)
+        botoes.addWidget(b_salvar)
+        dlg.layout().addLayout(botoes)
+        dlg.exec()
+
+    def _tv_remover(self, id_dispositivo: str):
+        import controle_tv as tv
+        r = tv.remover_dispositivo(id_dispositivo)
+        if r.startswith("ERRO"):
+            self._tv_status(r, erro=True)
+        else:
+            self._tv_status("TV removida da lista.", ok=True)
+        self._carregar_tv()
+
+    def _tv_parear(self, id_dispositivo: str):
+        """Fluxo em duas etapas: pede o código à TV; o Vitor digita; a
+        conclusão roda fora da thread da UI."""
+        self._tv_status("Pedindo código à TV…")
+        def trabalho():
+            import controle_tv as tv
+            r = tv.iniciar_pareamento(id_dispositivo)
+            if not r.get("ok"):
+                QTimer.singleShot(0, lambda: self._tv_status(r.get("mensagem", "Falhou"), erro=True))
+                return
+            def pedir_codigo():
+                codigo = self._tv_dialogo_codigo()
+                if not codigo:
+                    self._tv_status("Pareamento cancelado")
+                    return
+                self._tv_concluir_pareamento(codigo)
+            QTimer.singleShot(0, pedir_codigo)
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _tv_dialogo_codigo(self) -> str:
+        """Pede o código que a TV está mostrando. RODA NA UI THREAD."""
+        from PyQt6.QtWidgets import (QDialog, QLineEdit, QDialogButtonBox,
+                                     QPushButton)
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Código da TV")
+        dlg.setFixedSize(320, 150)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background:{BG_CARD}; border:1px solid {BORDER}; border-radius:10px; }}
+            QLabel  {{ color:{C_TEXT}; background:transparent; }}
+            QLineEdit {{
+                background:{BG_INPUT}; color:{C_TEXT};
+                border:1px solid {BORDER}; border-radius:6px;
+                padding:6px 10px; font-size:12pt;
+            }}
+        """)
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(16,14,16,14); lay.setSpacing(8)
+        lb = QLabel("Digite o código que aparece na tela da TV:")
+        lb.setWordWrap(True)
+        lay.addWidget(lb)
+        campo = QLineEdit()
+        campo.setPlaceholderText("ex: 123456")
+        campo.setMaxLength(6)
+        lay.addWidget(campo)
+        linha = QDialogButtonBox()
+        b_ok = QPushButton("Confirmar")
+        b_cancel = QPushButton("Cancelar")
+        linha.addButton(b_ok, QDialogButtonBox.ButtonRole.AcceptRole)
+        linha.addButton(b_cancel, QDialogButtonBox.ButtonRole.RejectRole)
+        b_ok.clicked.connect(dlg.accept)
+        b_cancel.clicked.connect(dlg.reject)
+        lay.addWidget(linha)
+        aceito = dlg.exec() == QDialog.DialogCode.Accepted
+        return campo.text().strip() if aceito else ""
+
+    def _tv_concluir_pareamento(self, codigo: str):
+        self._tv_status("Concluindo pareamento…")
+        def trabalho():
+            import controle_tv as tv
+            r = tv.concluir_pareamento(codigo)
+            def atualizar():
+                self._tv_status(r.get("mensagem", ""), ok=bool(r.get("ok")),
+                                erro=not r.get("ok"))
+                self._carregar_tv()
+            QTimer.singleShot(0, atualizar)
+        threading.Thread(target=trabalho, daemon=True).start()
+
+
+
+    def _tv_dialogo_campos(self, d: dict | None):
+        """Diálogo com Nome/IP/Tipo (tudo editável). Devolve os três campos."""
+        from PyQt6.QtWidgets import QDialog, QLineEdit, QDialogButtonBox, QLabel
+        dlg = QDialog(self)
+        novo = d is None
+        dlg.setWindowTitle("Adicionar TV" if novo else "Editar TV")
+        dlg.setFixedSize(400, 260)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background:{BG_CARD}; border:1px solid {BORDER}; border-radius:10px; }}
+            QLabel  {{ color:{C_TEXT}; background:transparent; }}
+            QLineEdit {{
+                background:{BG_INPUT}; color:{C_TEXT};
+                border:1px solid {BORDER}; border-radius:6px;
+                padding:6px 10px; font-size:10pt;
+            }}
+            QLineEdit:focus {{ border-color:{PURPLE}; }}
+            QPushButton {{
+                background:{PURPLE}; color:white; border:none;
+                border-radius:6px; padding:6px 16px; font-weight:bold;
+            }}
+            QPushButton:hover {{ background:{PURPLE_DK}; }}
+            QPushButton[secundario="true"] {{
+                background:{BORDER}; color:{C_TEXT2}; font-weight:normal;
+            }}
+        """)
+        lay = QVBoxLayout(dlg); lay.setContentsMargins(16,14,16,14); lay.setSpacing(8)
+
+        dica = QLabel("IP local da TV, e nome/tipo como você quiser chamar.\n"
+                      "O tipo é editável caso a detecção não acerte.")
+        dica.setFont(QFont("Segoe UI", 8))
+        dica.setStyleSheet(f"color:{C_TEXT2}; background:transparent; border:none;")
+        lay.addWidget(dica)
+
+        def campo(rotulo: str, valor: str, placeholder: str) -> QLineEdit:
+            lb = QLabel(rotulo); lb.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            lb.setStyleSheet("background:transparent;")
+            lay.addWidget(lb)
+            ed = QLineEdit(valor)
+            ed.setPlaceholderText(placeholder)
+            lay.addWidget(ed)
+            return ed
+
+        campo_nome = campo("Nome", (d or {}).get("nome", ""), "ex: TV da Sala")
+        campo_ip   = campo("IP", (d or {}).get("ip", ""), "ex: 192.168.0.15")
+        campo_tipo = campo("Tipo da TV", (d or {}).get("tipo", ""),
+                           "ex: TCL Android TV (opcional, editável)")
+        botoes = QHBoxLayout()
+        botoes.addStretch()
+        return dlg, campo_nome, campo_ip, campo_tipo, botoes
+
+
+
 
     def _build_sistema(self):
         w = QWidget(); w.setStyleSheet("background:transparent;")
@@ -2891,6 +3267,9 @@ class PainelEmily(QWidget):
 
         if not txt and not tem_arquivos:
             return
+        if txt:
+            import estilo_vitor
+            estilo_vitor.coletar(txt, "escrita", "qt")
 
         # Mandar mensagem tira a tela do início e joga a conversa em tela cheia.
         # É o que o Vitor pediu, e é o que resolve a fala dela empilhando: aqui
@@ -2961,6 +3340,8 @@ class PainelEmily(QWidget):
                 import voz
                 txt = voz.ouvir_ptt(callback_gravando=lambda: self.sig.status_changed.emit("gravando",""))
                 if txt:
+                    import estilo_vitor
+                    estilo_vitor.coletar(txt, "fala", "ptt_qt")
                     self.sig.chat_add.emit("user",txt,False)
                     if getattr(self,"_callback_texto",None): self._callback_texto(txt)
             except Exception as e: print(f"[PTT] {e}")
@@ -3096,6 +3477,11 @@ class JanelaEmily:
         """
         if texto and texto.strip():
             self._sig.chat_add.emit("emily", texto.strip(), False)
+
+    def add_mensagem_usuario(self, texto: str):
+        """Mostra no chat a frase reconhecida pelo push-to-talk."""
+        if texto and texto.strip():
+            self._sig.chat_add.emit("user", texto.strip(), False)
 
     def carregar_historico(self, mensagens: list):
         def _do():

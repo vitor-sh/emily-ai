@@ -1,0 +1,347 @@
+{
+  "upstream_commit": "4665173cd35f1cff9a61e06fc427f124766c488e",
+  "voices_revision": "c10ece1aade47bb51c153c893d14e5bf8e5b7117",
+  "voices": [
+    {
+      "id": "pt_BR-cadu-medium",
+      "path": "pt/pt_BR/cadu/medium",
+      "split": "training",
+      "dataset_license": "CC0",
+      "source": "https://github.com/OHF-Voice/voice-datasets",
+      "backend": "piper",
+      "native_pt": true
+    },
+    {
+      "id": "pt_BR-edresson-low",
+      "path": "pt/pt_BR/edresson/low",
+      "split": "training",
+      "dataset_license": "CC-BY-4.0",
+      "source": "https://github.com/Edresson/TTS-Portuguese-Corpus",
+      "backend": "piper",
+      "native_pt": true
+    },
+    {
+      "id": "pt_BR-faber-medium",
+      "path": "pt/pt_BR/faber/medium",
+      "split": "validation",
+      "dataset_license": "CC0",
+      "source": "https://github.com/OHF-Voice/voice-datasets",
+      "backend": "piper",
+      "native_pt": true
+    },
+    {
+      "id": "pt_BR-jeff-medium",
+      "path": "pt/pt_BR/jeff/medium",
+      "split": "testing",
+      "dataset_license": "CC0",
+      "source": "https://github.com/OHF-Voice/voice-datasets",
+      "backend": "piper",
+      "native_pt": true
+    },
+    {
+      "id": "kokoro-af_alloy",
+      "style": "af_alloy",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_aoede",
+      "style": "af_aoede",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_bella",
+      "style": "af_bella",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_kore",
+      "style": "af_kore",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_nicole",
+      "style": "af_nicole",
+      "backend": "kokoro",
+      "split": "testing",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_nova",
+      "style": "af_nova",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_river",
+      "style": "af_river",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-af_sarah",
+      "style": "af_sarah",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_echo",
+      "style": "am_echo",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_eric",
+      "style": "am_eric",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_fenrir",
+      "style": "am_fenrir",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_liam",
+      "style": "am_liam",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_michael",
+      "style": "am_michael",
+      "backend": "kokoro",
+      "split": "testing",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_onyx",
+      "style": "am_onyx",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-am_puck",
+      "style": "am_puck",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bf_alice",
+      "style": "bf_alice",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bf_emma",
+      "style": "bf_emma",
+      "backend": "kokoro",
+      "split": "validation",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bf_isabella",
+      "style": "bf_isabella",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bf_lily",
+      "style": "bf_lily",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bm_daniel",
+      "style": "bm_daniel",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bm_fable",
+      "style": "bm_fable",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bm_george",
+      "style": "bm_george",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-bm_lewis",
+      "style": "bm_lewis",
+      "backend": "kokoro",
+      "split": "validation",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-pf_dora",
+      "style": "pf_dora",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": true,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-pm_alex",
+      "style": "pm_alex",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": true,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-pm_santa",
+      "style": "pm_santa",
+      "backend": "kokoro",
+      "split": "testing",
+      "native_pt": true,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-if_sara",
+      "style": "if_sara",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    },
+    {
+      "id": "kokoro-im_nicola",
+      "style": "im_nicola",
+      "backend": "kokoro",
+      "split": "training",
+      "native_pt": false,
+      "dataset_license": "Apache-2.0",
+      "source": "https://huggingface.co/hexgrad/Kokoro-82M"
+    }
+  ],
+  "positive_phrases": [
+    "Ei, Emily.",
+    "Ei, Emili.",
+    "Ei, Êmili."
+  ],
+  "negative_phrases": [
+    "Emily.",
+    "A Emily é uma assistente.",
+    "Eu estava falando com a Emily.",
+    "E me liga amanhã.",
+    "Ei, amigo.",
+    "Ei, me lembra de comprar pão.",
+    "Ele me disse que estava tudo bem.",
+    "Eu queria falar com você.",
+    "Abre o YouTube.",
+    "E aí, como você está?",
+    "É melhor esperar.",
+    "A família chegou.",
+    "Eu li uma mensagem.",
+    "Me explica isso.",
+    "Ei, Siri.",
+    "Ei, Google.",
+    "Ei, Emílio.",
+    "Ei, Emília.",
+    "Ei, Elisa.",
+    "Ei, amigo, me liga.",
+    "E a Emily chegou?",
+    "A Emily falou comigo ontem.",
+    "Emily, você está aí?",
+    "Eu vi a Emily na rua.",
+    "E me livrei disso.",
+    "Ele me ligou hoje.",
+    "E aí, minha filha?",
+    "É incrível.",
+    "Nem me lembro.",
+    "Tem milho na cozinha.",
+    "Eu queria falar da Emily, mas depois resolvo.",
+    "Hoje eu fui ao mercado e encontrei minha família.",
+    "Você sabe onde estão as chaves? Vamos sair daqui a pouco.",
+    "Meu telefone está tocando, eu vou atender.",
+    "Nós estávamos conversando sobre música, filmes e trabalho.",
+    "Boa noite, amanhã a gente continua essa conversa."
+  ],
+  "schema_version": 2,
+  "kokoro_assets": {
+    "release": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/",
+    "files": {
+      "kokoro-v1.0.int8.onnx": "6e742170d309016e5891a994e1ce1559c702a2ccd0075e67ef7157974f6406cb",
+      "voices-v1.0.bin": "bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d",
+      "kokoro-v1.0.fp16-gpu.onnx": "c1610a859f3bdea01107e73e50100685af38fff88f5cd8e5c56df109ec880204"
+    },
+    "model_card_revision": "f3ff3571791e39611d31c381e3a41a3af07b4987"
+  }
+}

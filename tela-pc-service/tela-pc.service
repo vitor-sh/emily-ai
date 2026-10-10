@@ -1,0 +1,15 @@
+[Unit]
+Description=Serviço de tela do PC (PipeWire → WebRTC e MJPEG para o celular)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Environment=GST_PLUGIN_PATH=/home/Hiucksam/.local/lib64/gstreamer-1.0
+ExecStart=/usr/bin/python3 "/home/Hiucksam/My Projects/Projeto Emily/minha-ia/tela-pc-service/tela_pc_service.py"
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,7 +1,7 @@
 """
-Properties 8 e 9 do design — tool calling no formato do kiro-gateway.
+Properties 8 e 9 do design — tool calling no formato OpenAI.
 
-Os testes de _teste_fluxo.py e _teste_laco.py cobrem cenários ESCOLHIDOS. Aqui
+Os testes de testes_manuais/_teste_fluxo.py e _teste_laco.py cobrem cenários ESCOLHIDOS. Aqui
 o hypothesis gera preâmbulo arbitrário, incluindo os casos que ninguém pensa
 em escrever à mão: string vazia, só quebra de linha, exatamente 80 caracteres,
 texto com acento e emoji, muitos pedaços minúsculos.

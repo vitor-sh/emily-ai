@@ -1,0 +1,8 @@
+// Autoriza somente o helper root fixo, que valida tipo/alvo e a transação DNF.
+polkit.addRule(function(action, subject) {
+    if (action.id === 'org.freedesktop.policykit.exec' &&
+        action.lookup('program') === '/usr/local/libexec/emily-app-uninstall' &&
+        subject.user === 'Hiucksam') {
+        return polkit.Result.YES;
+    }
+});

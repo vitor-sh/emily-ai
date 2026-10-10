@@ -1,0 +1,14 @@
+numpy==2.0.2
+scipy==1.15.3
+piper-tts==1.4.2
+kokoro-onnx==0.4.9
+tensorflow==2.18.1
+keras==3.15.1
+pymicro-features==2.0.2
+mmap_ninja==0.9.0
+PyYAML==6.0.3
+audiomentations==0.43.1
+datasets==5.0.1
+webrtcvad-wheels==2.0.14.post1
+ai-edge-litert==2.2.0
+audio-metadata @ git+https://github.com/whatsnowplaying/audio-metadata@d4ebb238e6a401bb1a5aaaac60c9e2b3cb30929f

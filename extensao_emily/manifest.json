@@ -1,0 +1,58 @@
+{
+  "manifest_version": 3,
+  "name": "Emily — Assistente do Navegador",
+  "short_name": "Emily",
+  "version": "2.3.0",
+  "description": "Conecta a Emily ao navegador para ler páginas, preencher formulários, navegar e encontrar mídias na aba atual.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icon.png"
+  },
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "downloads",
+    "history",
+    "scripting",
+    "storage",
+    "webRequest",
+    "favicon"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["media-sniffer.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Emily — Assistente do Navegador",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icon.png"
+    }
+  }
+}

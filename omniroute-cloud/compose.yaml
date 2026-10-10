@@ -1,0 +1,53 @@
+name: emily-omniroute-cloud
+services:
+  omniroute:
+    image: docker.io/diegosouzapw/omniroute:3.8.51
+    restart: unless-stopped
+    stop_grace_period: 45s
+    env_file: .env
+    environment:
+      DATA_DIR: /app/data
+      PORT: '20128'
+      HOSTNAME: 0.0.0.0
+      BASE_URL: http://omniroute:20128
+      NEXT_PUBLIC_BASE_URL: https://${DOMAIN:?Execute preparar.py primeiro}
+      REQUIRE_API_KEY: 'true'
+      AUTH_COOKIE_SECURE: 'false'
+      NODE_OPTIONS: --max-old-space-size=1024
+    ports:
+      - 127.0.0.1:20128:20128
+      # Retorno OAuth Codex: acessível somente por túnel SSH.
+      - 127.0.0.1:1455:1455
+    volumes:
+      - omniroute-data:/app/data
+    mem_limit: 1536m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+  caddy:
+    image: docker.io/library/caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Execute preparar.py primeiro}
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /home/ubuntu/emily-relay/run:/run/emily-relay:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - omniroute
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
+volumes:
+  omniroute-data:
+  caddy-data:
+  caddy-config:

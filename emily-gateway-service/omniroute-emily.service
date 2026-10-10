@@ -1,0 +1,19 @@
+[Unit]
+Description=OmniRoute permanente para o cérebro da Emily
+Documentation=https://github.com/diegosouzapw/OmniRoute
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/home/Hiucksam/.nvm/versions/node/v22.23.2/bin/omniroute serve --no-open --no-tray --log
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=90
+TimeoutStopSec=45
+KillMode=control-group
+Environment=HOME=/home/Hiucksam
+Environment=PATH=/home/Hiucksam/.nvm/versions/node/v22.23.2/bin:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target

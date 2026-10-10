@@ -1,0 +1,14 @@
+{
+  "name": "emily-music-cloud",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/worker.test.js test/library.test.js",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test:d1": "node test/d1-integration.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

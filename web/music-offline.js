@@ -1,0 +1,22 @@
+/* Adaptador HTMLAudio: mesmos controles do YouTube, sem carregar rede para arquivos locais. */
+(() => {
+ const A={localActive:false,yt:null,ytReady:false,restoring:false,init(){
+  const audio=new Audio();audio.preload='metadata';this.audio=audio;
+  const adapter={loadVideoById(id){const m=EmilyMusic.offline.faixas[id];audio.src=m.url;audio.load();},playVideo(){if(!A.restoring)audio.play().catch(()=>{Player.tocando=false;Player._pintaControles();});},pauseVideo(){audio.pause();},stopVideo(){audio.pause();audio.removeAttribute('src');audio.load();},seekTo(t){if(Number.isFinite(t))audio.currentTime=Math.max(0,t);},getCurrentTime(){return audio.currentTime||0;},getDuration(){return Number.isFinite(audio.duration)?audio.duration:0;},getVideoData(){return {video_id:Player._videoEsperado};},setVolume(v){audio.volume=Math.max(0,Math.min(1,v/100));},mute(){audio.muted=true;},unMute(){audio.muted=false;},isMuted(){return audio.muted;}};this.adapter=adapter;
+  const tocar=Player.tocar.bind(Player);this.originalTocar=tocar;
+  Player.tocar=(index,opts={})=>{if(!Player.playlist.length)return;const i=index==null?(Player.shuffle?Player._proximoShuffle():0):((index%Player.playlist.length)+Player.playlist.length)%Player.playlist.length;const m=Player.playlist[i];if(EmilyMusic.offline.faixas[m.video_id]?.estado==='pronto'){this.start(i,opts);return;}if(!EmilyMusic.online()){toast('Esta música não foi baixada para ouvir offline','erro');return;}if(this.localActive){audio.pause();this.localActive=false;Player.player=this.yt;Player.pronto=this.ytReady;Player._carregando=false;}tocar(i,opts);};
+  const criar=Player._criarPlayer.bind(Player);Player._criarPlayer=()=>{if(this.localActive){Player._carregando=false;return;}criar();this.yt=Player.player;};
+  const close=Player.fechar.bind(Player);Player.fechar=()=>{close();if(this.localActive){this.localActive=false;Player.player=this.yt;Player.pronto=this.ytReady;}};
+  const state=Player._estado.bind(Player);Player._estado=e=>{if(!this.localActive)state(e);};
+  audio.addEventListener('playing',()=>{if(this.localActive){Player._faixaConfirmada=true;Player.tocando=true;Player._iniciarTimer();Player._marcarEstadoVisual('tocando');Player._pintaControles();}});
+  audio.addEventListener('pause',()=>{if(this.localActive){Player.tocando=false;Player._pararTimer();Player._marcarEstadoVisual('pausado');Player._pintaControles();Player._persistir();}});
+  audio.addEventListener('ended',()=>{if(this.localActive&&audio.ended&&Player._faixaConfirmada)Player.proxima({natural:true});});
+  audio.addEventListener('error',()=>{if(this.localActive&&audio.src){Player.pausar();Player._marcarEstadoVisual('erro');toast('O arquivo offline não pôde ser tocado. Baixe novamente.','erro');}});
+  // A fila offline pula músicas não baixadas em vez de ficar presa numa faixa indisponível.
+  const next=Player.proxima.bind(Player),prev=Player.anterior.bind(Player);
+  Player.proxima=opts=>{if(EmilyMusic.online()||opts?.natural&&!opts?.erro&&Player.loop===2)return next(opts);let i=Player.indice;for(let n=0;n<Player.playlist.length;n++){i++;if(i>=Player.playlist.length){if(opts?.natural&&Player.loop===0){Player.pausar();return;}i=0;}if(EmilyMusic.offline.faixas[Player.playlist[i].video_id]?.estado==='pronto'){if(opts?.natural&&!opts?.erro&&i===Player.indice)Player._repetirAtual();else Player.tocar(i);return;}}Player.pausar();};
+  Player.anterior=force=>{if(EmilyMusic.online())return prev(force);if(!force&&(Player.player?.getCurrentTime()||0)>3){Player.player.seekTo(0);return;}for(let n=1;n<=Player.playlist.length;n++){const i=(Player.indice-n+Player.playlist.length)%Player.playlist.length;if(EmilyMusic.offline.faixas[Player.playlist[i].video_id]?.estado==='pronto'){Player.tocar(i);return;}}};
+ },start(i,opts={}){if(!this.localActive){this.yt=Player.player;this.ytReady=Player.pronto;try{this.yt?.pauseVideo();}catch{}}this.localActive=true;Player._fila=null;Player._resumoRestaurado=null;Player.player=this.adapter;Player.pronto=true;this.originalTocar(i,opts);},
+ restaurarLocal(id,pos){if(EmilyMusic.offline.faixas[id]?.estado!=='pronto')return false;this.restoring=true;const i=Player.playlist.findIndex(m=>m.video_id===id);this.start(i);this.audio.addEventListener('loadedmetadata',()=>{this.audio.currentTime=Math.min(pos,this.audio.duration||pos);Player._atualizarTempo();},{once:true});this.restoring=false;Player.tocando=false;Player._marcarEstadoVisual('pausado');Player._pintaControles();return true;}
+ };window.EmilyMusicAudio=A;
+})();

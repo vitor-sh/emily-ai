@@ -31,24 +31,19 @@ import base64
 import json
 import os
 import random
+import re
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union, TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from dotenv import load_dotenv
 
-try:
-    from google import genai
-except ImportError:
-    genai = None
-
-if TYPE_CHECKING:
-    from google.genai import types
-else:
-    types = None
-
 load_dotenv()
+
+# Pasta do projeto. Usada pelo parser de seções do .env pra achar o arquivo
+# certo independente de onde o Python foi invocado.
+DIR_PROJETO = os.path.dirname(os.path.abspath(__file__))
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -73,6 +68,22 @@ class ErroTransporte(ErroLLM):
 
 class ErroResposta(ErroLLM):
     """O provedor respondeu, mas a resposta não tinha conteúdo utilizável."""
+
+
+def descrever_erro(erro: Exception) -> str:
+    """Mensagem curta sem URL, token ou corpo bruto do provedor."""
+    if isinstance(erro, ErroLimiteTaxa):
+        return "O serviço de IA atingiu o limite de requisições e não voltou após as tentativas."
+    if isinstance(erro, ErroConfiguracao):
+        return "O serviço de IA recusou a configuração ou a credencial. Confira as configurações."
+    if isinstance(erro, ErroTransporte):
+        texto = str(erro).lower()
+        if any(s in texto for s in ("timeout", "timed out", "connection", "connect", "dns", "sem rede")):
+            return "A conexão com o serviço de IA falhou ou demorou demais e não voltou após as tentativas."
+        return "O serviço de IA ficou indisponível e não voltou após as tentativas."
+    if isinstance(erro, ErroResposta):
+        return "O serviço de IA respondeu sem um resultado utilizável."
+    return "O serviço de IA não conseguiu concluir esta resposta."
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -277,12 +288,6 @@ class Limitador:
 # Deixo margem de segurança porque o relógio deles não é o nosso.
 RPM_PADRAO = int(os.getenv("EMILY_LLM_RPM", "36"))
 
-# O plano pago do Kiro não publica teto de requisições por minuto — o que
-# ele cobra é crédito por chamada, com multiplicador por modelo. Este balde
-# existe para proteger contra rajada acidental (o laço de triagem de tela
-# dispara de várias threads), não para respeitar um limite conhecido.
-RPM_KIRO = int(os.getenv("EMILY_KIRO_RPM", "30"))
-
 _limitadores: Dict[str, Limitador] = {}
 _lock_limitadores = threading.Lock()
 
@@ -330,6 +335,14 @@ def folga_da_rota(rota: str) -> float:
 RACIOCINIO_DESLIGADO = "desligado"
 RACIOCINIO_MINIMO = "minimo"
 RACIOCINIO_NORMAL = "normal"
+# Níveis expostos na interface. Mapeiam direto pro
+# reasoning_effort do endpoint. Ficam separados dos de cima porque estes são
+# ESCOLHA do Vitor no chat, não afinação por tarefa.
+RACIOCINIO_BAIXO = "baixo"
+RACIOCINIO_MEDIO = "medio"
+RACIOCINIO_ALTO = "alto"
+RACIOCINIO_EXTRA_ALTO = "extra_alto"
+RACIOCINIO_MAXIMO = "maximo"
 
 # Como cada nível é expressado no corpo da requisição OpenAI-compatible.
 #
@@ -357,7 +370,35 @@ PARAMS_RACIOCINIO: Dict[str, dict] = {
         "reasoning_effort": "low",
     },
     RACIOCINIO_NORMAL: {},
+    # Os três níveis do seletor da interface.
+    RACIOCINIO_BAIXO: {
+        "reasoning_effort": "low",
+    },
+    RACIOCINIO_MEDIO: {
+        "reasoning_effort": "medium",
+    },
+    RACIOCINIO_ALTO: {
+        "reasoning_effort": "high",
+    },
+    RACIOCINIO_EXTRA_ALTO: {
+        "reasoning_effort": "xhigh",
+    },
+    RACIOCINIO_MAXIMO: {
+        "reasoning_effort": "max",
+    },
 }
+
+
+def _modelo_gpt6(modelo: str) -> bool:
+    """Inclui o prefixo cx/ do OmniRoute sem afetar outros provedores."""
+    return bool(re.search(r"(?:^|/)gpt-6(?:\.\d+)?-(?:sol|luna|astra)(?:$|[-:])",
+                          (modelo or "").lower()))
+
+
+def _modelo_gpt6_sem_none(modelo: str) -> bool:
+    return bool(re.search(r"(?:^|/)gpt-6(?:\.\d+)?-astra(?:$|[-:])|"
+                          r"(?:^|/)gpt-6\.1-sol(?:$|[-:])",
+                          (modelo or "").lower()))
 
 # Parâmetros que um endpoint já rejeitou, por (provedor, modelo).
 # Evita insistir em algo que sabemos que não existe naquele build.
@@ -371,6 +412,10 @@ def _chave_rejeicao(provedor: str, modelo: str) -> str:
 
 def _params_validos(provedor: str, modelo: str, nivel: str) -> dict:
     base = PARAMS_RACIOCINIO.get(nivel, {})
+    if _modelo_gpt6_sem_none(modelo) and base.get("reasoning_effort") == "none":
+        # Rotas internas como Discord ainda nascem com raciocínio desligado;
+        # Astra/6.1 Sol rejeitam esse valor mesmo fora do seletor do chat.
+        base = {**base, "reasoning_effort": "low"}
     if not base:
         return {}
     with _lock_rejeitados:
@@ -499,6 +544,125 @@ class Provedor:
         raise NotImplementedError
 
 
+# ════════════════════════════════════════════════════════════════
+# POOL HTTP COM KEEP-ALIVE LONGO — o conserto de latência dos provedores
+# ════════════════════════════════════════════════════════════════
+#
+# O QUE ESTAVA ERRADO
+# ───────────────────
+# O SDK criava o próprio httpx.Client, e o default do httpx fecha conexão
+# ociosa depois de 5 segundos (`Limits(keepalive_expiry=5.0)`).
+#
+# Numa conversa de verdade a Emily é chamada a cada 10–40s. Ou seja: quase
+# TODA chamada pagava handshake novo (DNS + TCP + TLS). Medido contra o
+# relay da Anthropic configurado no .env:
+#
+#   conexão fria  -> 8–10s   (com picos)
+#   conexão quente -> 1,8–2,2s
+#
+# Com um cliente de keep-alive de 5 minutos, as três chamadas medidas
+# ficaram em 1,95s / 2,14s / 2,12s, contra 4,80s / 2,29s / 2,25s do
+# cliente padrão. É o ganho mais barato que existe aqui: nenhuma linha
+# de prompt muda, nenhum modelo muda — só o socket para de morrer entre
+# um turno e outro.
+#
+# POR QUE UM POOL POR PROVEDOR
+# ────────────────────────────
+# As threads da Emily (voz, call, memória, agenda, agentes) batem no
+# MESMO provedor em paralelo. Um pool por provedor evita que a rajada de
+# ferramentas derrube conexões umas das outras, e o teto maior (64) cobre
+# o paralelismo real sem repetir o handshake.
+_POOL_HTTP_LOCK = threading.Lock()
+_POOL_HTTP: Dict[str, object] = {}
+
+
+def _env_float_llm(nome: str, padrao: float) -> float:
+    """Lê float de variável de ambiente sem explodir em valor torto."""
+    try:
+        return float(os.getenv(nome, str(padrao)))
+    except (TypeError, ValueError):
+        return padrao
+
+
+def _cliente_http_do_provedor(nome: str, timeout: float):
+    """
+    httpx.Client com keep-alive longo, um por provedor.
+
+    Devolve None quando o httpx não está disponível (nesse caso o SDK volta
+    ao cliente padrão dele — comportamento antigo, só mais lento).
+    """
+    try:
+        import httpx
+    except ImportError:
+        return None
+    with _POOL_HTTP_LOCK:
+        cliente = _POOL_HTTP.get(nome)
+        if cliente is not None and not getattr(cliente, "is_closed", False):
+            return cliente
+        expiracao = _env_float_llm("EMILY_LLM_KEEPALIVE", 300.0)
+        max_conexoes = int(_env_float_llm("EMILY_LLM_MAX_CONEXOES", 64.0))
+        if expiracao < 0:
+            # Valor negativo = não usar pool próprio. É o comportamento
+            # HISTÓRICO (o SDK cria o cliente dele, com o keepalive de 5s do
+            # httpx) e existe pra medição A/B e como escotilha caso algum
+            # endpoint reclame de conexão reaproveitada.
+            return None
+        try:
+            cliente = httpx.Client(
+                # O timeout real da chamada é o do SDK (por requisição); este
+                # aqui é só o teto de segurança do transporte.
+                timeout=httpx.Timeout(max(10.0, timeout)),
+                limits=httpx.Limits(
+                    max_connections=max(8, max_conexoes),
+                    max_keepalive_connections=max(4, max_conexoes // 2),
+                    keepalive_expiry=max(0.0, expiracao),
+                ),
+            )
+        except Exception as e:
+            _log(f"pool HTTP de '{nome}' indisponível ({e}); usando o cliente do SDK")
+            return None
+        _POOL_HTTP[nome] = cliente
+        _log(
+            f"pool HTTP de '{nome}': keepalive={expiracao:.0f}s "
+            f"max_conexoes={max(8, max_conexoes)}"
+        )
+        return cliente
+
+
+def fechar_pools_http() -> None:
+    """
+    Fecha os pools HTTP e invalida os clientes de SDK que os usavam.
+
+    A invalidação é obrigatória, não zelo: o cliente do SDK guarda uma
+    referência ao httpx.Client. Fechar só o pool deixaria o SDK falando num
+    socket morto — toda chamada vira "Connection error" e a cadeia de
+    fallback transforma isso em ~20s de espera antes de desistir.
+    """
+    provedores_limpos = 0
+    for provedor in list(PROVEDORES.values()):
+        # O provedor híbrido guarda um segundo SDK para a Messages API visual.
+        # Os dois apontam para pools deste módulo e precisam ser invalidados
+        # juntos; senão o próximo anexo reutiliza um httpx.Client já fechado.
+        clientes = [provedor]
+        visual = getattr(provedor, "_visao_anthropic", None)
+        if visual is not None:
+            clientes.append(visual)
+        for cliente_sdk in clientes:
+            try:
+                cliente_sdk._cliente = None
+                cliente_sdk._pool_do_cliente = None
+                provedores_limpos += 1
+            except Exception:
+                pass
+    with _POOL_HTTP_LOCK:
+        for nome, cliente in list(_POOL_HTTP.items()):
+            try:
+                cliente.close()
+            except Exception:
+                pass
+            _POOL_HTTP.pop(nome, None)
+
+
 class ProvedorOpenAI(Provedor):
     """
     Provedor para qualquer endpoint compatível com a API da OpenAI:
@@ -514,15 +678,32 @@ class ProvedorOpenAI(Provedor):
         self.env_chave = env_chave
         self.timeout = timeout
         self._cliente = None
+        self._pool_do_cliente = None   # httpx.Client que o SDK está usando
         self._lock = threading.Lock()
 
     def _obter_cliente(self):
-        if self._cliente is not None:
+        # Pool e cliente do SDK andam JUNTOS: fechar/recrear o pool tem que
+        # invalidar o cliente do SDK, senão ele segue apontando pro
+        # httpx.Client já fechado e TODA chamada falha com "Connection
+        # error" — e com a cadeia de fallback isso vira 20s de tentativa
+        # antes de desistir. Comparar a identidade do pool resolve sem flag.
+        pool = _cliente_http_do_provedor(self.nome, self.timeout)
+        if self._cliente is not None and self._pool_do_cliente is pool:
             return self._cliente
         with self._lock:
-            if self._cliente is not None:
+            pool = _cliente_http_do_provedor(self.nome, self.timeout)
+            if self._cliente is not None and self._pool_do_cliente is pool:
                 return self._cliente
-            chave = os.getenv(self.env_chave)
+            # O campo _CHAVE do .env normalmente guarda o NOME da env var
+            # (ex: DEEPSEEK_API_KEY). Mas aceita também o VALOR direto
+            # (ex: sk-xxxx) quando o Vitor colou a chave no campo — nesse
+            # caso usa ela mesma em vez de procurar uma env var que não
+            # existe. O _provedores_config usa env_chave_opcional pra
+            # tolerar a falta; aqui resolvemos o valor de verdade.
+            if self.env_chave.startswith("sk-"):
+                chave = self.env_chave
+            else:
+                chave = os.getenv(self.env_chave)
             if not chave:
                 raise ErroConfiguracao(
                     f"provedor '{self.nome}' precisa da variável {self.env_chave} no .env "
@@ -534,7 +715,13 @@ class ProvedorOpenAI(Provedor):
                 raise ErroConfiguracao(
                     "o pacote 'openai' não está instalado. Rode: pip install openai"
                 ) from e
-            self._cliente = OpenAI(base_url=self.base_url, api_key=chave, timeout=self.timeout)
+            # O pool com keep-alive longo é o que evita o handshake frio a
+            # cada turno — ver o comentário de _cliente_http_do_provedor.
+            self._cliente = OpenAI(
+                base_url=self.base_url, api_key=chave, timeout=self.timeout,
+                http_client=pool,
+            )
+            self._pool_do_cliente = pool
             _log(f"provedor '{self.nome}' conectado em {self.base_url}")
             return self._cliente
 
@@ -582,25 +769,27 @@ class ProvedorOpenAI(Provedor):
             # vez de executá-la.
             #
             # 'none' mantém o catálogo declarado e proíbe o uso. Parece o mesmo
-            # que mandar a lista vazia, e NÃO é: o gateway do Kiro, quando a
-            # requisição não declara tools, converte o histórico de ferramentas
-            # em TEXTO ("[Tool: nome (id)]\n{args}") pra não perder o contexto.
-            # O modelo lê isso como o formato das falas dele e imita — foi assim
-            # que a Emily mandou "[Tool: gerenciar_mod_launcher_mc (toolu_...)]"
-            # como mensagem no Discord. Com tools declarado, o histórico segue
+            # que mandar a lista vazia, e NÃO é: proxy que recebe requisição
+            # SEM 'tools' costuma achatar o histórico de ferramentas em TEXTO
+            # ("[Tool: nome (id)]\n{args}") pra não perder o contexto. O modelo
+            # lê isso como o formato das falas dele e imita — foi assim que a
+            # Emily mandou "[Tool: gerenciar_mod_launcher_mc (toolu_...)]" como
+            # mensagem no Discord. Com 'tools' declarado o histórico segue
             # estruturado e não há formato nenhum pra imitar.
             if obrigar_ferramenta:
-                corpo["tool_choice"] = "required"
+                corpo["tool_choice"] = "auto" if any(x in modelo.replace('.', '-') for x in ('sonnet-5-5','opus-5-5','fable-5-1','mythos-5-1')) else "required"
             elif proibir_ferramenta:
                 corpo["tool_choice"] = "none"
             else:
                 corpo["tool_choice"] = "auto"
         if max_tokens:
             corpo["max_tokens"] = max_tokens
-        if temperatura is not None:
-            corpo["temperature"] = temperatura
-
+        # GPT-6 usa raciocínio médio por padrão; temperatura não é aceita
+        # nessa modalidade. Vale também quando nenhum esforço foi enviado.
         extras = _params_validos(self.nome, modelo, raciocinio)
+        esforco = extras.get("reasoning_effort", "medium")
+        if temperatura is not None and not (_modelo_gpt6(modelo) and esforco != "none"):
+            corpo["temperature"] = temperatura
         # reasoning_effort é campo de primeira classe em alguns SDKs;
         # o resto vai em extra_body, que o SDK repassa cru.
         extra_body = {}
@@ -673,7 +862,7 @@ class ProvedorOpenAI(Provedor):
         if status in (401, 403):
             raise ErroConfiguracao(
                 f"provedor '{self.nome}' recusou a credencial ({status}). "
-                f"Confira {self.env_chave} no .env."
+                "Confira a credencial do provedor nas configurações."
             ) from e
 
         raise ErroTransporte(f"falha no provedor '{self.nome}': {texto}") from e
@@ -716,7 +905,14 @@ class ProvedorOpenAI(Provedor):
             for pedaco in resposta:
                 if not getattr(pedaco, "choices", None):
                     continue
-                delta = pedaco.choices[0].delta
+                escolha = pedaco.choices[0]
+                # Loga o finish_reason quando o stream termina (último chunk).
+                # 'length' = estouro de max_tokens de saída — o texto final
+                # veio cortado. Sem isso, o corte passa despercebido.
+                motivo = getattr(escolha, "finish_reason", None)
+                if motivo:
+                    _log(f"stream finalizado: finish_reason={motivo}")
+                delta = escolha.delta
                 texto = getattr(delta, "content", None)
                 if texto:
                     yield texto
@@ -761,25 +957,96 @@ class FluxoComFerramentas:
     def __init__(self, stream_bruto):
         self._stream = stream_bruto
         self._buffer: List[str] = []
+        # Pode ser reduzido pelo consumidor ANTES de quer_ferramenta(). Em um
+        # pedido conversacional que já foi classificado como não-ação, esperar
+        # 80 caracteres faz respostas curtas aparecerem apenas quando o stream
+        # inteiro termina. Pedidos de ação mantêm o teto conservador acima.
+        self._chars_para_decidir = self._CHARS_PARA_DECIDIR
         self._parciais: Dict[int, dict] = {}   # índice -> {id, nome, args}
         self._decidido = False
         self._esgotado = False
+        # Por que capturar finish_reason: o último chunk do stream traz
+        # choices[0].finish_reason ("stop" | "length" | ...) sem conteúdo.
+        # Se o modelo corta por 'length' (max_tokens de saída estourado — o
+        # caso das leituras de 220KB de código), o stream simplesmente para
+        # e o texto da resposta final nunca vem. Antes isso passava
+        # despercebido: o laço achava que "acabou" e devolvia o preâmbulo.
+        self._finish_reason: Optional[str] = None
+        self._reabrir = None
+        self._avisar_reconexao = None
+        self._reconexoes = 0
+        self._texto_entregue = False
+        self._aguardando_retorno = False
+
+    def configurar_reconexao(self, reabrir, avisar=None, limite: int = 3) -> None:
+        """Reabre somente a geração ainda não entregue; ferramenta não foi executada."""
+        self._reabrir = reabrir
+        self._avisar_reconexao = avisar
+        self._limite_reconexoes = max(0, limite)
+
+    def definir_limite_decisao_texto(self, limite: int) -> None:
+        """Ajusta quanto texto é necessário para decidir, antes do consumo.
+
+        O limite só pode ser alterado enquanto nenhum evento foi lido. Isso
+        evita mudar retroativamente uma decisão e mantém 80 caracteres como
+        padrão seguro para pedidos que podem virar tool call.
+        """
+        if self._decidido or self._buffer or self._parciais or self._esgotado:
+            return
+        try:
+            self._chars_para_decidir = max(1, int(limite))
+        except (TypeError, ValueError):
+            return
 
     def _proximo_pedaco(self) -> Optional[str]:
         """Consome um evento do stream. Devolve texto se houver, senão None."""
-        try:
-            pedaco = next(self._stream)
-        except StopIteration:
-            self._esgotado = True
-            return None
-        except Exception as e:
-            self._esgotado = True
-            _log(f"stream com ferramentas interrompido: {type(e).__name__}: {e}")
-            raise ErroTransporte(f"stream interrompido: {e}") from e
+        while True:
+            try:
+                pedaco = next(self._stream)
+                if self._aguardando_retorno:
+                    self._aguardando_retorno = False
+                    if self._avisar_reconexao:
+                        self._avisar_reconexao(0, self._limite_reconexoes)
+                break
+            except StopIteration:
+                self._esgotado = True
+                return None
+            except Exception as e:
+                _log(f"stream com ferramentas interrompido: {type(e).__name__}: {e}")
+                # O modelo pode ter escrito metade de uma chamada, mas nenhuma
+                # ferramenta foi executada: descartamos esses argumentos parciais.
+                # Se texto já foi entregue ao TTS/chat, reiniciar a geração
+                # duplicaria a fala. Nesse caso a camada acima mostra a falha.
+                if (self._texto_entregue or not self._reabrir
+                        or self._reconexoes >= self._limite_reconexoes):
+                    self._esgotado = True
+                    raise ErroTransporte(f"stream interrompido: {e}") from e
+                self._reconexoes += 1
+                if self._avisar_reconexao:
+                    self._avisar_reconexao(self._reconexoes, self._limite_reconexoes)
+                time.sleep(_espera_backoff(self._reconexoes - 1))
+                try:
+                    self._stream = self._reabrir()
+                except (ErroTransporte, ErroLimiteTaxa):
+                    if self._reconexoes >= self._limite_reconexoes:
+                        self._esgotado = True
+                        raise
+                    continue
+                self._buffer.clear()
+                self._parciais.clear()
+                self._finish_reason = None
+                self._decidido = False
+                self._aguardando_retorno = True
 
         if not getattr(pedaco, "choices", None):
             return None
-        delta = pedaco.choices[0].delta
+        escolha = pedaco.choices[0]
+        # O último chunk do stream costuma ter finish_reason definido.
+        # Captura pra o consumidor poder detectar corte por 'length'.
+        motivo = getattr(escolha, "finish_reason", None)
+        if motivo:
+            self._finish_reason = motivo
+        delta = escolha.delta
 
         for tc in (getattr(delta, "tool_calls", None) or []):
             idx = getattr(tc, "index", 0) or 0
@@ -794,6 +1061,10 @@ class FluxoComFerramentas:
                     alvo["args"] += fn.arguments
 
         return getattr(delta, "content", None) or None
+
+    def finish_reason(self) -> Optional[str]:
+        """O finish_reason do último chunk (ex: 'stop', 'length', None)."""
+        return self._finish_reason
 
     def _decidir(self) -> None:
         """
@@ -825,7 +1096,7 @@ class FluxoComFerramentas:
                 self._buffer.append(texto)
                 # Só caractere de verdade conta. "\n" e " " não decidem.
                 uteis += len(texto.strip())
-                if uteis >= self._CHARS_PARA_DECIDIR:
+                if uteis >= self._chars_para_decidir:
                     break
         self._decidido = True
 
@@ -866,11 +1137,13 @@ class FluxoComFerramentas:
         """Gera o texto da resposta, incluindo o que foi consumido na decisão."""
         self._decidir()
         for pedaco in self._buffer:
+            self._texto_entregue = True
             yield pedaco
         self._buffer = []
         while not self._esgotado:
             pedaco = self._proximo_pedaco()
             if pedaco:
+                self._texto_entregue = True
                 yield pedaco
 
 
@@ -882,6 +1155,7 @@ class ProvedorAnthropic(Provedor):
     """
 
     nome = "anthropic"
+    suporta_ferramentas = True
 
     def __init__(self, nome: str, base_url: Optional[str], env_chave: str, timeout: float = 90.0):
         self.nome = nome
@@ -889,15 +1163,28 @@ class ProvedorAnthropic(Provedor):
         self.env_chave = env_chave
         self.timeout = timeout
         self._cliente = None
+        self._pool_do_cliente = None   # httpx.Client que o SDK está usando
         self._lock = threading.Lock()
 
     def _obter_cliente(self):
-        if self._cliente is not None:
+        # Mesma regra do ProvedorOpenAI: pool e cliente do SDK são
+        # recriados juntos (ver o comentário lá).
+        pool = _cliente_http_do_provedor(self.nome, self.timeout)
+        if self._cliente is not None and self._pool_do_cliente is pool:
             return self._cliente
         with self._lock:
-            if self._cliente is not None:
+            pool = _cliente_http_do_provedor(self.nome, self.timeout)
+            if self._cliente is not None and self._pool_do_cliente is pool:
                 return self._cliente
-            chave = os.getenv(self.env_chave)
+            # Mesma tolerância do ProvedorOpenAI: o campo _CHAVE aceita o
+            # NOME da variável de ambiente ou o VALOR direto da chave. Sem
+            # isto, colar a chave no .env (em vez do nome da variável) fazia
+            # o provedor morrer com "precisa de sk-xxx no .env" — mensagem
+            # sem sentido para quem acabou de colar justamente a chave.
+            if self.env_chave.startswith("sk-"):
+                chave = self.env_chave
+            else:
+                chave = os.getenv(self.env_chave)
             if not chave:
                 raise ErroConfiguracao(
                     f"provedor '{self.nome}' precisa de {self.env_chave} no .env"
@@ -906,10 +1193,16 @@ class ProvedorAnthropic(Provedor):
                 from anthropic import Anthropic
             except ImportError as e:
                 raise ErroConfiguracao("pacote 'anthropic' não instalado") from e
-            kwargs = {"api_key": chave, "timeout": self.timeout}
+            kwargs = {
+                "api_key": chave, "timeout": self.timeout,
+                # Keep-alive longo também aqui: o SDK da Anthropic aceita um
+                # httpx.Client próprio (ver _cliente_http_do_provedor).
+                "http_client": pool,
+            }
             if self.base_url:
                 kwargs["base_url"] = self.base_url
             self._cliente = Anthropic(**kwargs)
+            self._pool_do_cliente = pool
             _log(f"provedor '{self.nome}' conectado")
             return self._cliente
 
@@ -918,6 +1211,21 @@ class ProvedorAnthropic(Provedor):
         saida: List[dict] = []
 
         for m in mensagens:
+            if m.bruta is not None:
+                raw = m.bruta
+                if m.papel == 'tool':
+                    blocos = [{'type':'tool_result', 'tool_use_id':raw['tool_call_id'], 'content':raw.get('content') or ''}]
+                    papel = 'user'
+                else:
+                    blocos = []
+                    if raw.get('content'): blocos.append({'type':'text','text':raw['content']})
+                    for call in raw.get('tool_calls') or []:
+                        fn=call['function']
+                        blocos.append({'type':'tool_use','id':call['id'],'name':fn['name'],'input':json.loads(fn.get('arguments') or '{}')})
+                    papel = 'assistant'
+                if saida and saida[-1]['role']==papel: saida[-1]['content'].extend(blocos)
+                elif blocos: saida.append({'role':papel,'content':blocos})
+                continue
             if m.papel == "system":
                 system = m.texto if system is None else f"{system}\n\n{m.texto}"
                 continue
@@ -956,17 +1264,14 @@ class ProvedorAnthropic(Provedor):
         obrigar_ferramenta: bool = False,
         proibir_ferramenta: bool = False,
     ) -> RespostaLLM:
-        if ferramentas:
-            # O formato de ferramenta da Anthropic é outro. Este provedor está
-            # aqui como plano B de conversa; se for preciso tool calling nele,
-            # implementar a conversão em _montar em vez de falhar quieto.
-            raise ErroConfiguracao(
-                f"provedor '{self.nome}' ainda não implementa tool calling. "
-                f"Use um provedor OpenAI-compatible nessa rota."
-            )
         cliente = self._obter_cliente()
         system, msgs = self._montar(mensagens)
         corpo = {"model": modelo, "max_tokens": max_tokens or 4096, "messages": msgs}
+        if ferramentas:
+            corpo['tools']=[{'name':t['function']['name'], 'description':t['function'].get('description',''), 'input_schema':t['function'].get('parameters',{'type':'object','properties':{}})} for t in ferramentas]
+            choice='none' if proibir_ferramenta else 'any' if obrigar_ferramenta else 'auto'
+            if choice=='any' and any(x in modelo.replace('.', '-') for x in ('sonnet-5-5','opus-5-5','fable-5-1','mythos-5-1')): choice='auto'
+            corpo['tool_choice']={'type':choice}
         if system:
             corpo["system"] = system
         if temperatura is not None:
@@ -974,9 +1279,15 @@ class ProvedorAnthropic(Provedor):
 
         try:
             if stream:
+                if ferramentas:
+                    events=cliente.messages.create(**corpo, stream=True)
+                    return FluxoComFerramentas(self._eventos_ferramentas(events))
                 return self._iterar_stream(cliente, corpo)
             resposta = cliente.messages.create(**corpo)
-            return "".join(b.text for b in resposta.content if getattr(b, "type", None) == "text")
+            texto="".join(b.text for b in resposta.content if getattr(b, "type", None) == "text")
+            if ferramentas:
+                return Resposta(texto, [ChamadaFerramenta(b.id,b.name,json.dumps(b.input,ensure_ascii=False)) for b in resposta.content if getattr(b,'type',None)=='tool_use'])
+            return texto
         except Exception as e:
             texto = str(e)
             status = getattr(e, "status_code", None)
@@ -984,9 +1295,30 @@ class ProvedorAnthropic(Provedor):
                 raise ErroLimiteTaxa(f"429 do provedor '{self.nome}': {texto}") from e
             if status in (401, 403):
                 raise ErroConfiguracao(
-                    f"provedor '{self.nome}' recusou a credencial ({status}). Confira {self.env_chave}."
+                    f"provedor '{self.nome}' recusou a credencial ou o acesso ao modelo ({status}). Confira as configurações do provedor."
                 ) from e
             raise ErroTransporte(f"falha no provedor '{self.nome}': {texto}") from e
+
+    @staticmethod
+    def _eventos_ferramentas(events):
+        """Preserva texto, IDs e JSON incremental no contrato comum do agente."""
+        from types import SimpleNamespace as N
+        try:
+            for event in events:
+                delta=N(content=None,tool_calls=[]); finish=None
+                if event.type=='content_block_start' and event.content_block.type=='tool_use':
+                    block=event.content_block
+                    delta.tool_calls=[N(index=event.index,id=block.id,function=N(name=block.name,arguments=''))]
+                elif event.type=='content_block_delta':
+                    if event.delta.type=='text_delta': delta.content=event.delta.text
+                    elif event.delta.type=='input_json_delta':
+                        delta.tool_calls=[N(index=event.index,id=None,function=N(name=None,arguments=event.delta.partial_json))]
+                elif event.type=='message_delta':
+                    finish={'max_tokens':'length','tool_use':'tool_calls'}.get(event.delta.stop_reason,'stop')
+                yield N(choices=[N(delta=delta,finish_reason=finish)])
+        finally:
+            close=getattr(events,'close',None)
+            if close:close()
 
     @staticmethod
     def _iterar_stream(cliente, corpo) -> Iterator[str]:
@@ -1000,373 +1332,74 @@ class ProvedorAnthropic(Provedor):
             raise ErroTransporte(f"stream interrompido: {e}") from e
 
 
-class FluxoComFerramentasGemini:
-    """Mesma lógica de FluxoComFerramentas, adaptada para os chunks de genai.types.GenerateContentResponse"""
-    _CHARS_PARA_DECIDIR = 80
+class ProvedorOpenAIComVisaoAnthropic(ProvedorOpenAI):
+    """Chat Completions para texto/ferramentas e Messages API para imagens.
 
-    def __init__(self, stream_bruto):
-        self._stream = stream_bruto
-        self._buffer: List[str] = []
-        self._parciais: List[dict] = []   # chamadas em andamento
-        self._decidido = False
-        self._esgotado = False
+    Alguns relays de Claude expõem os dois protocolos com a mesma chave:
+    ``/v1/chat/completions`` mantém a compatibilidade OpenAI usada pelo laço de
+    ferramentas da Emily, enquanto ``/v1/messages`` preserva os blocos nativos
+    de imagem da Anthropic. Usar só o primeiro pode fazer o modelo receber o
+    texto do turno sem conseguir decodificar a imagem.
 
-    def _proximo_pedaco(self) -> Optional[str]:
-        try:
-            pedaco = next(self._stream)
-        except StopIteration:
-            self._esgotado = True
-            return None
-        except Exception as e:
-            self._esgotado = True
-            _log(f"stream gemini interrompido: {type(e).__name__}: {e}")
-            raise ErroTransporte(f"stream interrompido: {e}") from e
-        
-        # O Pydantic Parse do Google GenAI muitas vezes esconde o Part dentro dos candidates
-        if getattr(pedaco, "candidates", None) and pedaco.candidates[0].content:
-            for part in pedaco.candidates[0].content.parts:
-                if getattr(part, "function_call", None):
-                    fc = part.function_call
-                    ts = getattr(part, "thought_signature", None)
-                    print(f"[DEBUG Vertex Stream] Recebido function_call: {fc.name}, thought_signature={ts}")
-                    self._parciais.append({
-                        "id": "",
-                        "nome": fc.name,
-                        "args": json.dumps(fc.args) if fc.args else "{}",
-                        "thought_signature": ts
-                    })
-                
-        return getattr(pedaco, "text", None) or None
-
-    def _decidir(self) -> None:
-        if self._decidido:
-            return
-        uteis = 0
-        while not self._esgotado:
-            texto = self._proximo_pedaco()
-            if self._parciais:
-                break
-            if texto:
-                self._buffer.append(texto)
-                uteis += len(texto.strip())
-                if uteis >= self._CHARS_PARA_DECIDIR:
-                    break
-        self._decidido = True
-
-    def quer_ferramenta(self) -> bool:
-        self._decidir()
-        return bool(self._parciais)
-
-    @property
-    def preambulo(self) -> str:
-        return "".join(self._buffer)
-
-    @property
-    def chamadas(self) -> List[ChamadaFerramenta]:
-        self._decidir()
-        while not self._esgotado:
-            self._proximo_pedaco()
-        saida = []
-        for i, p in enumerate(self._parciais):
-            saida.append(ChamadaFerramenta(
-                id=f"chamada_{i}",
-                nome=p["nome"],
-                argumentos=p["args"],
-                thought_signature=p.get("thought_signature")
-            ))
-        return saida
-
-    def texto(self) -> Iterator[str]:
-        self._decidir()
-        for pedaco in self._buffer:
-            yield pedaco
-        self._buffer = []
-        while not self._esgotado:
-            pedaco = self._proximo_pedaco()
-            if pedaco:
-                yield pedaco
-
-
-class ProvedorVertexGemini(Provedor):
-    nome = "vertex"
-    suporta_ferramentas = True
-
-    def __init__(self, timeout: float = 90.0):
-        self.timeout = timeout
-        self._cliente = None
-        self._lock = threading.Lock()
-
-    def _obter_cliente(self):
-        if self._cliente is not None:
-            return self._cliente
-        with self._lock:
-            if self._cliente is not None:
-                return self._cliente
-            if genai is None:
-                raise ErroConfiguracao("pacote 'google-genai' não está instalado")
-            
-            project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-            location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
-            
-            if not project_id:
-                raise ErroConfiguracao("provedor 'vertex' precisa da variável GOOGLE_CLOUD_PROJECT")
-            
-            try:
-                self._cliente = genai.Client(vertexai=True, project=project_id, location=location)
-                _log(f"provedor 'vertex' conectado no projeto {project_id} ({location})")
-                return self._cliente
-            except Exception as e:
-                raise ErroConfiguracao(f"falha ao conectar no Vertex AI: {e}") from e
-
-    def _montar_mensagens(self, mensagens: List[Mensagem]) -> Tuple[Optional[str], List["types.Content"]]:
-        if types is None:
-            from google.genai import types as _types
-            t = _types
-        else:
-            t = types
-            
-        saida = []
-        system = None
-
-        for m in mensagens:
-            if m.bruta is not None:
-                if m.papel == "tool" or m.bruta.get("role") == "tool":
-                    name = m.bruta.get("name", "unknown")
-                    content = m.bruta.get("content", "")
-                    try:
-                        content_dict = json.loads(content) if content.startswith("{") else {"result": content}
-                    except:
-                        content_dict = {"result": content}
-                    
-                    saida.append(t.Content(
-                        role="user",
-                        parts=[t.Part.from_function_response(name=name, response=content_dict)]
-                    ))
-                    continue
-
-                if "tool_calls" in m.bruta:
-                    partes = []
-                    if m.bruta.get("content"):
-                        partes.append(t.Part.from_text(text=m.bruta["content"]))
-                    for tc in m.bruta["tool_calls"]:
-                        if tc.get("type") == "function":
-                            fn = tc["function"]
-                            try:
-                                args = json.loads(fn.get("arguments", "{}"))
-                            except:
-                                args = {}
-                            part = t.Part.from_function_call(name=fn["name"], args=args)
-                            ts_b64 = tc.get("thought_signature")
-                            print(f"[DEBUG Vertex] Reconstruindo tool_call {fn['name']}, thought_signature b64 do historico: {ts_b64}")
-                            if ts_b64:
-                                part.thought_signature = base64.b64decode(ts_b64)
-                            print(f"[DEBUG Vertex] Part reconstruida tem thought_signature? {getattr(part, 'thought_signature', None) is not None}")
-                            partes.append(part)
-                    
-                    if partes:
-                        saida.append(t.Content(role="model", parts=partes))
-                    continue
-
-            if m.papel == "system":
-                system = m.texto if system is None else f"{system}\n\n{m.texto}"
-                continue
-            
-            papel = "model" if m.papel == "assistant" else "user"
-            partes = []
-            
-            if m.texto:
-                partes.append(t.Part.from_text(text=m.texto))
-                
-            for media_type, dados in m.imagens:
-                if media_type != "url":
-                    b_dados = base64.b64decode(dados)
-                    partes.append(t.Part.from_bytes(data=b_dados, mime_type=media_type))
-            
-            if partes:
-                saida.append(t.Content(role=papel, parts=partes))
-                
-        return system, saida
-
-    def chamar(self, mensagens: List[Mensagem], modelo: str, max_tokens: Optional[int], 
-               temperatura: Optional[float], raciocinio: str, stream: bool, 
-               ferramentas: Optional[List[dict]] = None, obrigar_ferramenta: bool = False, 
-               proibir_ferramenta: bool = False) -> RespostaLLM:
-        cliente = self._obter_cliente()
-        system, contents = self._montar_mensagens(mensagens)
-        
-        config_kwargs = {}
-        if system:
-            config_kwargs["system_instruction"] = system
-        if types is None:
-            from google.genai import types as _types
-            t = _types
-        else:
-            t = types
-
-        if max_tokens:
-            config_kwargs["max_output_tokens"] = max_tokens
-        if temperatura is not None:
-            config_kwargs["temperature"] = temperatura
-
-        if raciocinio == RACIOCINIO_DESLIGADO:
-            config_kwargs["thinking_config"] = t.ThinkingConfig(thinking_budget=0)
-        elif raciocinio == RACIOCINIO_MINIMO:
-            config_kwargs["thinking_config"] = t.ThinkingConfig(thinking_budget=16)
-
-
-        if raciocinio == RACIOCINIO_DESLIGADO:
-            config_kwargs["thinking_config"] = t.ThinkingConfig(thinking_budget=0)
-        elif raciocinio == RACIOCINIO_MINIMO:
-            config_kwargs["thinking_config"] = t.ThinkingConfig(thinking_budget=16)
-            
-        if ferramentas and not proibir_ferramenta:
-            gemini_tools = []
-            for f in ferramentas:
-                if f.get("type") == "function":
-                    func = f["function"]
-                    gemini_tools.append(t.Tool(
-                        function_declarations=[
-                            t.FunctionDeclaration(
-                                name=func["name"],
-                                description=func.get("description", ""),
-                                parameters=func.get("parameters") 
-                            )
-                        ]
-                    ))
-            if gemini_tools:
-                config_kwargs["tools"] = gemini_tools
-                
-        if types is None:
-            from google.genai import types as _types
-            t = _types
-        else:
-            t = types
-            
-        config = t.GenerateContentConfig(**config_kwargs)
-
-        try:
-            if stream:
-                resposta = cliente.models.generate_content_stream(model=modelo, contents=contents, config=config)
-                if ferramentas:
-                    return FluxoComFerramentasGemini(resposta)
-                return self._iterar_stream(resposta)
-
-            resposta = cliente.models.generate_content(model=modelo, contents=contents, config=config)
-            if ferramentas:
-                return self._resposta_de(resposta)
-            return self._texto_de(resposta)
-
-        except Exception as e:
-            texto = str(e)
-            if "429" in texto:
-                raise ErroLimiteTaxa(f"429 do provedor 'vertex': {texto}") from e
-            raise ErroTransporte(f"falha no provedor 'vertex': {texto}") from e
-
-    @staticmethod
-    def _resposta_de(resposta) -> Resposta:
-        chamadas = []
-        if getattr(resposta, "candidates", None) and resposta.candidates[0].content:
-            for i, part in enumerate(resposta.candidates[0].content.parts):
-                if getattr(part, "function_call", None):
-                    fc = part.function_call
-                    ts = getattr(part, "thought_signature", None)
-                    print(f"[DEBUG Vertex Não-Stream] Recebido function_call: {fc.name}, thought_signature={ts}")
-                    chamadas.append(ChamadaFerramenta(
-                        id=f"chamada_{i}",
-                        nome=fc.name,
-                        argumentos=json.dumps(fc.args) if fc.args else "{}",
-                        thought_signature=ts
-                    ))
-        return Resposta(texto=getattr(resposta, "text", "") or "", chamadas=chamadas)
-
-    @staticmethod
-    def _texto_de(resposta) -> str:
-        return getattr(resposta, "text", "") or ""
-
-    @staticmethod
-    def _iterar_stream(resposta) -> Iterator[str]:
-        try:
-            for pedaco in resposta:
-                t = getattr(pedaco, "text", None)
-                if t:
-                    yield t
-        except Exception as e:
-            _log(f"stream vertex interrompido: {e}")
-            raise ErroTransporte(f"stream interrompido: {e}") from e
-
-
-class ProvedorKiro(ProvedorOpenAI):
-    """
-    O gateway local do Kiro: os modelos Claude do plano pago do Vitor
-    expostos numa API OpenAI-compatible por um proxy em 127.0.0.1.
-
-    Herda o ProvedorOpenAI inteiro — formato de fio, streaming, tool calling
-    e classificação de erro são idênticos, porque o gateway fala OpenAI de
-    verdade. A única coisa que muda é que este endpoint não existe até
-    alguém subir o subprocesso.
-
-    Por que sobrescreve chamar() e não _obter_cliente()
-    ───────────────────────────────────────────────────
-    O cliente é cacheado: _obter_cliente() roda UMA vez por sessão. Se a
-    garantia do gateway morasse lá, um gateway que caísse no meio da tarde
-    nunca seria religado — a Emily emudeceria até reiniciar. Em chamar(), a
-    garantia roda em toda chamada, e é barata porque o gateway.py mantém o
-    último /health em cache com TTL.
-
-    Falha de gateway sai como ErroConfiguracao de propósito: é a única
-    classe que o chamar() NÃO repete. Gateway fora do ar não melhora com
-    backoff, e quatro tentativas de 300s deixariam a Emily muda por vinte
-    minutos em vez de avisar o Vitor em dois segundos.
+    O desvio é deliberadamente estreito: só ocorre quando a mensagem contém
+    imagem e não há catálogo de ferramentas. Todo o restante continua passando
+    pelo comportamento já testado de :class:`ProvedorOpenAI`.
     """
 
-    nome = "kiro"
+    def __init__(self, nome: str, base_url: str, env_chave: str,
+                 timeout: float = 90.0):
+        super().__init__(nome, base_url, env_chave, timeout)
+        self._visao_anthropic = ProvedorAnthropic(
+            nome=f"{nome}:visao",
+            base_url=_url_sem_v1(base_url) or None,
+            env_chave=env_chave,
+            timeout=timeout,
+        )
 
-    # O aviso de gateway.py ausente é impresso uma vez, não a cada chamada.
-    _avisou_sem_modulo = False
-
-    def _garantir_gateway(self) -> None:
-        """
-        Garante que o proxy está no ar antes de qualquer I/O.
-
-        O import é lazy e tolerante de propósito: o llm.py precisa continuar
-        importável (e o `python llm.py` precisa continuar rodando) mesmo sem
-        o gateway.py — que é o caso enquanto a Task 3 não existir, e também
-        se alguém copiar o llm.py para outro projeto.
-        """
-        try:
-            import gateway  # noqa: PLC0415  (lazy de propósito, evita ciclo de import)
-        except ImportError:
-            if not ProvedorKiro._avisou_sem_modulo:
-                ProvedorKiro._avisou_sem_modulo = True
-                _log(
-                    "gateway.py não encontrado: não vou subir nem checar o proxy. "
-                    "Se as chamadas falharem com conexão recusada, suba o gateway "
-                    "à mão (python main.py dentro de kiro_gateway)."
-                )
-            return
-
-        try:
-            gateway.garantir()
-        except gateway.ErroGateway as e:
-            # ErroConfiguracao porque o retry de chamar() não repete essa classe.
-            raise ErroConfiguracao(
-                f"gateway do Kiro indisponível ({e.motivo}): {e.detalhe}"
-            ) from e
-
-    def chamar(self, **kwargs) -> RespostaLLM:
-        self._garantir_gateway()
-        return super().chamar(**kwargs)
+    def chamar(
+        self,
+        mensagens: List[Mensagem],
+        modelo: str,
+        max_tokens: Optional[int],
+        temperatura: Optional[float],
+        raciocinio: str,
+        stream: bool,
+        ferramentas: Optional[List[dict]] = None,
+        obrigar_ferramenta: bool = False,
+        proibir_ferramenta: bool = False,
+    ) -> RespostaLLM:
+        if not ferramentas and any(m.imagens for m in mensagens):
+            _log_debug(
+                f"provedor '{self.nome}': imagem via Messages API nativa"
+            )
+            return self._visao_anthropic.chamar(
+                mensagens=mensagens,
+                modelo=modelo,
+                max_tokens=max_tokens,
+                temperatura=temperatura,
+                raciocinio=raciocinio,
+                stream=stream,
+                ferramentas=None,
+                obrigar_ferramenta=False,
+                proibir_ferramenta=False,
+            )
+        return super().chamar(
+            mensagens=mensagens,
+            modelo=modelo,
+            max_tokens=max_tokens,
+            temperatura=temperatura,
+            raciocinio=raciocinio,
+            stream=stream,
+            ferramentas=ferramentas,
+            obrigar_ferramenta=obrigar_ferramenta,
+            proibir_ferramenta=proibir_ferramenta,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────
 # Registro de provedores. Adicionar um novo endpoint OpenAI-compatible
 # é acrescentar uma linha aqui.
 # ─────────────────────────────────────────────────────────────────
-
-# Base do proxy local. O /v1 é acrescentado aqui para que a variável de
-# ambiente guarde só host e porta, que é o que o gateway.py também usa.
-URL_KIRO = os.getenv("EMILY_KIRO_URL", "http://127.0.0.1:8000").rstrip("/")
-
 
 def _url_com_v1(base: str) -> str:
     """
@@ -1384,48 +1417,300 @@ def _url_com_v1(base: str) -> str:
     return base if base.endswith("/v1") else f"{base}/v1"
 
 
+def _url_sem_v1(base: str) -> str:
+    """Base para SDK Anthropic, que acrescenta ``/v1/messages`` sozinho."""
+    base = (base or "").rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
+
+
 # Endpoint OpenAI-compatible que serve o Claude (claude-opus-4-8). Só host e
 # porta/caminho vão no .env; o /v1 é normalizado aqui. Vazio até o Vitor
 # preencher EMILY_CLAUDE_URL — nesse caso a rota falha com ErroConfiguracao
 # clara em vez de bater num host inválido.
 URL_CLAUDE = _url_com_v1(os.getenv("EMILY_CLAUDE_URL", ""))
 
-PROVEDORES: Dict[str, Provedor] = {
+# ═════════════════════════════════════════════════════════════════
+# PROVEDORES VIA .ENV — formato por seção
+#
+# A Emily hoje usa três provedores ativos (claude, nvidia, openrouter) e
+# quatro legados (groq, fireworks, puter) registrados pra plano B. Adicionar
+# GMI e Ollama — pedidos do Vitor — sem ter que reescrever o dict a cada vez.
+#
+# Nova forma: o .env carrega seções marcadas por "# >>> provedor: nome" /
+# "# <<< provedor: nome" e o _carregar_provedores_do_env() constrói o dict
+# PROVEDORES em runtime. Variáveis por provedor:
+#
+#   EMILY_PROVEDOR_<NOME>_BASE     URL do endpoint (OpenAI-compatible)
+#   EMILY_PROVEDOR_<NOME>_CHAVE    variável de ambiente que segura a API key
+#                                  (NÃO o valor da chave — o nome da envvar;
+#                                  assim a chave real fica onde já está hoje,
+#                                  tipo GROQ_API_KEY=...)
+#   EMILY_PROVEDOR_<NOME>_MODELO   modelo padrão pra rota "conversa"
+#   EMILY_PROVEDOR_<NOME>_MODELOS  lista CSV opcional de modelos pro seletor
+#   EMILY_PROVEDOR_<NOME>_TIMEOUT  timeout do SDK em segundos
+#   EMILY_PROVEDOR_<NOME>_RPM      limite de requisições por minuto
+#   EMILY_PROVEDOR_<NOME>_TIPO     "openai" (default) | "ollama" | "anthropic"
+#                                  | "openai_anthropic" (OpenAI para ferramentas,
+#                                    Anthropic nativo para imagens)
+#   EMILY_PROVEDOR_<NOME>_SEM_CHAVE se "1", não exige API key (Ollama local)
+#
+# Se nenhuma seção nova for achada no .env, cai no modo legado (PROVEDORES
+# hardcoded abaixo) com aviso único no log. Assim .envs antigos continuam
+# funcionando até o Vitor migrar pra nova estrutura.
+# ═════════════════════════════════════════════════════════════════
 
-    # Caminho principal desde a migração para o plano pago do Kiro.
+
+@dataclass
+class ProvedorConfig:
+    """Config de um provedor lido do .env."""
+    id: str
+    nome_exibicao: str
+    base_url: str
+    env_chave: str
+    env_chave_opcional: bool
+    modelo_padrao: str
+    modelos_csv: List[str]
+    timeout: float
+    rpm: int
+    tipo: str   # "openai" | "ollama" | "anthropic" | "openai_anthropic"
+
+
+def _parsear_secoes_provedor(caminho_env: str) -> Dict[str, ProvedorConfig]:
+    """
+    Lê o .env e extrai seções `# >>> provedor: nome` / `# <<< provedor: nome`.
+
+    Variáveis dentro de uma seção viram ProvedorConfig. O formato
+    `# >>> provedor: NOME` (com `>>>` e `:`) é o que distingue de comentário
+    comum; errei o número de `>` ou esqueci o `:` e a seção é ignorada
+    silenciosamente, com log.
+    """
+    secoes: Dict[str, Dict[str, str]] = {}
+    if not os.path.isfile(caminho_env):
+        return {}
+    secao_atual: Optional[str] = None
+    from dotenv import dotenv_values
+    valores_decodificados = dotenv_values(caminho_env)
+    try:
+        with open(caminho_env, "r", encoding="utf-8") as f:
+            for linha in f:
+                stripped = linha.strip()
+                if not stripped or stripped.startswith("#"):
+                    m_abre = re.match(r"^#\s*>>>\s*provedor:\s*([A-Za-z0-9_\-]+)\s*$", stripped)
+                    m_fecha = re.match(r"^#\s*<<<\s*provedor:\s*([A-Za-z0-9_\-]+)\s*$", stripped)
+                    if m_abre:
+                        secao_atual = m_abre.group(1).lower()
+                        secoes.setdefault(secao_atual, {})
+                    elif m_fecha:
+                        if secao_atual == m_fecha.group(1).lower():
+                            secao_atual = None
+                    continue
+                if secao_atual is None or "=" not in linha:
+                    continue
+                chave, _, valor = linha.partition("=")
+                chave = chave.strip()
+                valor = valor.strip()
+                if not chave.startswith(f"EMILY_PROVEDOR_{secao_atual.upper()}_"):
+                    continue
+                # Sobrescreve silenciosamente: última definição vence, igual
+                # o .env já se comporta. Empilhamento exigiria schema de lista
+                # e nenhum caso de uso justificou até agora.
+                secoes[secao_atual][chave] = valores_decodificados.get(chave) or valor
+    except OSError as e:
+        _log(f"não consegui ler .env em {caminho_env}: {e}")
+        return {}
+
+    resultado: Dict[str, ProvedorConfig] = {}
+    for pid, vars_ in secoes.items():
+        def v(sufixo: str, padrao: str = "") -> str:
+            return vars_.get(f"EMILY_PROVEDOR_{pid.upper()}_{sufixo}", padrao)
+
+        tipo = v("TIPO", "openai").strip().lower()
+        if tipo not in ("openai", "ollama", "anthropic", "openai_anthropic"):
+            _log(f"provedor '{pid}': TIPO='{tipo}' desconhecido, ignorando seção")
+            continue
+
+        base_url = v("BASE", "").strip()
+        if not base_url and tipo != "anthropic":
+            _log(f"provedor '{pid}': BASE vazia, ignorando seção")
+            continue
+
+        env_chave = v("CHAVE", "").strip()
+        sem_chave = v("SEM_CHAVE", "0").strip() == "1"
+        if not env_chave and not sem_chave:
+            _log(f"provedor '{pid}': CHAVE vazia e SEM_CHAVE!=1, ignorando seção")
+            continue
+
+        modelos_csv = [m.strip() for m in v("MODELOS", "").split(",") if m.strip()]
+        if not modelos_csv and v("MODELO", "").strip():
+            modelos_csv = [v("MODELO", "").strip()]
+
+        try:
+            timeout = float(v("TIMEOUT", "120"))
+            rpm = int(v("RPM", str(RPM_PADRAO)))
+        except ValueError:
+            _log(f"provedor '{pid}': TIMEOUT/RPM inválido, ignorando seção")
+            continue
+
+        if pid in ("openai", "omniroute"):
+            from emily_remote import provedor_via_fedora, base_llm_fedora
+            if provedor_via_fedora(pid, base_url):
+                try:
+                    base_url = base_llm_fedora()
+                    env_chave = "EMILY_PONTE_TOKEN"
+                    sem_chave = False
+                    _log(f"provedor '{pid}': OmniRoute pela ponte Fedora")
+                except RuntimeError as exc:
+                    _log(f"provedor '{pid}': {exc}")
+
+        resultado[pid] = ProvedorConfig(
+            id=pid,
+            nome_exibicao=v("NOME", pid.capitalize()).strip() or pid.capitalize(),
+            base_url=_url_com_v1(base_url) if base_url else "",
+            env_chave=env_chave or "EMILY_DUMMY_KEY",
+            env_chave_opcional=sem_chave or not env_chave,
+            modelo_padrao=v("MODELO", "").strip(),
+            modelos_csv=modelos_csv,
+            timeout=timeout,
+            rpm=rpm,
+            tipo=tipo,
+        )
+    return resultado
+
+
+def _instanciar_provedor(cfg: ProvedorConfig) -> Provedor:
+    if cfg.tipo == "anthropic":
+        return ProvedorAnthropic(
+            nome=cfg.id, base_url=cfg.base_url or None,
+            env_chave=cfg.env_chave, timeout=cfg.timeout,
+        )
+    if cfg.tipo == "openai_anthropic":
+        return ProvedorOpenAIComVisaoAnthropic(
+            nome=cfg.id, base_url=cfg.base_url,
+            env_chave=cfg.env_chave, timeout=cfg.timeout,
+        )
+    # openai e ollama usam o mesmo ProvedorOpenAI — o Ollama expõe
+    # /v1/chat/completions compatível com OpenAI desde 0.1.14. O que muda é
+    # a listagem de modelos: o Ollama tem /api/tags próprio, que a interface
+    # consulta via _listar_modelos_ollama().
+    return ProvedorOpenAI(
+        nome=cfg.id, base_url=cfg.base_url,
+        env_chave=cfg.env_chave, timeout=cfg.timeout,
+    )
+
+
+def _carregar_provedores_do_env() -> Tuple[Dict[str, Provedor], Dict[str, ProvedorConfig]]:
+    """
+    Lê seções do .env e devolve (PROVEDORES_instanciados, configs_por_id).
+
+    Se nenhuma seção nova for achada, devolve o dict legado (Claude,
+    OpenRouter, NVIDIA, Groq, Fireworks, Puter) e configs vazio. Esse modo
+    é o que mantém .envs antigos funcionando até o Vitor migrar.
+
+    Efeito colateral importante: popula o dict global TABELAS com uma entrada
+    por provedor novo, contendo as rotas 'conversa' e 'discord'. As demais
+    rotas (visão, agentes, títulos) continuam vindo da tabela padrão
+    (ROTAS_CLAUDE), que é afinada por tarefa — o provedor novo só entra na
+    conversa de verdade. Se um dia uma rota específica precisar do provedor
+    novo, basta adicionar a entrada correspondente em _construir_tabela_provedor.
+    """
+    # O .env ao lado do código é o canônico (funciona no Python direto). No
+    # build PyInstaller o DIR_PROJETO é o _internal com um .env empacotado e
+    # velho; aí o .env que o Vitor edita está no diretório de trabalho. Tentar
+    # os dois, o primeiro que tiver seção vence.
+    configs = {}
+    caminhos_tentados: List[str] = []
+    candidatos = (os.environ["EMILY_CONFIG_FILE"],) if os.getenv("EMILY_CONFIG_FILE") else (
+        os.path.join(DIR_PROJETO, ".env"),
+        os.path.join(os.getcwd(), ".env"),
+    )
+    for candidato in candidatos:
+        if os.path.isfile(candidato) and candidato not in caminhos_tentados:
+            caminhos_tentados.append(candidato)
+            configs = _parsear_secoes_provedor(candidato)
+            if configs:
+                _log(f"seções de provedor encontradas em {candidato}")
+                break
+    if not configs:
+        if os.getenv("EMILY_PUBLIC_MODE") == "1":
+            raise ErroConfiguracao("Perfil público sem provedor configurado. Abra emily_public.py --configurar.")
+        _log("nenhuma seção [PROVEDOR:*] no .env — usando tabela legada (claude/nvidia/openrouter)")
+        return _PROVEDORES_LEGADOS, {}
+
+    provedores: Dict[str, Provedor] = {}
+    for pid, cfg in configs.items():
+        try:
+            provedores[pid] = _instanciar_provedor(cfg)
+            _log(f"provedor '{pid}' carregado do .env ({cfg.tipo}, base={cfg.base_url})")
+        except Exception as e:
+            _log(f"provedor '{pid}': falhou ao instanciar ({e}), pulando")
+    return provedores, configs
+
+
+def _construir_tabela_provedor(pid: str) -> Dict[str, "Rota"]:
+    """
+    Tabela mínima (rotas 'conversa' e 'discord') pra provedor do .env novo.
+
+    As outras 8 rotas (visão, agentes, etc.) foram afinadas pra Claude /
+    NIM / OpenRouter e continuam ativas por baixo; o provedor novo só
+    aparece na conversa por voz/texto e no Discord. Quando o Vitor quiser
+    afinar uma rota específica pro provedor novo, é esta função que muda.
+
+    A rota 'discord' existe aqui de propósito: TODO o caminho de voz/texto
+    do Discord chama por nome (`rota_nome="discord"`), e sem a entrada o
+    `rota()` caía no fallback da tabela padrão — trocar o provedor na
+    interface continuava mandando o Discord pro claude (que pode estar
+    fora), e a Emily "não escutava" na call/chat.
+
+    As duas rotas ganham fallback pro Qwen (quando a seção dele existe
+    no .env e o provedor subiu): se o cérebro primário morrer de vez, a
+    conversa desce pro Qwen em vez de deixar a Emily muda.
+    """
+    cfg = PROVEDORES_CONFIG.get(pid)
+    modelo = (cfg.modelo_padrao if cfg else "") or ""
+    rpm = cfg.rpm if cfg else RPM_PADRAO
+    timeout = cfg.timeout if cfg else 90.0
+
+    fallbacks: Tuple[Tuple[str, str], ...] = tuple(_fallbacks_para(pid))
+
+    return {
+        "conversa": Rota(
+            provedor=pid, modelo=modelo,
+            max_tokens=4096, raciocinio=RACIOCINIO_DESLIGADO,
+            temperatura=0.85, rpm=rpm,
+            fallbacks=tuple(fallbacks),
+        ),
+        # Mesma afinação da rota discord das tabelas afinadas (claude usa
+        # max_tokens=200, temperatura=0.9): os call sites do Discord passam
+        # max_tokens explícito, aqui é só o teto de segurança da rota.
+        "discord": Rota(
+            provedor=pid, modelo=modelo,
+            max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO,
+            temperatura=0.9, rpm=rpm,
+            fallbacks=tuple(fallbacks),
+        ),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════
+# MODO LEGADO — fallback quando o .env não usa o formato de seções.
+# Mantido pra que .env antigos (sem as marcas # >>> provedor:) continuem
+# funcionando. O Vitor migra quando quiser; até lá, este dict é o PROVEDORES.
+# ═════════════════════════════════════════════════════════════════
+
+_PROVEDORES_LEGADOS: Dict[str, Provedor] = {
+
+    # Só o claude sobrou aqui: é o único provedor que o .env novo usa e o
+    # único caminho legado que ainda faz sentido (EMILY_CLAUDE_URL +
+    # CLAUDE_API_KEY). NVIDIA, Groq, Fireworks, OpenRouter e Puter saíram
+    # junto com os provedores que os usavam — o OmniRoute local cobre o que
+    # eles faziam, com uma seção no .env em vez de código.
     #
-    # timeout de 300s, não 90s: as rotas de visão mandam imagem base64 e o
-    # Claude via Q Developer é mais lento que o nemotron. Casa com o
-    # STREAMING_READ_TIMEOUT default do gateway, que também é 300s.
-    "kiro": ProvedorKiro(
-        nome="kiro",
-        base_url=f"{URL_KIRO}/v1",
-        env_chave="KIRO_PROXY_API_KEY",
-        timeout=float(os.getenv("EMILY_KIRO_TIMEOUT", "300")),
-    ),
-    "nvidia": ProvedorOpenAI(
-        nome="nvidia",
-        base_url="https://integrate.api.nvidia.com/v1",
-        env_chave="NVIDIA_API_KEY",
-    ),
-    "groq": ProvedorOpenAI(
-        nome="groq",
-        base_url="https://api.groq.com/openai/v1",
-        env_chave="GROQ_API_KEY",
-    ),
-    "fireworks": ProvedorOpenAI(
-        nome="fireworks",
-        base_url="https://api.fireworks.ai/inference/v1",
-        env_chave="FIREWORKS_API_KEY",
-    ),
-    "vertex": ProvedorVertexGemini(),
-    # Novo cérebro principal: Claude (claude-opus-4-8) servido por um endpoint
-    # OpenAI-compatible. Reusa o ProvedorOpenAI inteiro — formato de fio,
-    # streaming, tool calling e visão são idênticos, porque o endpoint fala
-    # OpenAI de verdade e o proxy é quem traduz pro formato nativo da Anthropic.
+    # Cérebro principal: Claude servido por um endpoint OpenAI-compatible.
+    # Reusa o ProvedorOpenAI inteiro — formato de fio, streaming, tool calling
+    # e visão são idênticos, porque o endpoint fala OpenAI de verdade e o proxy
+    # é quem traduz pro formato nativo da Anthropic.
     #
-    # Só preencher EMILY_CLAUDE_URL e CLAUDE_API_KEY no .env: nada além disso
-    # precisa mudar pra Emily inteira passar a rodar no Claude.
+    # Só preencher EMILY_CLAUDE_URL e CLAUDE_API_KEY no .env.
     #
     # timeout de 300s, não 90s: as rotas de visão mandam imagem base64 e o
     # Opus é mais lento que os modelos de texto puro.
@@ -1435,13 +1720,16 @@ PROVEDORES: Dict[str, Provedor] = {
         env_chave="CLAUDE_API_KEY",
         timeout=float(os.getenv("EMILY_CLAUDE_TIMEOUT", "300")),
     ),
-    # Plano B: o caminho que a Emily usava antes dessa migração.
-    "puter": ProvedorAnthropic(
-        nome="puter",
-        base_url="https://api.puter.com/puterai/anthropic",
-        env_chave="PUTER_AUTH_TOKEN",
-    ),
 }
+
+
+# Atribuição final: resultado de carregar seções do .env OU o dict legado
+# (se o .env ainda não migrou). PROVEDORES_CONFIG é o companion: enquanto
+# o legado está ativo, é {} — o que faz listar_provedores() cair na lista
+# fixa _PROVEDORES_INTERFACE_FALLBACK lá embaixo.
+PROVEDORES: Dict[str, Provedor]
+PROVEDORES_CONFIG: Dict[str, ProvedorConfig]
+PROVEDORES, PROVEDORES_CONFIG = _carregar_provedores_do_env()
 
 
 
@@ -1453,41 +1741,7 @@ PROVEDORES: Dict[str, Provedor] = {
 # automacao.py, agente_ui.py ou memoria.py.
 # ═════════════════════════════════════════════════════════════════
 
-# ─── Modelos do Kiro (caminho principal) ─────────────────────────
-#
-# Cada grupo de rota tem variável de ambiente própria porque modelo sai do
-# ar sem aviso: os dois Qwen3.5 morreram com 410 Gone no NIM, o Opus 4.5
-# saiu do free tier do Kiro em janeiro, e o Opus 5 é "experimental preview"
-# no painel. Trocar modelo tem que ser edição de .env, não de código.
-#
-# O que a medição da Task 1 mostrou, contra o gateway de verdade:
-#
-#   modelo               1a chamada   depois    papel
-#   claude-sonnet-5          4,98s   1,8-2,8s   conversa, texto, visão
-#   claude-opus-5            1,75s        —     agente de UI
-#   claude-haiku-4.5         1,78s        —     classificador, triagem
-#
-# Streaming em claude-sonnet-5: 6 pedaços, 3,36s até o PRIMEIRO pedaço,
-# 3,64s no total. Visão: 2,26s e 1.343 tokens de prompt numa imagem
-# 480x160.
-#
-# Detalhe que vale saber, e que confirma nos DOIS sentidos o aviso que já
-# estava escrito aqui embaixo sobre o NIM: o GET /v1/models desta conta
-# lista 13 modelos e NENHUM deles é claude-sonnet-5 ou claude-opus-5 — mas
-# os dois respondem normalmente na chamada real, porque o ModelResolver do
-# gateway é pass-through ("gateway, not gatekeeper"). A lista não é
-# autoridade nem para dizer que existe, nem para dizer que não existe.
-MODELO_KIRO_CONVERSA = os.getenv("EMILY_KIRO_MODELO_CONVERSA", "claude-sonnet-5")
-MODELO_KIRO_VISAO = os.getenv("EMILY_KIRO_MODELO_VISAO", "claude-sonnet-5")
-MODELO_KIRO_AGENTE_UI = os.getenv("EMILY_KIRO_MODELO_AGENTE_UI", "claude-opus-5")
-MODELO_KIRO_AGENTE_JOGO = os.getenv("EMILY_KIRO_MODELO_AGENTE_JOGO", "claude-sonnet-5")
-
-# Rotas de saída minúscula (SIM/NAO, JSON curto) que disparam muito. Haiku
-# custa menos crédito e responde mais rápido; 'auto' (1x) NÃO existe nesta
-# conta — o /v1/models só expõe 'auto-kiro', que é alias do gateway.
-MODELO_KIRO_BARATO = os.getenv("EMILY_KIRO_MODELO_BARATO", "claude-haiku-4.5")
-
-# ─── Modelos do NIM (plano B, caminho de reversão) ───────────────
+# ─── Modelos do NIM (plano B) ───────────────────────────────────────
 
 # Texto puro. GLM-5.2 NÃO tem visão — daí a necessidade de dois modelos.
 MODELO_TEXTO = os.getenv("EMILY_MODELO_TEXTO", "z-ai/glm-5.2")
@@ -1516,37 +1770,24 @@ MODELO_TEXTO = os.getenv("EMILY_MODELO_TEXTO", "z-ai/glm-5.2")
 # Detalhe que vale saber: GET /v1/models lista modelos que devolvem 404
 # quando você chama de verdade. A lista não é garantia de disponibilidade.
 #
-# ── Medição da migração pro Kiro (_bench_visao.py) ──────────────
+# ── O AVISO que vale para quem cair no plano B ──────────────────
 #
-# Mesma metodologia acima, MESMA captura 640x360 nos três modelos, na
-# mesma execução. 2 amostras cada:
+# Comparação medida com a MESMA captura 640x360, 2 amostras por modelo:
 #
 #   modelo                            descr.   triagem   leitura da tela
 #   nvidia/nemotron-nano-12b-v2-vl     4,62s     0,58s   ERRADA
-#   claude-sonnet-5                   10,09s     2,63s   correta
-#   claude-haiku-4.5                   3,34s     2,12s   correta
+#   Claude (endpoint atual)            3-10s     2,1s    correta
 #
-# O número que decidiu não foi a latência, foi a LEITURA. Na mesma tela
-# (VS Code com o CONTRIBUTING.md do kiro-gateway aberto), o nemotron
-# alucinou "um chat em tempo real com vários usuários discutindo
-# melhorias para uma plataforma de contribuição de código" — ele leu o
-# texto do arquivo e concluiu que era conversa entre pessoas. Os dois
-# Claude descreveram certo, e o Sonnet até nomeou o projeto.
+# O nemotron é mais rápido e sai de graça no free tier, mas ERRA a leitura.
+# Na tela de um editor de texto aberto ele alucinou "um chat em tempo real
+# com vários usuários discutindo melhorias para uma plataforma de
+# contribuição de código" — leu o texto do arquivo e concluiu que era
+# conversa entre pessoas.
 #
 # Para a Emily isso é a diferença entre comentar a tela e inventar a
 # tela. A rota 'visao' existe para ela reagir ao que o Vitor está
-# fazendo; reagir a uma tela imaginária é pior que não reagir.
-#
-# Escolhas, e o que muda se você discordar:
-#   visao          -> claude-sonnet-5 (leitura mais detalhada; 10s é muito,
-#                     e claude-haiku-4.5 faz em 3,34s lendo certo também.
-#                     Se a latência incomodar, troque EMILY_KIRO_MODELO_VISAO)
-#   triagem_visual -> claude-haiku-4.5 (o mais barato que existe na conta)
-#
-# O que a migração PERDEU: a triagem era 0,58s e grátis no free tier do
-# NIM; agora é 2,12s e consome crédito por disparo. Ela roda em laço
-# durante o monitoramento de tela e de jogo, então é a primeira
-# candidata a voltar pro nemotron se o crédito apertar.
+# fazendo; reagir a uma tela imaginária é pior que não reagir. Então cair
+# no NIM devolve latência e custo zero, e cobra em precisão de visão.
 MODELO_VISAO = os.getenv("EMILY_MODELO_VISAO", "nvidia/nemotron-nano-12b-v2-vl")
 MODELO_VISAO_RAPIDO = os.getenv("EMILY_MODELO_VISAO_RAPIDO", "nvidia/nemotron-nano-12b-v2-vl")
 
@@ -1584,286 +1825,39 @@ class Rota:
     rpm: int = RPM_PADRAO
     # Quantas tentativas no total (1 = sem retry)
     tentativas: int = 4
+    # Cadeia de FALLBACK por (provedor, modelo): se o primário falhar de vez
+    # (todas as tentativas), desce pra o próximo par antes de desistir. O
+    # chamar() resolve o provedor de cada degrau — é o que permite cair do
+    # claude pro Qwen, que vive em outro endpoint. A cadeia das rotas claude
+    # é montada depois de ROTAS_CLAUDE (haiku do proxy + Qwen do .env); a da
+    # conversa (gmi) ganha o Qwen em _construir_tabela_provedor.
+    fallbacks: Tuple[Tuple[str, str], ...] = ()
 
     def limitador(self, nome_rota: str = None) -> Limitador:
-        # No Vertex AI as cotas são por modelo, e as tarefas competem por
-        # latência (triagem visual constante vs conversa). Separar por rota
-        # resolve o gargalo.
+        # Balde por (provedor, rota) e não só por provedor: as tarefas
+        # competem por latência entre si — a triagem visual dispara em laço
+        # e deixaria a conversa esperando ficha atrás dela.
         chave = f"{self.provedor}_{nome_rota}" if nome_rota else self.provedor
         return limitador_de(chave, self.rpm)
 
 
-ROTAS_KIRO: Dict[str, Rota] = {
-    # Conversa por voz. Raciocínio desligado: aqui token de pensamento é
-    # silêncio no alto-falante. Temperatura alta pra personalidade variar.
-    #
-    # MIGRADA para o Kiro (Task 2 do spec migracao-llm-kiro-gateway). Foi a
-    # primeira porque é a rota que mais importa e a que mais expõe problema:
-    # se a personalidade da Emily não sobreviver ao Claude, aparece aqui
-    # antes de qualquer outro lugar.
-    #
-    # rpm próprio: o limitador é por provedor, e o teto do plano pago do
-    # Kiro não é publicado. 30 é margem, não medição.
-    "conversa": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_CONVERSA,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.85,
-        rpm=RPM_KIRO,
-    ),
-
-    # Classificadores SIM/NAO e extração de JSON. Determinístico e curto.
-    #
-    # Haiku porque é a rota que MAIS dispara: cada mensagem do Vitor que
-    # mencione tela passa por aqui, e no Kiro cada chamada custa crédito.
-    #
-    # O orçamento de 16 tokens era o risco declarado desta migração: o
-    # Claude é mais verboso que o GLM e resposta vazia por orçamento
-    # estourado já derrubou a triagem neste projeto antes. MEDIDO na Task 5,
-    # 3 amostras por combinação, temperatura 0:
-    #
-    #   modelo             max_tokens  vazias  decisão correta
-    #   claude-haiku-4.5        8       0/3         3/3
-    #   claude-haiku-4.5       10       0/3         3/3
-    #   claude-haiku-4.5       16       0/3         3/3
-    #   claude-sonnet-5         8       0/3         3/3
-    #
-    # Inclui o caso negativo ("me conta uma piada" -> NAO), que é o que
-    # pega classificador viciado em dizer sim. Funciona porque o
-    # RACIOCINIO_DESLIGADO manda reasoning_effort='none' e o gateway
-    # DESLIGA o thinking — nenhum token é gasto antes da resposta.
-    #
-    # O call site mais apertado é o _llm_confirma_visao do modelo.py, que
-    # passa max_tokens=8 por parâmetro. Também medido, também limpo.
-    "classificador": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_BARATO,
-        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
-        rpm=RPM_KIRO,
-    ),
-
-    # Interpretação de comando e fallback de intenção: JSON estruturado.
-    # Sonnet e não Haiku: JSON malformado aqui vira ação errada na máquina
-    # do Vitor, e a rota dispara pouco em comparação com o classificador.
-    "comando": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_CONVERSA,
-        max_tokens=512, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_KIRO,
-    ),
-
-    # Extração de fatos pra memória. Roda em background, latência não importa.
-    # O memoria.py também usa esta rota para a deduplicação semântica, com
-    # max_tokens=10 por parâmetro — medido junto do classificador na Task 5.
-    "extracao": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_CONVERSA,
-        max_tokens=300, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.2,
-        rpm=RPM_KIRO,
-    ),
-
-    # Análise de tela de verdade — a que gera comentário pro Vitor.
-    #
-    # ATENÇÃO ao raciocinio: aqui é DESLIGADO, e nas versões NIM destas
-    # rotas era NORMAL. Não é descuido, é o oposto do mesmo problema.
-    # No NIM, NORMAL significava "não manda parâmetro", porque o
-    # nemotron-nano-vl REJEITA reasoning_effort='none' com 400 (só aceita
-    # low/medium/high). No gateway do Kiro é o contrário: mandar 'none'
-    # DESLIGA o thinking, e NÃO mandar nada LIGA com budget default —
-    # confirmado lendo o extract_thinking_config_from_openai do gateway.
-    # Ou seja, deixar NORMAL aqui faria o Claude pensar antes de descrever
-    # a tela, gastando token e latência à toa.
-    "visao": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_VISAO,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.7,
-        rpm=RPM_KIRO,
-    ),
-
-    # Triagem SIM/NAO de tela. Saída minúscula, e a rota que dispara MAIS
-    # vezes em todo o projeto: roda em laço enquanto o monitoramento de
-    # tela ou de jogo está ativo.
-    #
-    # Haiku porque é o mais barato disponível na conta. Ainda assim, esta é
-    # a primeira rota a considerar devolver pro nemotron se o crédito do
-    # mês começar a acabar — no NIM ela era grátis, aqui cada disparo
-    # custa. Reverter é uma linha: EMILY_KIRO_MODELO_BARATO ou o campo
-    # provedor aqui.
-    "triagem_visual": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_BARATO,
-        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
-        rpm=RPM_KIRO,
-    ),
-
-    # Agente de UI: precisa de visão, decisão estruturada em JSON e, acima
-    # de tudo, precisão para apontar onde clicar. Usa um modelo diferente
-    # das outras rotas de visão por isso — ver MODELO_VISAO_AGENTE.
-    #
-    # Medição de grade 10x10 antes de migrar (_bench_grade.py, 12 alvos em
-    # cantos, bordas e centro, gabarito exato porque o alvo é desenhado):
-    #
-    #   modelo                              exatos  linha  coluna  latência
-    #   meta/llama-3.2-90b-vision-instruct   12/12  12/12   12/12    2,19s
-    #   claude-opus-5                        12/12  12/12   12/12    3,85s
-    #   claude-sonnet-5                      12/12  12/12   12/12    3,46s
-    #
-    # O benchmark SATUROU: os três acertam tudo, então ele prova que o Opus
-    # não é pior, mas não distingue Opus de Sonnet. Como o Opus custa 2,2x
-    # de crédito contra 1,3x do Sonnet, e o Sonnet foi até um pouco mais
-    # rápido aqui, vale saber que trocar é uma linha de .env
-    # (EMILY_KIRO_MODELO_AGENTE_UI). Separar os dois exigiria um alvo mais
-    # difícil que um círculo magenta — um botão pequeno entre elementos
-    # parecidos, que é o caso real.
-    "agente_ui": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_AGENTE_UI,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_KIRO,
-    ),
-
-    # Agente de jogo: decide tecla a partir da tela, em LAÇO, enquanto o
-    # Vitor joga.
-    #
-    # Rota própria criada nesta migração. Antes o agente_jogo.py usava a
-    # rota 'agente_ui' — o que era inofensivo quando as duas apontavam pro
-    # mesmo modelo no NIM, e virou problema de custo quando o agente_ui foi
-    # pro Opus a 2,2x de crédito: um monitoramento de jogo de meia hora
-    # gastaria crédito de Opus a cada poucos segundos, sem precisar da
-    # precisão que justifica o Opus.
-    "agente_jogo": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_AGENTE_JOGO,
-        max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_KIRO,
-    ),
-
-    # Discord: respostas curtas de chat.
-    # Sonnet e não Haiku porque aqui a personalidade importa tanto quanto na
-    # conversa por voz — é a Emily falando com gente do servidor.
-    "discord": Rota(
-        provedor="kiro", modelo=MODELO_KIRO_CONVERSA,
-        max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.9,
-        rpm=RPM_KIRO,
-    ),
-}
-
-
-# ═════════════════════════════════════════════════════════════════
-# TABELA DO NIM — CAMINHO DE REVERSÃO
+# ══════════════════════════════════════════════════════════════
+# TABELA NVIDIA — REMOVIDA
 #
-# Esta tabela existe para uma linha de .env devolver a Emily inteira ao
-# NVIDIA NIM: EMILY_PROVEDOR_LLM=nvidia.
+# A tabela do NVIDIA NIM (o antigo "plano B") saiu junto com o provedor:
+# o .env agora tem só Anthropic, OpenAI e OmniRoute. Todas as rotas que ela
+# tinha (conversa, classificador, comando, extracao, visao, triagem_visual,
+# agente_ui, agente_jogo, discord) existem na tabela do provedor ATIVO com a
+# MESMA afinação por tarefa — nada se perdeu.
 #
-# Não é zelo excessivo, é histórico deste projeto: os dois Qwen3.5 VLM
-# morreram com 410 Gone, o Opus 4.5 saiu do free tier do Kiro em janeiro, e
-# o Opus 5 está marcado como "experimental preview" no painel. Modelo sai do
-# ar sem avisar, e quando isso acontecer a Emily não pode ficar muda
-# esperando alguém editar código.
+# A diferença de raciocínio que obrigava tabela separada (o nemotron rejeitava
+# reasoning_effort='none') morreu com o provedor.
 #
-# É a configuração que rodava antes da migração, com os valores de
-# raciocínio que o NIM exige — note RACIOCINIO_NORMAL nas rotas de visão,
-# que ali significa "não manda parâmetro nenhum" porque o nemotron rejeita
-# reasoning_effort='none' com 400. A semântica é INVERTIDA em relação ao
-# gateway do Kiro, e é justamente por isso que as duas tabelas precisam
-# existir separadas em vez de uma tabela com o provedor trocado.
-#
-# A rota 'agente_jogo' é nova (criada na migração) e por isso não tem
-# histórico no NIM: aponta para o mesmo modelo de visão do agente de UI,
-# que era o comportamento efetivo antes da separação.
-# ═════════════════════════════════════════════════════════════════
-
-ROTAS_NVIDIA: Dict[str, Rota] = {
-    "conversa": Rota(
-        provedor="nvidia", modelo=MODELO_TEXTO,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.85,
-    ),
-    "classificador": Rota(
-        provedor="nvidia", modelo=MODELO_TEXTO,
-        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
-    ),
-    "comando": Rota(
-        provedor="nvidia", modelo=MODELO_TEXTO,
-        max_tokens=512, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-    ),
-    "extracao": Rota(
-        provedor="nvidia", modelo=MODELO_TEXTO,
-        max_tokens=300, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.2,
-    ),
-    "visao": Rota(
-        provedor="nvidia", modelo=MODELO_VISAO,
-        max_tokens=1024, raciocinio=RACIOCINIO_NORMAL, temperatura=0.7,
-    ),
-    "triagem_visual": Rota(
-        provedor="nvidia", modelo=MODELO_VISAO_RAPIDO,
-        max_tokens=16, raciocinio=RACIOCINIO_NORMAL, temperatura=0.0,
-    ),
-    "agente_ui": Rota(
-        provedor="nvidia", modelo=MODELO_VISAO_AGENTE,
-        max_tokens=1024, raciocinio=RACIOCINIO_NORMAL, temperatura=0.1,
-    ),
-    "agente_jogo": Rota(
-        provedor="nvidia", modelo=MODELO_VISAO_AGENTE,
-        max_tokens=2048, raciocinio=RACIOCINIO_NORMAL, temperatura=0.1,
-    ),
-    "discord": Rota(
-        provedor="nvidia", modelo=MODELO_TEXTO,
-        max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.9,
-    ),
-}
+# Quem quiser a NIM de volta hoje tem o OmniRoute, que já roteia modelos
+# NVIDIA junto com todo o resto — uma seção no .env, sem tabela nova.
+# ══════════════════════════════════════════════════════════════
 
 
-# ═════════════════════════════════════════════════════════════════
-# SELEÇÃO DA TABELA ATIVA
-# ═════════════════════════════════════════════════════════════════
-
-# ═════════════════════════════════════════════════════════════════
-# TABELA VERTEX GEMINI — NOVO CÉREBRO PRINCIPAL
-# ═════════════════════════════════════════════════════════════════
-
-# MODELOS VERTEX
-MODELO_VERTEX_PRINCIPAL = os.getenv("EMILY_VERTEX_MODELO_PRINCIPAL", "gemini-3.6-flash")
-MODELO_VERTEX_RAPIDO = os.getenv("EMILY_VERTEX_MODELO_RAPIDO", "gemini-3.5-flash-lite")
-RPM_VERTEX = int(os.getenv("EMILY_VERTEX_RPM", "10"))
-
-ROTAS_VERTEX: Dict[str, Rota] = {
-    "conversa": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.85,
-        rpm=RPM_VERTEX,
-    ),
-    "classificador": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_RAPIDO,
-        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
-        rpm=RPM_VERTEX,
-    ),
-    "comando": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=512, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_VERTEX,
-    ),
-    "extracao": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_RAPIDO,
-        max_tokens=300, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.2,
-        rpm=RPM_VERTEX,
-    ),
-    "visao": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.7,
-        rpm=RPM_VERTEX,
-    ),
-    "triagem_visual": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_RAPIDO,
-        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
-        rpm=RPM_VERTEX,
-    ),
-    "agente_ui": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_VERTEX,
-    ),
-    "agente_jogo": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
-        rpm=RPM_VERTEX,
-    ),
-    "discord": Rota(
-        provedor="vertex", modelo=MODELO_VERTEX_PRINCIPAL,
-        max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.9,
-        rpm=RPM_VERTEX,
-    ),
-}
 
 # ═════════════════════════════════════════════════════════════════
 # TABELA CLAUDE — CÉREBRO PRINCIPAL (endpoint OpenAI-compatible)
@@ -1886,13 +1880,48 @@ ROTAS_VERTEX: Dict[str, Rota] = {
 # variar.
 # ═════════════════════════════════════════════════════════════════
 
-# Modelo único de todas as rotas. claude-opus-4-8 conforme pedido; trocável
-# por .env caso o nome do modelo mude no endpoint.
-MODELO_CLAUDE = os.getenv("EMILY_CLAUDE_MODELO", "claude-opus-4-8")
+# Modelo único de todas as rotas claude. ORDEM DE LEITURA: primeiro o .env
+# novo (EMILY_PROVEDOR_CLAUDE_MODELO — o mesmo que instanciou o provedor),
+# depois o var legado (EMILY_CLAUDE_MODELO) e por fim o default histórico.
+# Era exatamente essa lacuna que deixava a rota do Discord num modelo morto:
+# o provedor vinha do .env novo (base certa) e o MODELO da tabela legada
+# velha ("claude-opus-4-8", que o proxy novo rejeita como "Ambiguous model").
+MODELO_CLAUDE = (
+    os.getenv("EMILY_PROVEDOR_CLAUDE_MODELO", "").strip()
+    or os.getenv("EMILY_CLAUDE_MODELO", "").strip()
+    or "claude-sonnet-5"
+)
+
+# Modelos de FALLBACK do provedor claude, da lista do .env novo
+# (EMILY_PROVEDOR_CLAUDE_MODELOS). A cadeia sempre COMEÇA no primário: os
+# demais entram na ordem do .env. Com o .env atual fica
+# sonnet 4.5 -> haiku 4.5, que é o que o Vitor pediu.
+def _modelos_de_secao(pid: str) -> List[str]:
+    """
+    Os modelos declarados numa seção EMILY_PROVEDOR_<PID>_* do .env, na ordem
+    deles. Serve pra montar cadeias de fallback ENTRE provedores (ex.: as
+    rotas claude caírem pro Qwen quando o proxy claude morre).
+    """
+    prefixo = f"EMILY_PROVEDOR_{pid.upper()}_"
+    csv = os.getenv(prefixo + "MODELOS", "")
+    modelos = [m.strip() for m in csv.split(",") if m.strip()]
+    padrao = os.getenv(prefixo + "MODELO", "").strip()
+    if padrao and padrao not in modelos:
+        modelos.insert(0, padrao)
+    return modelos
 
 # Balde do limitador do provedor claude. O endpoint não publica RPM;
 # 30 é margem contra rajada, não medição.
 RPM_CLAUDE = int(os.getenv("EMILY_CLAUDE_RPM", "30"))
+
+# Modelo "rápido" do proxy claude, pros serviços internos baratos (título de
+# conversa). Preferência: um modelo com "haiku" na lista do .env
+# (EMILY_PROVEDOR_CLAUDE_MODELOS); sem nenhum, cai no ID histórico que o
+# proxy Kiro sempre atendeu.
+MODELO_CLAUDE_HAIKU = next(
+    (m for m in _modelos_de_secao("claude") if "haiku" in m.lower()),
+    "kr/claude-haiku-4.5",
+)
 
 ROTAS_CLAUDE: Dict[str, Rota] = {
     "conversa": Rota(
@@ -1940,17 +1969,140 @@ ROTAS_CLAUDE: Dict[str, Rota] = {
         max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.9,
         rpm=RPM_CLAUDE,
     ),
+    # Rota do título automático (resumo da 1a mensagem). Era GMI/MiniMax-M3,
+    # mas o token da GMI morreu (401 "Invalid token, failed to decode") e os
+    # títulos pararam de ser gerados por LLM. Agora é o Haiku do proxy claude:
+    # rápido, barato, já provado pelo celular, e herda a cadeia de fallback
+    # das rotas claude (se o haiku cair, o sonnet assume sozinho).
+    "titulo": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        max_tokens=40, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
+        rpm=RPM_CLAUDE,
+    ),
+    # Extração da memória unificada. É uma rota DEDICADA e fica presa ao Haiku:
+    # trocar o cérebro no composer não deve transformar um serviço barato em
+    # várias chamadas ao modelo principal. O extrator pede JSON estruturado e
+    # valida tudo localmente antes de persistir.
+    "memoria_extracao": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        max_tokens=900, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
+        rpm=RPM_CLAUDE,
+    ),
+    # Rotas extras da família claude. Existiam para dar ao Discord/Emily Code
+    # modelos de outro provedor (GMI/Qwen/DeepSeek), mas esses provedores
+    # foram REMOVIDOS do .env. Agora usam o próprio Claude: o Sonnet 5 é
+    # multimodal (vê imagem — o que o Qwen não fazia) e o Haiku segura as
+    # tarefas baratas/determinísticas. Os nomes '_gmi' ficam para não quebrar
+    # quem chama por eles.
+    "comando_interpreta": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=256, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
+        rpm=RPM_CLAUDE,
+    ),
+    "visao_gmi": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.7,
+        rpm=RPM_CLAUDE,
+    ),
+    "triagem_visual_gmi": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
+        rpm=RPM_CLAUDE,
+    ),
+    "agente_ui_gmi": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
+        rpm=RPM_CLAUDE,
+    ),
+    "agente_jogo_gmi": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
+        rpm=RPM_CLAUDE,
+    ),
+    # Emily Code multi-modelo: o Sonnet implementa (escreve o código de
+    # verdade) e o Haiku revisa. Continuam na tabela padrão pra funcionar
+    # independente de qual provedor está ativo no EMILY_PROVEDOR_LLM (o
+    # rota() cai aqui quando a rota não existe na tabela ativa).
+    "code_implementador": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.5,
+        rpm=RPM_CLAUDE,
+    ),
+    "code_revisor": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.3,
+        rpm=RPM_CLAUDE,
+    ),
+    "code_debatedor": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.5,
+        rpm=RPM_CLAUDE,
+    ),
+    # Planejador do Emily Code multi-modelo: raciocínio alto de verdade, que
+    # o modelo novo sustenta.
+    "code_planejador": Rota(
+        provedor="claude", modelo=MODELO_CLAUDE,
+        max_tokens=2048, raciocinio=RACIOCINIO_NORMAL, temperatura=0.7,
+        rpm=RPM_CLAUDE,
+    ),
 }
 
+# Cadeia de fallback das rotas claude, em pares (provedor, modelo):
+#   1. os outros modelos do próprio provedor claude (a lista do .env, ex.:
+#      haiku 4.5, opus 5, fable 5);
+#   2. o OMNIROUTE LOCAL, quando a seção dele existe no .env.
+#
+# O OmniRoute é a rede de segurança certa porque é LOCAL: sobrevive à queda
+# do provedor externo e ainda responde se a internet cair, sem depender de
+# internet nenhuma pra falar com um provedor de terceiro.
+#
+# As rotas de visão que moram nesta tabela (visão, agentes, code_*) ficam de
+# fora — o fallback é por provedor, não por tabela.
+def _fallbacks_para(pid: str) -> List[Tuple[str, str]]:
+    """Cadeia de segurança de um provedor: OmniRoute configurado, se existir."""
+    if pid == "omniroute" or "omniroute" not in PROVEDORES:
+        return []
+    return [("omniroute", m) for m in _modelos_de_secao("omniroute")]
+
+
+_cadeia_fallbacks_claude: List[Tuple[str, str]] = [
+    ("claude", m) for m in _modelos_de_secao("claude") if m != MODELO_CLAUDE
+]
+_cadeia_fallbacks_claude += _fallbacks_para("claude")
+if _cadeia_fallbacks_claude:
+    _log("claude: fallbacks de modelo: "
+         + ", ".join(f"{p}:{m}" for p, m in _cadeia_fallbacks_claude))
+    for _nome_rota_claude, _rota_claude in ROTAS_CLAUDE.items():
+        if _rota_claude.provedor == "claude" and not _rota_claude.fallbacks:
+            _rota_claude.fallbacks = tuple(_cadeia_fallbacks_claude)
+
+# ═══════════════════════════════════════════════════════════════
+# TABELA OPENROUTER — REMOVIDA
+#
+# A tabela do OpenRouter saiu junto com o provedor. Ela existia para deixar
+# a Emily inteira em QUALQUER modelo do catálogo do OpenRouter, e as rotas
+# que ela produzia eram as mesmas da tabela claude só que apontando para
+# outro provedor — nada exclusivo se perdeu.
+#
+# Para ter modelos variados hoje: a seção `omniroute` do .env alcança
+# mais de mil modelos (kr/*, gpt-5.6-*, claude-*, minimax...) pelo gateway
+# LOCAL — sem o OpenRouter no meio e sem RPM de terceiro.
+# ═══════════════════════════════════════════════════════════════
+
+
+
+# ═════════════════════════════════════════════════════════════════
+# SELEÇÃO DA TABELA ATIVA
+# ═════════════════════════════════════════════════════════════════
+
 TABELAS: Dict[str, Dict[str, Rota]] = {
+    # Tabela única, afinada por tarefa, servida pelo provedor ATIVO. Os ids
+    # 'openai' e 'omniroute' entram sob demanda em _resolver_tabela (tabela
+    # mínima com 'conversa' e 'discord'); as demais rotas caem aqui.
     "claude": ROTAS_CLAUDE,
-    "kiro": ROTAS_KIRO,
-    "nvidia": ROTAS_NVIDIA,
-    "vertex": ROTAS_VERTEX,
 }
 
 TABELA_PADRAO = "claude"
-
 
 
 def _resolver_tabela(nome: Optional[str]) -> Tuple[str, Dict[str, Rota]]:
@@ -1961,20 +2113,33 @@ def _resolver_tabela(nome: Optional[str]) -> Tuple[str, Dict[str, Rota]]:
     à mão vem com lixo — e falhar por causa de um espaço seria um jeito
     idiota de deixar a Emily muda.
 
-    Levanta ErroConfiguracao citando os valores aceitos quando não reconhece.
-    Não cai no default em silêncio: se o Vitor escreveu 'nvida' por engano,
-    ele precisa SABER, e não descobrir três dias depois que estava no Kiro
-    o tempo todo.
+    Provedores novos (vindos das seções do .env) NÃO estão em TABELAS
+    inicialmente — eles ganham entrada sob demanda aqui. Sem isso, o
+    `EMILY_PROVEDOR_LLM=gmi` falharia com "valor não aceito" mesmo o
+    provedor estando registrado. A tabela construída na hora é mínima
+    (só 'conversa') — ver _construir_tabela_provedor pra entender.
+
+    Levanta ErroConfiguracao citando os valores aceitos quando o valor não
+    bate com nenhum provedor registrado. Não cai no default em silêncio:
+    se o Vitor escreveu 'nvida' por engano, ele precisa SABER, e não
+    descobrir três dias depois que estava na tabela errada o tempo todo.
     """
     limpo = (nome or "").strip().lower()
     if not limpo:
         return TABELA_PADRAO, TABELAS[TABELA_PADRAO]
-    if limpo not in TABELAS:
-        raise ErroConfiguracao(
-            f"EMILY_PROVEDOR_LLM='{nome}' não é um valor aceito. "
-            f"Use um destes: {', '.join(sorted(TABELAS))}"
-        )
-    return limpo, TABELAS[limpo]
+    if limpo in TABELAS:
+        return limpo, TABELAS[limpo]
+    if limpo in PROVEDORES:
+        # Tabela sob demanda pro provedor novo. Adiciona ao TABELAS pra que
+        # chamadas seguintes não recriem — e pra que o diagnóstico liste ela.
+        TABELAS[limpo] = _construir_tabela_provedor(limpo)
+        _log(f"tabela '{limpo}' construída em runtime "
+             "(rotas 'conversa' e 'discord' do provedor novo)")
+        return limpo, TABELAS[limpo]
+    raise ErroConfiguracao(
+        f"EMILY_PROVEDOR_LLM='{nome}' não é um valor aceito. "
+        f"Use um destes: {', '.join(sorted(PROVEDORES))}"
+    )
 
 
 TABELA_ATIVA, ROTAS = _resolver_tabela(os.getenv("EMILY_PROVEDOR_LLM"))
@@ -1985,13 +2150,463 @@ if TABELA_ATIVA != TABELA_PADRAO:
 ROTA_PADRAO = "conversa"
 
 
+# ── Modelo do Discord escolhido na interface ─────────────────────
+# O Vitor pediu pra trocar o modelo das respostas do Discord SEM editar
+# código. O override vive aqui (não na tabela, que é imutável por design)
+# e persiste nas preferências — sobrevive a fechar a Emily. Vazio/nulo =
+# "Padrão", a rota discord afinada no dicionário de cima.
+_discord_lock = threading.Lock()
+_discord_modelo_override: Optional[str] = None
+
+
+def modelo_discord() -> str:
+    """Modelo em uso na rota do Discord ('' = o padrão da rota)."""
+    with _discord_lock:
+        override = _discord_modelo_override
+    if override:
+        return override
+    try:
+        import preferencias
+        return (preferencias.obter("modelo_discord") or "").strip()
+    except Exception:
+        return ""
+
+
+def definir_modelo_discord(nome: str) -> bool:
+    """Define (ou reseta, com '') o modelo do Discord. Valida que a rota existe."""
+    global _discord_modelo_override
+    nome = (nome or "").strip()
+    if nome:
+        try:
+            rota("discord")
+        except Exception:
+            return False
+    with _discord_lock:
+        _discord_modelo_override = nome or None
+    try:
+        import preferencias
+        preferencias.definir(modelo_discord=nome)
+    except Exception:
+        pass
+    return True
+
+
+def _modelo_do_provedor(pid: str, modelo: str) -> bool:
+    """O modelo `modelo` pode ser servido pelo provedor `pid`?
+
+    Provedor legado sem config (sem seção no .env): devolve True — sem lista
+    pra conferir, mantém o comportamento antigo em vez de descartar override
+    válido. Com config, vale o modelo padrão ou qualquer id da lista MODELOS.
+    """
+    cfg = PROVEDORES_CONFIG.get(pid)
+    if cfg is None:
+        return True
+    if cfg.tipo in ('anthropic','openai_anthropic'):
+        from limites_modelos import catalogo
+        live=catalogo(pid)
+        if live:return modelo.lower() in live
+    if cfg.modelo_padrao and cfg.modelo_padrao == modelo:
+        return True
+    return modelo in cfg.modelos_csv
+
+
+def _com_override(nome: str, r: Rota) -> Rota:
+    """Devolve a rota com o override do Discord aplicado (cópia, sem mutar
+    a instância compartilhada da tabela — outras rotas leem dela)."""
+    if nome != "discord":
+        return r
+    alvo = modelo_discord()
+    if not alvo or alvo == r.modelo:
+        return r
+    if not _modelo_do_provedor(r.provedor, alvo):
+        # A pref de modelo do Discord foi salva quando OUTRO provedor estava
+        # ativo (ex.: modelo do claude escolhido antes de trocar pro Qwen).
+        # Aplicar um modelo de outro provedor aqui viraria 400 na hora da
+        # chamada — ignora e usa o padrão da rota ativa.
+        _log(f"override de modelo do Discord ('{alvo}') não pertence ao "
+             f"provedor '{r.provedor}'; usando o modelo da rota ('{r.modelo}')")
+        return r
+    return replace(r, modelo=alvo)
+
+
 def rota(nome: str) -> Rota:
+    if os.getenv("EMILY_PUBLIC_MODE") == "1" and nome not in ROTAS:
+        # Classificação e títulos devem usar a mesma conta escolhida no setup,
+        # sem cair nos endpoints/modelos legados da instalação do autor.
+        if nome in TABELAS.get(TABELA_PADRAO, {}):
+            return _com_override(nome, replace(ROTAS["conversa"], fallbacks=()))
+        raise ErroConfiguracao(f"A rota '{nome}' não existe.")
     if nome not in ROTAS:
+        # Fallback para a tabela padrão (claude). Provedores novos (GMI,
+        # Ollama, Qwen) definem as rotas "conversa" e "discord"; as demais
+        # (visão, triagem, classificador, etc.) continuam na tabela padrão,
+        # que tem todas as rotas afinadas por tarefa. Sem este fallback,
+        # trocar o provedor da conversa quebraria visão e agentes.
+        if nome in TABELAS.get(TABELA_PADRAO, {}):
+            return _com_override(nome, TABELAS[TABELA_PADRAO][nome])
         raise ErroConfiguracao(
-            f"rota '{nome}' não existe na tabela '{TABELA_ATIVA}'. "
+            f"rota '{nome}' não existe na tabela '{TABELA_ATIVA}' "
+            f"nem na tabela padrão '{TABELA_PADRAO}'. "
             f"Rotas disponíveis: {', '.join(sorted(ROTAS))}"
         )
-    return ROTAS[nome]
+    return _com_override(nome, ROTAS[nome])
+
+
+# ═════════════════════════════════════════════════════════════════
+# TROCA EM RUNTIME — o Vitor escolhe modelo e raciocínio no chat
+#
+# Só a rota 'conversa' (o cérebro do chat e da voz) é afetada. Visão,
+# classificador e triagem continuam com o que foi afinado pra elas — botar
+# raciocínio 'alto' num classificador só somaria latência à toa. Rota é
+# dataclass mutável, então mexer no modelo/raciocínio dela é uma atribuição.
+# ═════════════════════════════════════════════════════════════════
+
+# Catálogo do que a interface oferece, POR TABELA. O seletor do chat mostra só
+# a lista da tabela ativa — não faz sentido oferecer Opus quando a Emily roda
+# no OpenRouter, e vice-versa.
+#
+# Modo dinâmico (PROVEDORES_CONFIG populado pelas seções do .env): cada
+# provedor tem sua lista vinda de EMILY_PROVEDOR_<NOME>_MODELOS. O Ollama tem
+# ainda o fallback de consultar /api/tags — ver _listar_modelos_ollama().
+#
+# Modo legado (PROVEDORES_CONFIG vazio): mantém o comportamento antigo, com
+# listas fixas por nome de provedor, pra .envs que ainda não migraram.
+#
+# 'id' é o nome EXATO que o endpoint aceita; 'nome' é o rótulo curto do botão;
+# 'sobre' é a descriçãozinha embaixo do nome.
+
+# Lista fixa por provedor, usada APENAS no modo legado (sem seções no .env).
+# Ficou só o claude: é o único provedor com tabela legada que sobrou.
+_MODELOS_POR_TABELA: Dict[str, list] = {
+    "claude": [
+        {"id": "claude-sonnet-5", "nome": "Sonnet 5", "sobre": "Padrão"},
+        {"id": "claude-opus-5", "nome": "Opus 5", "sobre": "Trabalho pesado"},
+        {"id": "claude-haiku-4.5", "nome": "Haiku 4.5", "sobre": "Rápido e barato"},
+    ],
+}
+
+
+# Cache de modelos do Ollama. O endpoint expõe /api/tags; cachear por 60s evita
+# bater lá toda vez que a interface re-renderiza o seletor. Vazio = ainda não
+# consultou. Erro de conexão = chave "erro" no dict, lido uma vez e nunca mais.
+_MODELOS_OLLAMA_CACHE: Dict[str, object] = {"quando": 0.0, "modelos": [], "erro": ""}
+_MODELOS_OLLAMA_TTL = 60.0
+
+
+def _listar_modelos_ollama(base_url: str) -> Tuple[List[str], str]:
+    """
+    Lista modelos do Ollama via /api/tags. Devolve (lista, erro).
+
+    O Ollama expõe dois endpoints: o OpenAI-compat em /v1/chat/completions
+    (que a Emily usa pra conversar) e o nativo em /api/tags (que lista
+    modelos). Se a base_url termina em /v1, troco pelo /api/tags na mesma
+    origem; se for a URL nativa `http://localhost:11434`, uso direto.
+    """
+    agora = time.monotonic()
+    if agora - _MODELOS_OLLAMA_CACHE["quando"] < _MODELOS_OLLAMA_TTL:
+        if _MODELOS_OLLAMA_CACHE["erro"] or _MODELOS_OLLAMA_CACHE["modelos"]:
+            return (list(_MODELOS_OLLAMA_CACHE["modelos"]),  # type: ignore[arg-type]
+                    str(_MODELOS_OLLAMA_CACHE["erro"]))
+
+    # base_url vem com /v1 (passou por _url_com_v1). A origem do /api/tags
+    # é a base SEM o /v1: http://localhost:11434/v1 -> http://localhost:11434/api/tags.
+    raiz = base_url.rstrip("/")
+    if raiz.endswith("/v1"):
+        raiz = raiz[:-3]
+    url = f"{raiz}/api/tags"
+    try:
+        import urllib.request
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            dados = json.loads(resp.read().decode("utf-8"))
+        modelos = [m["name"] for m in dados.get("models", []) if m.get("name")]
+        _MODELOS_OLLAMA_CACHE.update({"quando": agora, "modelos": modelos, "erro": ""})
+        return modelos, ""
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        _MODELOS_OLLAMA_CACHE.update({"quando": agora, "modelos": [], "erro": msg})
+        return [], msg
+
+
+def _nome_limpo_modelo(modelo_id: str) -> str:
+    """
+    Converte um ID técnico de modelo num rótulo legível.
+
+    Entradas comuns:
+      'qwen/qwen3.8-max-free'      -> 'Qwen 3.8 Max'
+      'MiniMaxAI/MiniMax-M3'       -> 'MiniMax M3'
+      'z-ai/glm-5.2'               -> 'GLM 5.2'
+      'claude-opus-4-8'            -> 'Claude Opus 4.8'
+      'meta-llama/llama-3.3-70b'   -> 'Llama 3.3 70B'
+      'stealth/ox-alpha'           -> 'Ox Alpha'
+
+    O ID cru ('qwen/qwen3.8-max-free') é mantido no campo 'id' — quem chama a
+    API precisa dele exato. Este rótulo é só o que a interface mostra.
+    """
+    texto = (modelo_id or "").strip()
+
+    # Remove sufixos do OpenRouter/plataformas que ninguém quer ver.
+    texto = re.sub(r"[:/-]?(free|beta|latest)$", "", texto, flags=re.IGNORECASE).strip()
+
+    # Remove prefixo 'fornecedor/' (qwen/, MiniMaxAI/, z-ai/, meta-llama/...).
+    if "/" in texto:
+        texto = texto.split("/", 1)[1]
+
+    # Números de versão separados por hífen viram ponto (4-8 -> 4.8).
+    texto = re.sub(r"(\d)-(\d)", r"\1.\2", texto)
+
+    # Separa palavra de várias letras seguida de número (qwen3.8 -> qwen 3.8),
+    # mas NÃO quebra siglas de 1 letra (M3, v2) — senão vira "M 3".
+    texto = re.sub(r"([a-zA-Z]{2,})(\d)", r"\1 \2", texto)
+
+    # Hífen restante vira espaço.
+    texto = texto.replace("-", " ")
+
+    # Tokeniza, preservando unidades tipo "70b", "M3", "v2", "4.8".
+    tokens = re.findall(r"[a-zA-Z]+(?:\d+(?:\.\d+)?)?|\d+(?:\.\d+)?[a-zA-Z]*|[a-zA-Z]+|\d+(?:\.\d+)?", texto)
+
+    # Mapeamento de siglas/nomes pra capitalização bonita.
+    MAPA_PALAVRA = {
+        "qwen": "Qwen", "glm": "GLM", "mini": "Mini", "max": "Max",
+        "claude": "Claude", "opus": "Opus", "sonnet": "Sonnet",
+        "haiku": "Haiku", "llama": "Llama", "gemini": "Gemini",
+        "deepseek": "DeepSeek", "gpt": "GPT", "ox": "Ox", "alpha": "Alpha",
+        "stealth": "Stealth", "nemotron": "Nemotron", "nano": "Nano",
+        "z": "Z", "ai": "AI", "turbovl": "TurboVL", "grok": "Grok",
+        "instruct": "Instruct", "vl": "VL", "v": "V", "it": "IT",
+        "b": "B", "nano": "Nano",
+    }
+
+    partes = []
+    for tok in tokens:
+        t_low = tok.lower()
+        # Token só de letras: capitaliza via mapa.
+        if tok.isalpha():
+            base = MAPA_PALAVRA.get(t_low, tok)
+            partes.append(base[:1].upper() + base[1:])
+            continue
+        # Token com letra + número (M3, 70b, v2, 4.8, 5.2): capitaliza a letra
+        # e mantém o número junto. "M3" -> "M3", "70b" -> "70B".
+        letras = re.findall(r"[a-zA-Z]+", tok)
+        numeros = re.findall(r"\d+(?:\.\d+)?", tok)
+        if letras and numeros:
+            resultado = ""
+            # Reconstroi na ordem: começa com número ou letra.
+            if tok[0].isdigit():
+                # "70b" -> "70" + "B"
+                resultado = numeros[0]
+                for l in letras:
+                    base = MAPA_PALAVRA.get(l.lower(), l)
+                    resultado += base[:1].upper() + base[1:]
+            else:
+                # "M3", "v2" -> "M" + "3", "V" + "2"
+                for l in letras:
+                    base = MAPA_PALAVRA.get(l.lower(), l)
+                    resultado += base[:1].upper() + base[1:]
+                resultado += numeros[0]
+            partes.append(resultado)
+        else:
+            # Só número
+            partes.append(tok)
+
+    resultado = " ".join(partes)
+    return resultado or (modelo_id or "")
+
+
+def _modelos_provedor(pid: str) -> List[dict]:
+    """
+    Modelos do provedor `pid` no formato do seletor ({id, nome, sobre}).
+
+    Ordem: lista do .env primeiro, depois fallback (lista fixa legado para os
+    três provedores clássicos; /api/tags para Ollama). Se nada der certo,
+    devolve o modelo padrão como única opção.
+    """
+    cfg = PROVEDORES_CONFIG.get(pid)
+
+    # Modo dinâmico: provedor veio de uma seção do .env.
+    if cfg is not None:
+        candidatos: List[str] = list(cfg.modelos_csv)
+        if cfg.tipo in ('anthropic','openai_anthropic'):
+            from limites_modelos import catalogo
+            live=catalogo(pid)
+            if live: candidatos=list(live)
+
+        if cfg.tipo == "ollama" and not candidatos:
+            locais, erro = _listar_modelos_ollama(cfg.base_url)
+            if erro:
+                _log(f"Ollama '{pid}': não consegui listar modelos ({erro}). "
+                     f"Usando só o modelo padrão.")
+            candidatos = locais
+        if not candidatos and cfg.modelo_padrao:
+            candidatos = [cfg.modelo_padrao]
+
+        saida = []
+        for i, mid in enumerate(candidatos):
+            mid = mid.strip()
+            if not mid:
+                continue
+            # Primeiro modelo: sem sufixo " · default", vira a opção visível
+            # como "selecionada por padrão". Os outros ganham essa tag.
+            sobre = cfg.nome_exibicao
+            if i > 0:
+                sobre = f"{cfg.nome_exibicao} · {i+1}º"
+            saida.append({"id": mid, "nome": _nome_limpo_modelo(mid), "sobre": sobre})
+        return saida
+
+    # Modo legado.
+    return [dict(m) for m in _MODELOS_POR_TABELA.get(pid, [])]
+
+
+def listar_provedores() -> list:
+    """
+    Provedores conhecidos, no formato que a interface consome.
+
+    Cada provedor traz seus modelos já prontos pra renderizar. A interface
+    antiga só recebia a lista de modelos da tabela ativa — agora ela vê o
+    mapa inteiro e desenha o popover em dois passos (provedor → modelo).
+    """
+    saida = []
+    for pid in PROVEDORES:
+        cfg = PROVEDORES_CONFIG.get(pid)
+        nome = cfg.nome_exibicao if cfg else pid.capitalize()
+        saida.append({
+            "id": pid,
+            "nome": nome,
+            "modelos": _modelos_provedor(pid),
+        })
+    return saida
+
+
+# Mantida por compatibilidade: o JS antigo chama modelos_disponiveis() e
+# espera só a lista de modelos do provedor ativo. Devolve o mesmo formato.
+def modelos_disponiveis() -> list:
+    """Modelos do provedor ativo (cópia, pra não vazar referência)."""
+    return _modelos_provedor(TABELA_ATIVA)
+
+
+def _provedor_padrao() -> str:
+    """Provedor default se o usuário não escolheu nenhum. A tabela ativa vence."""
+    return TABELA_ATIVA
+
+
+# Os níveis de raciocínio que a interface expõe, na ordem do seletor.
+NIVEIS_RACIOCINIO_INTERFACE = [
+    {"id": RACIOCINIO_BAIXO, "nome": "Baixo"},
+    {"id": RACIOCINIO_MEDIO, "nome": "Médio"},
+    {"id": RACIOCINIO_ALTO, "nome": "Alto"},
+]
+NIVEIS_RACIOCINIO_GPT6 = [
+    {"id": RACIOCINIO_DESLIGADO, "nome": "Sem raciocínio"},
+    *NIVEIS_RACIOCINIO_INTERFACE,
+    {"id": RACIOCINIO_EXTRA_ALTO, "nome": "Extra alto"},
+    {"id": RACIOCINIO_MAXIMO, "nome": "Máximo"},
+]
+
+
+def niveis_raciocinio(modelo: str = "") -> list:
+    """Níveis disponíveis para o modelo do chat, sem opções que ele rejeita."""
+    niveis = (NIVEIS_RACIOCINIO_GPT6 if _modelo_gpt6(modelo)
+              else NIVEIS_RACIOCINIO_INTERFACE)
+    return [dict(n) for n in niveis
+            if not (_modelo_gpt6_sem_none(modelo)
+                    and n["id"] == RACIOCINIO_DESLIGADO)]
+
+
+def definir_provedor_e_modelo(provedor: str, modelo: str) -> bool:
+    """
+    Troca provedor e modelo em runtime.
+
+    Se o provedor pedido não está registrado (não veio do .env OU não é legado),
+    devolve False sem mexer em nada. Se o modelo vier vazio, usa o padrão do
+    provedor (primeiro da lista de modelos, ou cfg.modelo_padrao).
+    """
+    global TABELA_ATIVA, ROTAS
+    pid = (provedor or "").strip().lower()
+    if pid not in PROVEDORES:
+        _log(f"definir_provedor_e_modelo: provedor '{pid}' não está registrado")
+        return False
+
+    modelo = (modelo or "").strip()
+    if not modelo:
+        # Modelo default do provedor novo: primeiro da lista OU modelo_padrao.
+        candidatos = _modelos_provedor(pid)
+        if candidatos:
+            modelo = candidatos[0]["id"]
+        elif pid in PROVEDORES_CONFIG and PROVEDORES_CONFIG[pid].modelo_padrao:
+            modelo = PROVEDORES_CONFIG[pid].modelo_padrao
+        else:
+            # Sem lista e sem modelo_padrao: herda o modelo atual, que é a
+            # melhor chance de a chamada não falhar com 400.
+            modelo = ROTAS["conversa"].modelo if "conversa" in ROTAS else ""
+
+    # Troca a tabela de rotas ativa. Cada provedor tem a sua própria.
+    try:
+        nome_tabela, rotas = _resolver_tabela(pid)
+    except ErroConfiguracao:
+        return False
+    TABELA_ATIVA = nome_tabela
+    ROTAS = rotas
+
+    # Aplica o modelo na nova tabela ativa.
+    if "conversa" in ROTAS:
+        ROTAS["conversa"].modelo = modelo
+        if (_modelo_gpt6_sem_none(modelo)
+                and ROTAS["conversa"].raciocinio == RACIOCINIO_DESLIGADO):
+            ROTAS["conversa"].raciocinio = RACIOCINIO_BAIXO
+        _log(f"provedor agora é '{pid}', modelo da conversa: '{modelo}'")
+    # O Discord tem rota própria. A troca de provedor feita na interface
+    # precisa alcançá-la também — o modelo antigo (ou o default da seção)
+    # pertencia a outro provedor e viraria 400 na primeira resposta.
+    if "discord" in ROTAS and ROTAS["discord"].provedor == pid:
+        ROTAS["discord"].modelo = modelo
+        _log(f"rota discord agora é '{pid}/{modelo}'")
+    return True
+
+
+def definir_modelo_conversa(modelo: str) -> bool:
+    """
+    Troca o modelo da rota de conversa em runtime. Devolve se aplicou.
+
+    Mantida por compatibilidade com o JS antigo. Não valida contra uma lista
+    fechada de propósito: o endpoint é a fonte da verdade sobre quais modelos
+    existem, e amarrar aqui obrigaria a editar código toda vez que surgisse
+    um modelo novo. Vazio é ignorado.
+    """
+    modelo = (modelo or "").strip()
+    if not modelo:
+        _log("definir_modelo_conversa: nome vazio, ignorando")
+        return False
+    if "conversa" not in ROTAS:
+        _log("definir_modelo_conversa: rota 'conversa' não existe na tabela ativa")
+        return False
+    ROTAS["conversa"].modelo = modelo
+    if (_modelo_gpt6_sem_none(modelo)
+            and ROTAS["conversa"].raciocinio == RACIOCINIO_DESLIGADO):
+        ROTAS["conversa"].raciocinio = RACIOCINIO_BAIXO
+    _log(f"modelo da conversa agora é '{modelo}'")
+    return True
+
+
+def definir_raciocinio_conversa(nivel: str) -> bool:
+    """
+    Troca o nível de raciocínio da rota de conversa. Devolve se aplicou.
+
+    Só aceita nível conhecido de PARAMS_RACIOCINIO — nível inventado viraria
+    'sem parâmetro' silencioso, e o Vitor acharia que mudou sem ter mudado.
+    """
+    nivel = (nivel or "").strip().lower()
+    if nivel not in PARAMS_RACIOCINIO:
+        _log(f"definir_raciocinio_conversa: nível '{nivel}' desconhecido, ignorando "
+             f"(aceitos: {', '.join(sorted(PARAMS_RACIOCINIO))})")
+        return False
+    if "conversa" not in ROTAS:
+        _log("definir_raciocinio_conversa: rota 'conversa' não existe na tabela ativa")
+        return False
+    if _modelo_gpt6_sem_none(ROTAS["conversa"].modelo) and nivel == RACIOCINIO_DESLIGADO:
+        _log("GPT-6 Astra e GPT-6.1 Sol não aceitam raciocínio desligado; usando baixo")
+        nivel = RACIOCINIO_BAIXO
+    ROTAS["conversa"].raciocinio = nivel
+    _log(f"raciocínio da conversa agora é '{nivel}'")
+    return True
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -2005,8 +2620,8 @@ ESPERA_MAXIMA = 20.0
 # disso nenhuma tentativa nova começa, mesmo que ainda haja tentativa no
 # orçamento de `cfg.tentativas`.
 #
-# Existe porque contar tentativas não limita espera. O caso medido: o gateway
-# do Kiro derrubava a requisição em 15s sem primeiro token e repetia 3 vezes
+# Existe porque contar tentativas não limita espera. O caso medido: o endpoint
+# derrubava a requisição em 15s sem primeiro token e repetia 3 vezes
 # sozinho; cada uma dessas rodadas de 45s valia UMA tentativa aqui, e as 4
 # tentativas com backoff deixaram a Emily calada uns 3 minutos no Discord, com
 # o "digitando..." ligado, pra no fim dizer que não conseguiu. Falhar em 1
@@ -2020,6 +2635,9 @@ def _espera_backoff(tentativa: int) -> float:
     return bruto * (0.5 + random.random() * 0.5)
 
 
+from diagnostico_execucao import measured as _medir_execucao, stream_events as _medir_stream, event as _evento_execucao
+
+@_medir_execucao("model_request")
 def chamar(
     mensagens: Sequence[dict],
     rota_nome: str = ROTA_PADRAO,
@@ -2030,22 +2648,28 @@ def chamar(
     ferramentas: Optional[List[dict]] = None,
     obrigar_ferramenta: bool = False,
     proibir_ferramenta: bool = False,
+    provedor: Optional[str] = None,
+    raciocinio: Optional[str] = None,
+    on_retry: Optional[Callable[[int, int], None]] = None,
 ) -> RespostaLLM:
     """
     Porta de entrada única. Resolve a rota, respeita o rate limit,
     tenta de novo em 429/5xx com backoff, e loga tudo que der errado.
 
-    max_tokens, modelo e temperatura sobrescrevem a rota quando informados.
+    max_tokens, modelo, provedor, raciocinio e temperatura sobrescrevem a rota
+    quando informados. Os overrides são locais à chamada: não alteram a rota
+    global nem a escolha salva na interface.
 
     Levanta ErroLLM se todas as tentativas falharem. NÃO devolve None
     silenciosamente — falha silenciosa é o bug que essa camada existe
     pra matar.
     """
     cfg = rota(rota_nome)
-    provedor = PROVEDORES.get(cfg.provedor)
-    if provedor is None:
+    provedor_primario = (provedor or cfg.provedor).strip()
+    provedor_obj = PROVEDORES.get(provedor_primario)
+    if provedor_obj is None:
         raise ErroConfiguracao(
-            f"provedor '{cfg.provedor}' da rota '{rota_nome}' não está registrado"
+            f"provedor '{provedor_primario}' da rota '{rota_nome}' não está registrado"
         )
 
     # Aceita tanto os dicts crus do projeto quanto mensagens já canônicas,
@@ -2058,72 +2682,154 @@ def chamar(
     if not canonicas:
         raise ErroResposta(f"rota '{rota_nome}' recebeu lista de mensagens vazia")
 
-    modelo_final = modelo or cfg.modelo
+    modelo_primario = modelo or cfg.modelo
     tokens_final = max_tokens if max_tokens is not None else cfg.max_tokens
     temp_final = temperatura if temperatura is not None else cfg.temperatura
-    limitador = cfg.limitador(rota_nome)
+    raciocinio_final = raciocinio if raciocinio is not None else cfg.raciocinio
+    if raciocinio_final not in PARAMS_RACIOCINIO:
+        raise ErroConfiguracao(
+            f"raciocínio '{raciocinio_final}' não existe. "
+            f"Use um destes: {', '.join(sorted(PARAMS_RACIOCINIO))}"
+        )
+
+    # CADEIA DE MODELOS, em pares (provedor, modelo): o primário da rota
+    # primeiro, depois os fallbacks declarados nela. Cada degrau resolve o
+    # PRÓPRIO provedor — é o que permite cair do claude pro Qwen, que vive
+    # em outro endpoint. Um modelo que o endpoint não aceita mais não pode
+    # deixar a Emily muda.
+    cadeia_modelos: List[Tuple[str, str]] = [(provedor_primario, modelo_primario)]
+    # Um provedor/modelo fixado por chamada representa uma escolha deliberada
+    # do consumidor (voz rápida, agente isolado etc.). Não misture os fallbacks
+    # da rota global, que podem pertencer a outro produto e outro comportamento.
+    if provedor is None:
+        for _prov_fb, _mod_fb in getattr(cfg, "fallbacks", ()):
+            if (_prov_fb, _mod_fb) not in cadeia_modelos and _prov_fb in PROVEDORES:
+                cadeia_modelos.append((_prov_fb, _mod_fb))
 
     ultimo_erro: Optional[Exception] = None
     comeco = time.monotonic()
 
-    for tentativa in range(cfg.tentativas):
-        if tentativa and time.monotonic() - comeco > ORCAMENTO_RETENTATIVA:
-            _log(
-                f"rota '{rota_nome}': já gastei "
-                f"{time.monotonic() - comeco:.0f}s tentando (teto de "
-                f"{ORCAMENTO_RETENTATIVA:.0f}s). Paro na tentativa "
-                f"{tentativa} de {cfg.tentativas} em vez de deixar quem "
-                f"pediu esperando mais."
-            )
-            break
-
-        if not limitador.adquirir(timeout=60.0):
-            _log(f"rota '{rota_nome}': esperei 60s por espaço no rate limit e não conseguiu")
-            raise ErroLimiteTaxa(f"rota '{rota_nome}' não conseguiu ficha do limitador")
-
-        try:
-            inicio = time.monotonic()
-            resultado = provedor.chamar(
-                mensagens=canonicas,
-                modelo=modelo_final,
-                max_tokens=tokens_final,
-                temperatura=temp_final,
-                raciocinio=cfg.raciocinio,
-                stream=stream,
-                ferramentas=ferramentas,
-                obrigar_ferramenta=obrigar_ferramenta,
-                proibir_ferramenta=proibir_ferramenta,
-            )
-            if not stream:
-                _log_debug(
-                    f"rota '{rota_nome}' modelo '{modelo_final}' "
-                    f"ok em {time.monotonic() - inicio:.2f}s"
-                )
-            return resultado
-
-        except ErroConfiguracao:
-            # Chave errada ou faltando não melhora com retry.
-            raise
-
-        except (ErroLimiteTaxa, ErroTransporte) as e:
-            ultimo_erro = e
-            if tentativa >= cfg.tentativas - 1:
+    for _indice_modelo, (_provedor_id, modelo_final) in enumerate(cadeia_modelos):
+        # O primário usa o orçamento de tentativas da rota; os fallbacks
+        # ganham menos — já estamos em modo de degradação. Cada degrau tem
+        # limitador próprio, porque provedor novo tem RPM próprio.
+        tentativas_do_modelo = (cfg.tentativas if _indice_modelo == 0
+                                else max(2, cfg.tentativas - 2))
+        provedor_atual = PROVEDORES[_provedor_id]
+        _cfg_prov_atual = PROVEDORES_CONFIG.get(_provedor_id)
+        _rpm_atual = _cfg_prov_atual.rpm if _cfg_prov_atual else RPM_PADRAO
+        limitador_atual = limitador_de(f"{_provedor_id}_{rota_nome}",
+                                       _rpm_atual)
+        if _indice_modelo:
+            if time.monotonic() - comeco > ORCAMENTO_RETENTATIVA * 2:
+                _log(f"rota '{rota_nome}': sem orçamento pra tentar o "
+                     f"fallback {_provedor_id}:{modelo_final}; desistindo.")
                 break
-            espera = _espera_backoff(tentativa)
-            _log(
-                f"rota '{rota_nome}' tentativa {tentativa + 1}/{cfg.tentativas} falhou "
-                f"({type(e).__name__}: {e}). Tentando de novo em {espera:.1f}s"
-            )
-            time.sleep(espera)
+            _log(f"rota '{rota_nome}': caindo pro fallback "
+                 f"{_provedor_id}:{modelo_final} ({_indice_modelo + 1}/"
+                 f"{len(cadeia_modelos)})")
 
-        except Exception as e:
-            # Erro que o provedor não classificou. Loga com tipo e sobe.
-            _log(f"rota '{rota_nome}' erro não classificado: {type(e).__name__}: {e}")
-            raise ErroLLM(f"rota '{rota_nome}': {e}") from e
+        for tentativa in range(tentativas_do_modelo):
+            if tentativa and time.monotonic() - comeco > ORCAMENTO_RETENTATIVA:
+                _log(
+                    f"rota '{rota_nome}': já gastei "
+                    f"{time.monotonic() - comeco:.0f}s tentando (teto de "
+                    f"{ORCAMENTO_RETENTATIVA:.0f}s). Paro na tentativa "
+                    f"{tentativa} de {tentativas_do_modelo} em vez de deixar "
+                    f"quem pediu esperando mais."
+                )
+                break
+
+            _inicio_fila = time.perf_counter()
+            _fila_ok = limitador_atual.adquirir(timeout=60.0)
+            _evento_execucao("model_queue", f"{_provedor_id}:{modelo_final}", _inicio_fila, ok=_fila_ok)
+            if not _fila_ok:
+                _log(f"rota '{rota_nome}': esperei 60s por espaço no rate limit e não conseguiu")
+                raise ErroLimiteTaxa(f"rota '{rota_nome}' não conseguiu ficha do limitador")
+
+            try:
+                inicio = time.monotonic()
+                resultado = provedor_atual.chamar(
+                    mensagens=canonicas,
+                    modelo=modelo_final,
+                    max_tokens=tokens_final,
+                    temperatura=temp_final,
+                    raciocinio=raciocinio_final,
+                    stream=stream,
+                    ferramentas=ferramentas,
+                    obrigar_ferramenta=obrigar_ferramenta,
+                    proibir_ferramenta=proibir_ferramenta,
+                )
+                # Log SEMPRE (não só em debug) quando há ferramentas: é o caminho
+                # onde a latência percebida mora — um turno com ferramenta são
+                # várias chamadas em série e sem este log não dá pra saber quanto
+                # cada uma comeu. Tokens de saída aproximam o tempo de geração.
+                if ferramentas and not stream:
+                    _log(
+                        f"rota '{rota_nome}' ok em {time.monotonic() - inicio:.2f}s "
+                        f"(msgs={len(canonicas)}, chars_prompt="
+                        f"{sum(len(str(m.texto or m.bruta or '')) for m in canonicas)})"
+                    )
+                elif not stream:
+                    _log_debug(
+                        f"rota '{rota_nome}' modelo '{modelo_final}' "
+                        f"ok em {time.monotonic() - inicio:.2f}s"
+                    )
+                if stream and isinstance(resultado, FluxoComFerramentas):
+                    def _reabrir_stream():
+                        novo = chamar(
+                            mensagens, rota_nome=rota_nome, max_tokens=max_tokens,
+                            stream=True, modelo=modelo, temperatura=temperatura,
+                            ferramentas=ferramentas,
+                            obrigar_ferramenta=obrigar_ferramenta,
+                            proibir_ferramenta=proibir_ferramenta,
+                            provedor=provedor, raciocinio=raciocinio,
+                            on_retry=on_retry,
+                        )
+                        return novo._stream
+                    resultado.configurar_reconexao(_reabrir_stream, on_retry)
+                if tentativa and on_retry:
+                    on_retry(0, tentativas_do_modelo)
+                _evento_execucao("model_response", f"{_provedor_id}:{modelo_final}", inicio,
+                                  attempt=tentativa, streaming=stream)
+                if stream:
+                    if isinstance(resultado, FluxoComFerramentas):
+                        resultado._stream = _medir_stream(resultado._stream, inicio, modelo_final)
+                    elif not isinstance(resultado, str):
+                        resultado = _medir_stream(resultado, inicio, modelo_final)
+                return resultado
+
+            except ErroConfiguracao:
+                # Chave errada ou faltando não melhora com retry.
+                raise
+
+            except (ErroLimiteTaxa, ErroTransporte) as e:
+                ultimo_erro = e
+                if tentativa >= tentativas_do_modelo - 1:
+                    break
+                espera = _espera_backoff(tentativa)
+                _log(
+                    f"rota '{rota_nome}' tentativa {tentativa + 1}/{tentativas_do_modelo} falhou "
+                    f"({type(e).__name__}: {e}). Tentando de novo em {espera:.1f}s"
+                )
+                if on_retry:
+                    on_retry(tentativa + 1, tentativas_do_modelo)
+                _evento_execucao("model_retry",f"{_provedor_id}:{modelo_final}",inicio,
+                                  ok=False,error=type(e).__name__,backoff_ms=espera*1000,attempt=tentativa+1)
+                time.sleep(espera)
+
+            except Exception as e:
+                # Erro que o provedor não classificou. Loga com tipo e sobe.
+                _log(f"rota '{rota_nome}' erro não classificado: {type(e).__name__}: {e}")
+                raise ErroLLM(f"rota '{rota_nome}': {e}") from e
 
     gasto = time.monotonic() - comeco
     _log(f"rota '{rota_nome}' desistiu depois de {gasto:.0f}s. "
          f"Último erro: {ultimo_erro}")
+    if ultimo_erro is not None:
+        raise type(ultimo_erro)(
+            f"rota '{rota_nome}' falhou depois de {gasto:.0f}s de tentativa: {ultimo_erro}"
+        ) from ultimo_erro
     raise ErroLLM(
         f"rota '{rota_nome}' falhou depois de {gasto:.0f}s de tentativa"
     ) from ultimo_erro
@@ -2137,6 +2843,11 @@ def chamar_com_ferramentas(
     stream: bool = False,
     obrigar_ferramenta: bool = False,
     proibir_ferramenta: bool = False,
+    modelo: Optional[str] = None,
+    provedor: Optional[str] = None,
+    raciocinio: Optional[str] = None,
+    temperatura: Optional[float] = None,
+    on_retry: Optional[Callable[[int, int], None]] = None,
 ) -> Union[Resposta, "FluxoComFerramentas"]:
     """
     Chamada com catálogo de ferramentas. O modelo decide se responde em texto
@@ -2150,19 +2861,25 @@ def chamar_com_ferramentas(
     Levanta ErroConfiguracao se o provedor da rota não fizer tool calling.
     """
     cfg = rota(rota_nome)
-    provedor = PROVEDORES.get(cfg.provedor)
-    if provedor is not None and not provedor.suporta_ferramentas:
+    provedor_id = (provedor or cfg.provedor).strip()
+    provedor_obj = PROVEDORES.get(provedor_id)
+    if provedor_obj is not None and not provedor_obj.suporta_ferramentas:
         raise ErroConfiguracao(
-            f"o provedor '{cfg.provedor}' da rota '{rota_nome}' não suporta tool calling"
+            f"o provedor '{provedor_id}' da rota '{rota_nome}' não suporta tool calling"
         )
     return chamar(
         mensagens,
         rota_nome=rota_nome,
         max_tokens=max_tokens,
         stream=stream,
+        modelo=modelo,
+        provedor=provedor,
+        raciocinio=raciocinio,
+        temperatura=temperatura,
         ferramentas=ferramentas,
         obrigar_ferramenta=obrigar_ferramenta,
         proibir_ferramenta=proibir_ferramenta,
+        on_retry=on_retry,
     )
 
 
@@ -2200,31 +2917,11 @@ def diagnosticar(verbose: bool = True) -> dict:
     print("DIAGNÓSTICO DA CAMADA DE LLM DA EMILY")
     print("=" * 66)
 
-    # 0. Estado do gateway do Kiro.
-    #
-    # Vem antes de tudo porque desde a migração é o pré-requisito de todas
-    # as rotas do provedor 'kiro': se ele não está no ar, o resto do
-    # diagnóstico só produz o mesmo erro repetido nove vezes.
-    print("\n[0] Gateway do Kiro")
-    try:
-        import gateway as _gw
-
-        for chave, valor in _gw.estado().items():
-            print(f"    {chave:<14} {valor}")
-        relatorio["gateway"] = _gw.estado()
-    except ImportError:
-        print("    gateway.py não encontrado (rotas do provedor 'kiro' vão falhar)")
-        relatorio["gateway"] = {"erro": "modulo ausente"}
-    except Exception as e:
-        print(f"    falha ao consultar o gateway: {type(e).__name__}: {e}")
-        relatorio["gateway"] = {"erro": str(e)}
-
     # 1. Credenciais presentes?
     #
-    # getattr com default porque nem todo provedor usa uma chave só do .env: o
-    # ProvedorVertexGemini autentica por credencial do Google (arquivo apontado
-    # por GOOGLE_APPLICATION_CREDENTIALS), então não tem env_chave. Sem o
-    # default, o diagnóstico quebrava com AttributeError logo no começo.
+    # getattr com default porque provedor não é obrigado a autenticar por uma
+    # única variável de .env. Sem o default, o diagnóstico quebrava com
+    # AttributeError logo no começo por causa de um provedor assim.
     print("\n[1] Credenciais no .env")
     envs = sorted({getattr(p, "env_chave", None) for p in PROVEDORES.values()} - {None})
 
@@ -2274,10 +2971,18 @@ def diagnosticar(verbose: bool = True) -> dict:
         print(f"    (sem imagem de teste: {e})")
 
     modelos_de_visao = {MODELO_VISAO, MODELO_VISAO_RAPIDO}
+    # Rotas que recebem IMAGEM no diagnóstico. A detecção pelo nome do modelo
+    # deixou de cobrir tudo quando as rotas de visão passaram a usar o modelo
+    # multimodal principal (o Qwen antigo não enxergava; o Claude vê) — então
+    # o nome da rota é o sinal confiável.
+    _ROTAS_COM_IMAGEM = {
+        "visao", "triagem_visual", "agente_ui", "agente_jogo",
+        "visao_gmi", "triagem_visual_gmi", "agente_ui_gmi", "agente_jogo_gmi",
+    }
     resultados = {}
 
     for nome, cfg in ROTAS.items():
-        eh_visao = cfg.modelo in modelos_de_visao
+        eh_visao = cfg.modelo in modelos_de_visao or nome in _ROTAS_COM_IMAGEM
         print(f"\n    rota '{nome}' -> {cfg.provedor} / {cfg.modelo}"
               f"  (max_tokens={cfg.max_tokens}, raciocinio={cfg.raciocinio})")
 

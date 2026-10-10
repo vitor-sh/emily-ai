@@ -1,0 +1,19 @@
+[Unit]
+Description=Ponte privada da Emily e atualizações na Oracle
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/emily-relay
+ExecStart=/home/ubuntu/emily-relay/.venv/bin/gunicorn --bind unix:/home/ubuntu/emily-relay/run/http.sock --workers 2 --threads 12 --timeout 300 --umask 0077 relay:create_app()
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/emily-relay/data /home/ubuntu/emily-relay/run
+[Install]
+WantedBy=multi-user.target

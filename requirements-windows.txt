@@ -1,0 +1,6 @@
+-r requirements.txt
+pywin32>=306,<400
+pystray>=0.19,<1
+pyinstaller>=6.21,<7
+SoundCard==0.4.6
+google-auth>=2,<3

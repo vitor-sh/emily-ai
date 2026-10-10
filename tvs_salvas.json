@@ -1,0 +1,11 @@
+[
+  {
+    "id": "1956056b",
+    "nome": "TVzita",
+    "ip": "192.168.18.17",
+    "tipo": "Android TV",
+    "pareada": true,
+    "ativa": true,
+    "companion_token": "aebef249a6157066963307a4c00ef759841506cd6cb37f1a"
+  }
+]

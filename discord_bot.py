@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import os
+import queue
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Optional
 from discord.ext import voice_recv
 
 import discord
+import classificacao_ferramentas as cf
 
 APELIDOS_MEMBROS = {
     731604438212673638: "comedor de Marcio Augusto",
@@ -19,7 +21,7 @@ APELIDOS_MEMBROS = {
     843189524480655380 : "Sempre se acha o protagonista, é ignorante pra krl, completamente irritante, pode xingar com tudo que tem, usa todo seu arsenal de palavrão que eu te ensinei",
 }
 
-_CONFIG_PATH = Path.home() / ".emily_discord.json"
+_CONFIG_PATH = Path(os.getenv("EMILY_ARQUIVO_DISCORD", str(Path.home() / ".emily_discord.json")))
 
 _CONFIG_PADRAO = {
     "token":          "COLE_SEU_TOKEN_AQUI",
@@ -41,16 +43,6 @@ _CONFIG_PADRAO = {
 
     # Onde ela recebe quem entra no servidor. Vazio cai pro canal de avisos.
     "canal_boas_vindas_id": 0,
-
-    # Chat espelhado com o Minecraft: o que se fala aqui aparece no jogo e
-    # vice-versa. Vazio = sem espelho.
-    "canal_ponte_mc_id": 0,
-
-    # Avisos de servidor caiu/voltou, morte e conquista. Vazio cai pro espelho.
-    "canal_avisos_mc_id": 0,
-
-    # Painel de status que ela reescreve sozinha. Vazio = sem painel.
-    "canal_painel_mc_id": 0,
 
     # Canal de suporte: ali TODA mensagem é atendimento, sem precisar marcar ela.
     "canal_suporte_id": 0,
@@ -108,12 +100,24 @@ _CONFIG_PADRAO = {
     # Separado de propósito — dá pra deixar ela ouvindo e calada, que é o
     # estado útil quando alguém quer o resumo mas não quer ela participando.
     "responder_call": True,
+
+    # Responder DIRECT (DM): qualquer pessoa que mandar mensagem no direct do
+    # bot recebe resposta, como se tivesse marcado ela — com debounce de
+    # alguns segundos pra juntar rajadas de mensagens, memória por usuário e
+    # só as ferramentas simples. O CONTEÚDO das conversas de direct nunca vai
+    # pro terminal, pro histórico ou pra janela de contexto: é privado por
+    # construção (ver _dm_receber).
+    "responder_dm": True,
 }
 
 _SAMPLE_RATE = 22050
 _CHANNELS    = 1
 
 def _carregar_config() -> dict:
+    if os.getenv("EMILY_PUBLIC_MODE") == "1" and not _CONFIG_PATH.exists():
+        return {**_CONFIG_PADRAO, "coadmins_id": [], "nomes_do_dono": [],
+                "permitir_admin": False, "ouvir_call": False,
+                "responder_call": False, "responder_dm": False}
     if _CONFIG_PATH.exists():
         try:
             salva = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
@@ -253,17 +257,48 @@ def _nome_de(autor) -> str:
     if _client.user is not None and getattr(autor, "id", None) == _client.user.id:
         return "Emily"
 
+    impostor = _e_impostor_do_dono(autor)
+
+    try:
+        import perfil_discord
+        conhecido = perfil_discord.nome_de(autor.id)
+        if conhecido and not impostor and perfil_discord._normalizar(conhecido) not in _nomes_protegidos():
+            return conhecido
+    except Exception:
+        pass
+
     fixo = APELIDOS_MEMBROS.get(getattr(autor, "id", 0))
-    if fixo:
+    if fixo and not impostor:
         return fixo
 
     nome = (getattr(autor, "display_name", None)
             or getattr(autor, "name", None) or "alguém")
 
-    if _e_impostor_do_dono(autor):
+    if impostor:
         return (f"{nome} (SE PASSANDO PELO VITOR — não é ele, "
                 f"id {getattr(autor, 'id', 0)})")
     return nome
+
+
+def _ids_por_apelido(apelido: str) -> set[int]:
+    """Todos os IDs com nick EXATO; o chamador decide se há ambiguidade."""
+    import perfil_discord
+    chave = perfil_discord._normalizar(apelido)
+    if not chave:
+        return set()
+    candidatos = {}
+    for guild in _client.guilds:
+        for membro in guild.members:
+            if not getattr(membro, "bot", False):
+                candidatos[membro.id] = membro
+    if _voice_client and _voice_client.is_connected():
+        for membro in _voice_client.channel.members:
+            if not getattr(membro, "bot", False):
+                candidatos[membro.id] = membro
+    iguais = {uid for uid, membro in candidatos.items()
+              if chave in {perfil_discord._normalizar(getattr(membro, "name", "")),
+                           perfil_discord._normalizar(getattr(membro, "display_name", ""))}}
+    return iguais
 
 
 def _e_reply_na_emily(message) -> bool:
@@ -313,7 +348,23 @@ def _registrar_na_janela(canal_id: int, *, nome: str, texto: str,
         _historico_janela[canal_id].pop(0)
 
 
+class ErroJournalStub(Exception):
+    pass
+
+
+def _memoria_dono(eh_dono: bool, user_id: int) -> str:
+    """Namespace de memória unificada para quem está falando agora."""
+    if eh_dono:
+        try:
+            import memoria_unificada
+            return memoria_unificada.dono_id()
+        except Exception:  # noqa: BLE001
+            return "vitor"
+    return f"discord:{int(user_id)}"
+
+
 def _formatar_janela(canal_id: int, excluir_ultima: bool = False) -> str:
+
     """
     Transcreve a janela num formato em que dá pra saber quem falou com quem.
 
@@ -423,18 +474,22 @@ async def on_ready():
     _pronto = True
     print(f"[Discord] Bot conectado como '{_client.user}'")
 
-    _escuta_discord_ativa.set()
-    print("[Discord] Escuta de texto ativada automaticamente")
+    import discord_monitor
+    ativo = discord_monitor.aplicar()
+    print(f"[Discord] Escuta de texto {'ativada' if ativo else 'desativada'} ({'Oracle' if os.getenv('EMILY_RUNTIME_CLOUD') == '1' else 'PC'})")
 
     await _client.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.listening,
-            name="escutando o Vitor"
+            name="hackeando o governo russo.."
         ),
         status=discord.Status.online
     )
 
     _ligar_autonomia()
+    if os.getenv("EMILY_RUNTIME_CLOUD") == "1":
+        from cloud_runtime_server import retomar_call
+        await retomar_call()
 
 
 def _ligar_autonomia() -> None:
@@ -455,7 +510,7 @@ def _ligar_autonomia() -> None:
     except Exception as e:
         print(f"[Discord] relógio não subiu: {type(e).__name__}: {e}")
 
-    for modulo in ("vida_discord", "ponte_mc"):
+    for modulo in ("vida_discord",):
         try:
             __import__(modulo).ligar()
         except Exception as e:
@@ -514,7 +569,25 @@ async def on_message(message: discord.Message):
             )
         return
 
+    # ─── DIRECT (DM): conversa privada 1:1 ───
+    #
+    # Vem ANTES de qualquer fluxo do servidor de propósito: o direct é um
+    # canal com regras próprias (privacidade absoluta, debounce de rajada,
+    # ferramentas simples) e NENHUMA mensagem daqui pode vazar pra janela de
+    # contexto do servidor, pra moderação, pro perfil público — lugar
+    # nenhum que o Vitor possa ler depois. Nem o terminal recebe o conteúdo:
+    # só quem escreveu e quantas mensagens há na leva.
+    if message.guild is None:
+        _dm_receber(message)
+        return
+
     if not _escuta_discord_ativa.is_set():
+        return
+
+    # A escolha de PC pode mudar entre dois ciclos de sincronização. Confere
+    # o gateway antes de responder para evitar duas Emilys no mesmo canal.
+    import discord_monitor
+    if not await asyncio.to_thread(discord_monitor.pode_responder):
         return
 
     if not _callback_texto:
@@ -573,10 +646,18 @@ async def on_message(message: discord.Message):
     try:
         import perfil_discord
         perfil_discord.observar(
-            message.author.id, nome_exibido, texto,
+            message.author.id, message.author.display_name, texto,
             falou_com_emily=falou_com_emily,
             eh_bot=bool(getattr(message.author, "bot", False)),
         )
+        if message.author.id == int(_config.get("usuario_id", 0) or 0):
+            perfil_discord.aprender_associacao_explicitada(texto)
+            perfil_discord.aprender_fato_explicitado_pelo_dono(texto)
+        elif perfil_discord.deve_extrair(message.author.id):
+            # Aprende mesmo se Emily não responder; nunca inclui conversa de
+            # outras pessoas nem mensagens privadas de outra DM no caderno.
+            perfil_discord.extrair_em_segundo_plano(
+                message.author.id, nome_exibido, texto)
     except Exception as e:
         print(f"[Discord] Perfil não pôde observar a mensagem: {e}")
 
@@ -595,16 +676,6 @@ async def on_message(message: discord.Message):
                 daemon=True).start()
     except Exception as e:
         print(f"[Discord] moderação não rodou: {type(e).__name__}: {e}")
-
-    # ─── PONTE COM O MINECRAFT ───
-    #
-    # Leva pro jogo o que foi dito no canal espelhado. Não interrompe o fluxo: a
-    # Emily continua podendo responder no canal como em qualquer outro.
-    try:
-        import ponte_mc
-        ponte_mc.mensagem_do_discord(nome_exibido, texto, canal.id)
-    except Exception as e:
-        print(f"[Discord] ponte não levou a mensagem: {type(e).__name__}: {e}")
 
     # ─── CANAL DE SUPORTE ───
     #
@@ -651,6 +722,24 @@ async def on_message(message: discord.Message):
         _enfileirar_mencao(canal.id, texto_limpo, nome_exibido, message, historico_fmt)
         return
 
+    # ─── PEDIDO DE ADMINISTRAÇÃO SEM MENÇÃO ───
+    #
+    # Pra quem tem acesso de admin, a mensagem não precisa mais vir marcada:
+    # pedido de administração detectado entra na MESMA fila das menções e roda
+    # com ferramenta na mesa. Era aqui que ela "prometia" ação sem poder cumprir
+    # — o caminho de conversa não tem ferramenta nenhuma, e o texto de "tô
+    # criando!" saía vazio. Ver _deve_rotear_admin_sem_mencao.
+    try:
+        if _deve_rotear_admin_sem_mencao(texto, message):
+            print(f"[Discord] Pedido de admin sem menção de {nome_exibido}: "
+                  f"'{texto[:60]}'")
+            _enfileirar_mencao(canal.id, texto, nome_exibido, message,
+                               _formatar_janela(canal.id))
+            return
+    except Exception as e:
+        print(f"[Discord] roteamento de admin sem menção falhou: "
+              f"{type(e).__name__}: {e}")
+
     # ─── ALGUÉM ENCRENCADO FORA DO CANAL DE SUPORTE ───
     #
     # Vem antes da participação espontânea de propósito. Quem escreveu "nao
@@ -686,10 +775,11 @@ async def on_message(message: discord.Message):
 def _responder_no_canal(message: discord.Message, texto: str,
                         quebrar: bool = True) -> None:
     """Responde no chat a partir de uma thread, quebrando como pessoa digitando."""
+    import modelo as modelo_module
+    texto = modelo_module.remover_tags_fish(texto)
     if not texto or not texto.strip() or not _loop:
         return
 
-    import modelo as modelo_module
     partes = (modelo_module.quebrar_resposta_discord(texto)
               if quebrar else [texto[:2000]])
 
@@ -784,37 +874,6 @@ def _nivel_de_acesso(message: discord.Message) -> str:
     return discord_admin.nivel_do_membro(message.author, _config)
 
 
-def _mc_liberado_na_guild(guild) -> bool:
-    """
-    As ferramentas do servidor de Minecraft valem neste servidor de Discord?
-
-    Sem guild configurada em ENXADA_DISCORD_GUILD, devolve False mesmo estando
-    tudo o mais pronto. Isso é deliberado: liberar controle de servidor de jogo
-    em qualquer Discord onde a Emily entrar seria o padrão errado. O Vitor diz
-    onde vale.
-
-    Recebe a guild e não a mensagem porque o caminho de call não tem mensagem
-    nenhuma — lá o que existe é o canal de voz.
-    """
-    try:
-        import enxada
-        if guild is None:
-            return False
-        if not enxada.GUILD_AUTORIZADA:
-            return False
-        if guild.id != enxada.GUILD_AUTORIZADA:
-            return False
-        ok, _ = enxada.configurado()
-        return ok
-    except Exception as e:
-        print(f"[Discord] Integração com o painel indisponível: {e}")
-        return False
-
-
-def _servidor_mc_liberado(message: discord.Message) -> bool:
-    return _mc_liberado_na_guild(message.guild)
-
-
 # ─────────────────────────────────────────────────────────────────
 # CALL x CHAT
 #
@@ -896,6 +955,40 @@ def _pediu_resposta_no_chat(texto: str) -> bool:
     return bool(t) and any(frase in t for frase in _FRASES_RESPONDER_NO_CHAT)
 
 
+def _deve_rotear_admin_sem_mencao(texto: str, message: discord.Message) -> bool:
+    """
+    Mensagem SEM menção vale o caminho com ferramenta?
+
+    Antes, só menção ou reply abriam o laço de administração. Um "cria um canal
+    tal" solto no chat caía na participação espontânea — que não tem ferramenta
+    nenhuma — e ela RESPONDIA como se fosse fazer, porque o modelo do caminho de
+    conversa não sabe que promessa ali não tem como ser cumprida. Era mentira
+    por arquitetura, não por escolha dela.
+
+    Agora quem tem acesso de administração (dono, coadmin ou cargo autorizado)
+    não precisa marcar: a frase que parece pedido de administração entra na
+    MESMA fila das menções e roda com ferramenta na mesa. Se na verdade era só
+    conversa ou pergunta de capacidade, o laço responde conversando — lá ela
+    sabe o que pode fazer, então a resposta sai honesta.
+
+    Quem NÃO tem acesso segue no fluxo de sempre: recusar permissão pra quem
+    nem falou com ela seria só barulho (e "o server tá on?" de visitante não
+    pode virar aviso de permissão).
+
+    Detector local, sem rede e sem LLM; falso positivo é barato porque o laço
+    decide sozinho se executa ou só conversa.
+    """
+    import discord_admin
+
+    if not texto or message.guild is None:
+        return False
+    if not _config.get("permitir_admin", True):
+        return False
+    if not discord_admin.parece_pedido_de_admin(texto):
+        return False
+    return _nivel_de_acesso(message) != discord_admin.NIVEL_NENHUM
+
+
 def _tentar_pedido_de_admin(
     canal_id: int,
     texto: str,
@@ -926,19 +1019,10 @@ def _tentar_pedido_de_admin(
     # substantivo de servidor e portanto NÃO é reconhecida como pedido de
     # administração. Sem esta checagem, a cobrança caía na conversa comum, que
     # não tem ferramenta na mesa, e ela prometia de novo.
-    # NÃO existe mais portão de vocabulário aqui, e a ausência é deliberada.
-    #
-    # Chegar nesta função já significa que a pessoa falou DIRETO com ela (este
-    # caminho só é chamado pelo worker de menções). Tentar adivinhar, por lista
-    # de verbos, se uma fala dirigida é pedido ou conversa falhou três vezes
-    # seguidas em uso real — "desativaaa", "manda de novo", "usa @a" — e cada
-    # correção só adicionava palavra numa lista que nunca vai cobrir o
-    # português.
-    #
-    # Agora toda fala dirigida entra no caminho COM ferramenta. Se for conversa,
-    # o modelo simplesmente não chama ferramenta e responde normal; o custo é
-    # token de catálogo, que é baixo e previsível. Se for pedido, a ferramenta
-    # está na mesa — que é o que precisa ser verdade sempre.
+    # Chegar nesta função significa que a pessoa falou DIRETO com ela, mas não
+    # que pediu administração. A pendência tem prioridade; sem pendência, o
+    # detector amplo abaixo separa assunto administrativo de conversa antes de
+    # enviar o catálogo. A cobrança continua usando o critério estrito.
     pendencia = discord_admin.consumir_promessa(canal_id, message.author.id)
 
     pendente = pendencia["pedido"] if pendencia else ""
@@ -948,6 +1032,31 @@ def _tentar_pedido_de_admin(
     # Usada abaixo pra decidir se este caminho REALMENTE assume a mensagem ou
     # devolve ela pro fluxo normal.
     era_ordem = discord_admin.parece_ordem_de_admin(texto, dirigido_a_ela=True)
+    era_pedido_admin = discord_admin.parece_pedido_de_admin(
+        texto, dirigido_a_ela=True)
+
+    # Menção direta não transforma conversa em administração. Antes toda fala
+    # dirigida pagava o catálogo e podia cair na cobrança obrigatória; agora só
+    # assunto do domínio ou pendência real entra no laço pesado.
+    if not pendencia and not era_pedido_admin:
+        print(f"[CLASSIFICACAO-FERRAMENTA] canal=discord "
+              f"politica={cf.SEM_FERRAMENTA} motivo=mencao_conversacional "
+              f"texto={texto[:80]!r}")
+        return False
+
+    if bool(pendente) or era_ordem:
+        classificacao_admin = cf.ClassificacaoFerramenta(
+            cf.FERRAMENTA_OBRIGATORIA,
+            "continuacao_pendente" if pendente else "ordem_administrativa_explicita",
+        )
+    elif discord_admin.parece_pergunta_de_capacidade(texto):
+        classificacao_admin = cf.ClassificacaoFerramenta(
+            cf.FERRAMENTA_OPCIONAL, "pergunta_de_capacidade_administrativa")
+    else:
+        # Estado do Minecraft/servidor e outras consultas factuais do domínio
+        # precisam ser verificadas, não respondidas de cabeça.
+        classificacao_admin = cf.ClassificacaoFerramenta(
+            cf.FERRAMENTA_OBRIGATORIA, "consulta_factual_administrativa")
 
     nivel = _nivel_de_acesso(message)
     if pendencia:
@@ -992,7 +1101,16 @@ def _tentar_pedido_de_admin(
         guild_id=message.guild.id,
         canal_id=canal_id,
         origem="discord",
+        autonomia_direta=bool(
+            nivel == discord_admin.NIVEL_DONO
+            and era_ordem
+            and modelo_module.autonomia_experimental_ativa()
+        ),
     )
+
+    # Namespace de memória unificada: o dono lê/escreve a memória dele; terceiros
+    # têm a ficha própria isolada por ID (nunca a memória do Vitor).
+    dono_memoria = _memoria_dono(eh_dono, message.author.id)
 
     # Sessão do painel de Minecraft. Note que o critério de dono aqui é OUTRO:
     # no Discord, cargo autorizado dá nível total; no servidor de Minecraft só o
@@ -1002,21 +1120,6 @@ def _tentar_pedido_de_admin(
     # Co-admin vai num campo separado, e não como eh_dono, porque os dois
     # significam coisas diferentes lá: eh_dono libera até o irreversível,
     # coadmin só dispensa a justificativa.
-    mc_liberado = _servidor_mc_liberado(message)
-    if mc_liberado:
-        import enxada
-        enxada.definir_sessao(
-            autor_id=message.author.id,
-            autor_nome=nome_autor,
-            eh_dono=(nivel == discord_admin.NIVEL_DONO),
-            coadmin=(nivel == discord_admin.NIVEL_COADMIN),
-            canal_id=canal_id,
-            guild_id=message.guild.id,
-            origem="discord",
-        )
-    # Painel de progresso. Nasce aqui e não dentro do laço porque o
-    # "digitando..." tem que começar ANTES da primeira chamada de LLM, que é
-    # justamente a parte da espera que ninguém vê acontecer.
     painel = None
     if _config.get("mostrar_progresso", True):
         try:
@@ -1029,6 +1132,7 @@ def _tentar_pedido_de_admin(
         resultado = modelo_module.responder_discord_com_ferramentas(
             mensagem=texto,
             nome_autor=nome_autor,
+            dono_user_id=dono_memoria,
             historico_canal=historico_fmt,
             nome_servidor=message.guild.name,
             nome_canal=getattr(message.channel, "name", ""),
@@ -1042,9 +1146,10 @@ def _tentar_pedido_de_admin(
             # de uma pergunta como "você consegue banir?" faria ela banir
             # alguém em vez de responder.
             parece_acao=bool(pendente) or era_ordem,
+            politica_ferramenta=classificacao_admin.politica,
+            motivo_classificacao=classificacao_admin.motivo,
             em_call=bool(_emily_em_call_ativa and _voice_client
                          and _voice_client.is_connected()),
-            incluir_servidor_mc=mc_liberado,
             contexto_membros=_contexto_de_quem_esta_falando(canal_id),
             on_progresso=(painel.evento if painel else None),
         )
@@ -1055,12 +1160,6 @@ def _tentar_pedido_de_admin(
             # painel não pode ficar com um passo eternamente "rodando" nem
             # deixar o "digitando..." ligado pra sempre.
             painel.finalizar()
-        if mc_liberado:
-            try:
-                import enxada
-                enxada.limpar_sessao()
-            except Exception:
-                pass
 
     # Registra ou limpa a promessa conforme a ação aconteceu ou não.
     #
@@ -1085,7 +1184,8 @@ def _tentar_pedido_de_admin(
 
     if aguardando_confirmacao:
         discord_admin.limpar_promessa(canal_id, message.author.id)
-    elif perguntou and nivel != discord_admin.NIVEL_NENHUM:
+    elif (perguntou and nivel != discord_admin.NIVEL_NENHUM
+          and (bool(pendente) or era_ordem)):
         # Ela pediu esclarecimento. A resposta que vier ("de texto, sobre
         # memes") não parece pedido de administração nenhum, então sem guardar
         # o pedido aqui a conversa morreria e o canal nunca seria criado.
@@ -1095,7 +1195,9 @@ def _tentar_pedido_de_admin(
             tipo=discord_admin.TIPO_PERGUNTA)
     elif resultado.agiu:
         discord_admin.limpar_promessa(canal_id, message.author.id)
-    elif nivel != discord_admin.NIVEL_NENHUM:
+    elif (nivel != discord_admin.NIVEL_NENHUM
+          and (bool(pendente) or era_ordem)
+          and getattr(resultado, "promessa_sem_acao", False)):
         discord_admin.registrar_promessa(
             canal_id, message.author.id, pendente or texto,
             tipo=discord_admin.TIPO_PROMESSA)
@@ -1108,9 +1210,18 @@ def _tentar_pedido_de_admin(
 
 
 async def _extrair_imagens_mensagem(message: discord.Message) -> list:
-    """Baixa os anexos de imagem da mensagem e retorna lista de dicts com base64 e media_type."""
+    """
+    Baixa os anexos de imagem da mensagem e retorna lista de dicts com base64,
+    media_type, caminho local e a URL original.
+
+    O caminho local existe porque as ferramentas de administração (ícone do
+    servidor, banner, emoji) precisam dos BYTES da imagem. A URL de anexo do
+    Discord hoje é assinada (?ex=...&is=...&hm=...) e a versão pelada — que o
+    modelo às vezes repassa de cabeça — devolve 404. Com o arquivo já salvo em
+    disco, a ferramenta lê direto e essa classe de erro inteira some.
+    """
     import base64
-    import aiohttp
+    import re as _re
 
     _TIPOS = {
         ".png":  "image/png",
@@ -1120,22 +1231,60 @@ async def _extrair_imagens_mensagem(message: discord.Message) -> list:
         ".webp": "image/webp",
     }
 
+    pasta = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "uploads_emily", "discord")
     imagens = []
     for anexo in message.attachments:
+        tipo_conteudo = str(getattr(anexo, "content_type", "") or "")
         ext = next((e for e in _TIPOS if anexo.filename.lower().endswith(e)), None)
+        if not ext and tipo_conteudo.startswith("image/"):
+            # Anexo de imagem com extensão fora da tabela (ex.: .jfif).
+            ext = ".png"
         if not ext:
             continue
+
+        dados = None
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(anexo.url) as resp:
-                    dados = await resp.read()
-                    imagens.append({
-                        "data":       base64.b64encode(dados).decode("utf-8"),
-                        "media_type": _TIPOS[ext],
-                    })
-                    print(f"[Discord] Imagem capturada: {anexo.filename} ({_TIPOS[ext]})")
+            # read() vai pela URL assinada que a API deu pra ESTE anexo — é a
+            # forma que nunca dá 404. O download cru fica de reserva.
+            dados = await anexo.read()
         except Exception as e:
-            print(f"[Discord] Erro ao baixar imagem {anexo.filename}: {e}")
+            print(f"[Discord] read() falhou pra {anexo.filename} ({e}); "
+                  f"tentando baixar direto.")
+            try:
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(anexo.url) as resp:
+                        if resp.status == 200:
+                            dados = await resp.read()
+            except Exception as e2:
+                print(f"[Discord] Erro ao baixar imagem {anexo.filename}: {e2}")
+
+        if not dados:
+            continue
+
+        item = {
+            "data":       base64.b64encode(dados).decode("utf-8"),
+            "media_type": (tipo_conteudo if tipo_conteudo.startswith("image/")
+                           else _TIPOS[ext]),
+            "nome":       anexo.filename,
+            "url":        anexo.url,
+        }
+
+        # Guarda em disco pra as ferramentas de admin usarem o arquivo pronto.
+        try:
+            os.makedirs(pasta, exist_ok=True)
+            seguro = _re.sub(r"[^A-Za-z0-9._-]", "_", anexo.filename) or "imagem"
+            caminho = os.path.join(pasta, f"{int(time.time() * 1000)}_{seguro}")
+            with open(caminho, "wb") as f:
+                f.write(dados)
+            item["caminho"] = caminho
+        except OSError as e:
+            print(f"[Discord] Não salvei o anexo em disco: {e}")
+
+        imagens.append(item)
+        print(f"[Discord] Imagem capturada: {anexo.filename} "
+              f"({item['media_type']}) -> {item.get('caminho') or 'só memória'}")
     return imagens
 
 
@@ -1191,10 +1340,10 @@ def _talvez_aprender_sobre(canal_id: int, message) -> None:
         if not perfil_discord.deve_extrair(autor.id, eh_dono=(autor.id == dono)):
             return
 
-        transcricao = _formatar_janela(canal_id)
+        transcricao = (getattr(message, "content", "") or "").strip()
         if not transcricao:
             return
-        nome = APELIDOS_MEMBROS.get(autor.id, autor.display_name)
+        nome = _nome_de(autor)
         print(f"[Discord] Travas do perfil liberaram: aprendendo sobre {nome}")
         perfil_discord.extrair_em_segundo_plano(autor.id, nome, transcricao)
     except Exception as e:
@@ -1330,7 +1479,8 @@ def _avaliar_e_responder_contexto(
                 if sucesso:
                     _emily_em_call_ativa = True
                     import voz as voz_module
-                    audio = voz_module.gerar_audio_bytes("Oi, cheguei!")
+                    audio = voz_module.gerar_audio_bytes(
+                        "Oi, cheguei!", para_call=True)
                     if audio:
                         await _tocar_pcm_async(audio, 44100, 1)
             if _loop:
@@ -1432,6 +1582,439 @@ def _enfileirar_mencao(canal_id: int, ultima_msg: str, nome_autor: str, message_
 
 
 # ─────────────────────────────────────────────────────────────────
+# PONTE DE CHAT — a Emily local mexendo no Discord a pedido do Vitor
+#
+# As ferramentas (ler_chat_discord, mandar_mensagem_discord,
+# responder_mensagem_discord, mandar_dm_discord, ver_canais_discord) vivem no
+# ferramentas.py, mas só aqui existe o client vivo. Todas são síncronas e
+# seguras pra chamar da thread do laço de ferramentas: despacham pra dentro
+# do loop do bot com run_coroutine_threadsafe e esperam o resultado.
+# ─────────────────────────────────────────────────────────────────
+
+def _pronto_discord() -> Optional[str]:
+    """Erro legível quando não dá pra mexer no Discord agora. None = pode."""
+    if not _pronto or _loop is None or _client.user is None:
+        return ("O Discord não está conectado agora. Confere se o bot está "
+                "ligado e tenta de novo daqui a pouco.")
+    return None
+
+
+def _nome_usuario(u) -> str:
+    """Nome de exibição de um User OU Member (User às vezes não tem)."""
+    return (getattr(u, "display_name", None)
+            or getattr(u, "name", None) or f"id {getattr(u, 'id', '?')}")
+
+
+def _achar_canal(servidor: str = "", canal: str = ""):
+    """Resolve (canal, erro) por nome. Nunca chuta: sem match claro, devolve
+    erro com as opções pra a Emily (ou o Vitor) escolher."""
+    alvo = (canal or "").strip().lstrip("#").lower()
+    serv_alvo = (servidor or "").strip().lower()
+    guilds = list(_client.guilds)
+    if serv_alvo:
+        casadas = [g for g in guilds if serv_alvo in g.name.lower()]
+        if not casadas:
+            return None, (f"Não achei servidor parecido com '{servidor}'. "
+                          "Servidores que eu vejo: "
+                          + ", ".join(g.name for g in guilds))
+        guilds = casadas
+    if not guilds:
+        return None, "Não estou em nenhum servidor."
+    if not alvo:
+        if len(guilds) == 1:
+            geral = next((c for c in guilds[0].text_channels
+                          if c.permissions_for(guilds[0].me).send_messages),
+                         None)
+            if geral:
+                return geral, ""
+        return None, ("Me diz em qual canal: "
+                      + ", ".join("#" + c.name
+                                  for g in guilds for c in g.text_channels[:12])
+                      + "…")
+    exatas, parecidas = [], []
+    for g in guilds:
+        for c in g.text_channels:
+            if c.name.lower() == alvo:
+                exatas.append(c)
+            elif alvo in c.name.lower():
+                parecidas.append(c)
+    achado = exatas or parecidas
+    if not achado:
+        return None, (f"Não achei canal '{canal}'"
+                      + (f" no servidor '{servidor}'" if serv_alvo else "")
+                      + ". Canais que eu vejo: "
+                      + ", ".join("#" + c.name
+                                  for g in guilds
+                                  for c in g.text_channels[:15]) + "…")
+    return achado[0], ""
+
+
+def ver_canais(servidor: str = "") -> str:
+    """Lista servidores e canais de texto, pra a Emily se localizar."""
+    erro = _pronto_discord()
+    if erro:
+        return erro
+    serv_alvo = (servidor or "").strip().lower()
+    guilds = [g for g in _client.guilds
+              if not serv_alvo or serv_alvo in g.name.lower()]
+    if serv_alvo and not guilds:
+        return (f"Não achei servidor parecido com '{servidor}'. "
+                "Servidores que eu vejo: "
+                + ", ".join(g.name for g in _client.guilds))
+    partes = []
+    for g in guilds:
+        nomes = [c.name for c in g.text_channels]
+        partes.append(f"{g.name}: " + ", ".join("#" + c for c in nomes[:20])
+                      + ("…" if len(nomes) > 20 else ""))
+    return "\n".join(partes) or "Não vi canais de texto."
+
+
+async def _ler_chat_async(canal, quantidade: int) -> str:
+    msgs = [m async for m in canal.history(
+        limit=min(max(int(quantidade or 20), 1), 50))]
+    msgs.reverse()
+    if not msgs:
+        return f"#{canal.name} está sem mensagens recentes."
+    linhas = []
+    for m in msgs:
+        nome = APELIDOS_MEMBROS.get(m.author.id, _nome_usuario(m.author))
+        linhas.append(f"{nome}: {m.content.strip() or '(anexo sem texto)'}")
+    return (f"Últimas {len(linhas)} mensagens em #{canal.name} "
+            f"({canal.guild.name}), da mais antiga pra mais recente:\n"
+            + "\n".join(linhas))
+
+
+def ler_chat_discord(canal: str = "", servidor: str = "",
+                     quantidade: int = 20) -> str:
+    erro = _pronto_discord()
+    if erro:
+        return erro
+    ch, erro_canal = _achar_canal(servidor, canal)
+    if ch is None:
+        return erro_canal
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _ler_chat_async(ch, quantidade), _loop)
+        return fut.result(timeout=40)
+    except Exception as e:  # noqa: BLE001
+        return f"Não consegui ler o chat: {type(e).__name__}: {e}"
+
+
+async def _enviar_mensagem_async(canal, texto: str) -> str:
+    limpo = texto.strip()
+    pedacos = [limpo[i:i + 1900] for i in range(0, len(limpo), 1900)]
+    for p in pedacos:
+        await canal.send(p)
+        await asyncio.sleep(0.8)
+    return f"Mandei em #{canal.name} ({canal.guild.name})."
+
+
+def mandar_mensagem_discord(canal: str, mensagem: str,
+                            servidor: str = "") -> str:
+    erro = _pronto_discord()
+    if erro:
+        return erro
+    if not (mensagem or "").strip():
+        return "A mensagem veio vazia."
+    ch, erro_canal = _achar_canal(servidor, canal)
+    if ch is None:
+        return erro_canal
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _enviar_mensagem_async(ch, mensagem), _loop)
+        return fut.result(timeout=30)
+    except discord.Forbidden:
+        return f"Sem permissão pra falar em #{ch.name} ({ch.guild.name})."
+    except Exception as e:  # noqa: BLE001
+        return f"Não consegui mandar: {type(e).__name__}: {e}"
+
+
+async def _responder_autor_async(canal, autor: str, texto: str) -> str:
+    alvo = (autor or "").strip().lower()
+    ultima = None
+    nome_achado = ""
+    async for m in canal.history(limit=100):
+        if m.author.id == _client.user.id:
+            continue
+        nome = APELIDOS_MEMBROS.get(m.author.id, _nome_usuario(m.author))
+        if alvo in nome.lower():
+            ultima = m
+            nome_achado = nome
+            break
+    if ultima is None:
+        return (f"Não achei mensagem recente de '{autor}' em #{canal.name} "
+                f"(olhei as últimas 100).")
+    await ultima.reply(texto[:1900])
+    return f"Respondi {nome_achado} em #{canal.name}."
+
+
+def responder_mensagem_discord(autor: str, resposta: str,
+                               canal: str = "", servidor: str = "") -> str:
+    erro = _pronto_discord()
+    if erro:
+        return erro
+    if not (resposta or "").strip():
+        return "A resposta veio vazia."
+    ch, erro_canal = _achar_canal(servidor, canal)
+    if ch is None:
+        return erro_canal
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _responder_autor_async(ch, autor, resposta), _loop)
+        return fut.result(timeout=40)
+    except Exception as e:  # noqa: BLE001
+        return f"Não consegui responder: {type(e).__name__}: {e}"
+
+
+def _procurar_pessoas(nome: str) -> list:
+    """
+    Pessoas conhecidas do bot cujo nome/apelido casa com a busca.
+
+    Um BOT não tem 'lista de amigos' (isso é de conta de usuário): o mais
+    próximo é a união de quem compartilha servidor com ele (membros, com o
+    intent de membros ligado) e quem já mandou DM (fica no cache de
+    usuários). É essa união que a busca cobre.
+    """
+    alvo = (nome or "").strip().lower()
+    if not alvo:
+        return []
+    achados: dict = {}
+    for guild in _client.guilds:
+        for m in guild.members:
+            if getattr(m, "bot", False):
+                continue
+            nomes = {str(getattr(m, "display_name", "") or "").lower(),
+                     str(getattr(m, "name", "") or "").lower()}
+            if any(alvo in n for n in nomes if n):
+                achados[m.id] = m
+    for u in list(_client.users):
+        if getattr(u, "bot", False) or u.id in achados:
+            continue
+        if alvo in _nome_usuario(u).lower():
+            achados[u.id] = u
+    return list(achados.values())
+
+
+async def _mandar_dm_async(user, texto: str) -> str:
+    limpo = texto.strip()
+    pedacos = [limpo[i:i + 1900] for i in range(0, len(limpo), 1900)]
+    for p in pedacos:
+        await user.send(p)
+        await asyncio.sleep(0.8)
+    return f"Mandei no direct de {_nome_usuario(user)}."
+
+
+def mandar_dm_discord(pessoa: str, mensagem: str,
+                      nome_exato: str = "") -> str:
+    erro = _pronto_discord()
+    if erro:
+        return erro
+    if not (mensagem or "").strip():
+        return "A mensagem veio vazia."
+    candidatas = _procurar_pessoas(pessoa)
+    alvo_exato = (nome_exato or "").strip().lower()
+    if alvo_exato:
+        candidatas = [c for c in candidatas
+                      if _nome_usuario(c).lower() == alvo_exato
+                      or str(getattr(c, "name", "")).lower() == alvo_exato]
+        if not candidatas:
+            return (f"Confirmei '{nome_exato}', mas já não achei ninguém com "
+                    "esse nick exato. Pede pro Vitor conferir a grafia.")
+    if not candidatas:
+        return (f"Não achei ninguém parecido com '{pessoa}'. Eu enxergo quem "
+                "compartilha servidor comigo e quem já me mandou direct.")
+    if len(candidatas) > 1:
+        lista = "\n".join(f"- {_nome_usuario(c)} "
+                          f"(@{getattr(c, 'name', '?')})"
+                          for c in candidatas[:8])
+        return ("Achei mais de uma pessoa com esse nome:\n" + lista +
+                "\nPergunta pro Vitor qual é a certa (o nick exato) e chama "
+                "de novo passando nome_exato.")
+    alvo = candidatas[0]
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            _mandar_dm_async(alvo, mensagem), _loop)
+        return fut.result(timeout=30)
+    except discord.Forbidden:
+        return (f"Achei {_nome_usuario(alvo)}, mas a pessoa não aceita "
+                "mensagem direta do bot (privacidade do Discord dela).")
+    except Exception as e:  # noqa: BLE001
+        return f"Não consegui mandar o direct: {type(e).__name__}: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────
+# DIRECT (DM) — a conversa privada 1:1
+#
+# Qualquer pessoa que mandar DM pro bot recebe resposta, como se tivesse
+# marcado ela. Três regras que o Vitor fixou:
+#   1. DEBOUNCE: mensagem nova reinicia um timer de alguns segundos; quando
+#      ele expira, a leva inteira vai pro modelo de uma vez (senão uma pessoa
+#      que digita em três pedaços receberia três respostas picadas).
+#   2. PRIVACIDADE TOTAL: o conteúdo não vai pro terminal, pro histórico,
+#      pra janela de contexto do servidor, pra moderação, pra lugar nenhum
+#      que o Vitor possa ler. O prompt da DM reza a mesma coisa pra ela.
+#   3. MEMÓRIA POR USUÁRIO: a mesma ficha de fatos do perfil_discord alimenta
+#      o direct, e o que rolar lá também alimenta a ficha.
+# ─────────────────────────────────────────────────────────────────
+
+_DM_ESPERA_SEGUNDOS = float(os.getenv("EMILY_DM_ESPERA", "4"))
+_dm_pendentes: dict = {}   # user_id -> {"msgs": [...], "ultima": msg, "timer": Timer}
+_dm_lock = threading.Lock()
+
+
+def _dm_autorizado(autor) -> bool:
+    """
+    DM só de quem compartilha servidor com o bot. O dono passa sempre
+    (verificado por ID, não por nome). Discord não expõe 'lista de amigos'
+    pra bot: servidor em comum é a fronteira de confiança que existe.
+    """
+    uid = autor.id
+    dono = int(_config.get("usuario_id", 0) or 0)
+    if dono and uid == dono:
+        return True
+    for guild in _client.guilds:
+        if guild.get_member(uid):
+            return True
+    return False
+
+
+def _dm_receber(message) -> None:
+    """Recebe uma DM e agenda a resposta com debounce."""
+    autor = message.author
+    if getattr(autor, "bot", False):
+        return
+    if not _config.get("responder_dm", True):
+        return
+    texto = message.content.strip()
+    if not texto:
+        return
+    if not _dm_autorizado(autor):
+        # Não é do círculo (sem servidor em comum): nem o nome vai pro log.
+        print("[Discord] DM ignorada: remetente sem servidor em comum.")
+        return
+    uid = autor.id
+    with _dm_lock:
+        pend = _dm_pendentes.setdefault(
+            uid, {"msgs": [], "ultima": None, "timer": None})
+        pend["msgs"].append(texto)
+        pend["ultima"] = message
+        if pend["timer"] is not None:
+            pend["timer"].cancel()
+        timer = threading.Timer(_DM_ESPERA_SEGUNDOS, _dm_responder,
+                                args=(uid,))
+        timer.daemon = True
+        pend["timer"] = timer
+    uid = autor.id
+    dono = int(_config.get("usuario_id", 0) or 0)
+    eh_dono = bool(dono) and uid == dono
+    # PRIVACIDADE: pro terminal vai só quem escreveu e o tamanho da leva.
+    print(f"[Discord] DM de {getattr(autor, 'name', uid)} "
+          f"({'DONO confirmado por ID' if eh_dono else 'contato'}"
+          f"{'' if eh_dono or not dono else f' (dono é {dono})'}"
+          f", {len(pend['msgs'])} na leva, respondendo em "
+          f"{_DM_ESPERA_SEGUNDOS:.0f}s)")
+    timer.start()
+
+
+def _dm_responder(uid: int) -> None:
+    """O timer venceu: a leva acumulada vai pro modelo e a resposta volta."""
+    with _dm_lock:
+        pend = _dm_pendentes.pop(uid, None)
+    if not pend or not pend["msgs"]:
+        return
+    mensagens = list(pend["msgs"])
+    message = pend["ultima"]
+    autor = message.author
+    nome = _nome_usuario(autor)
+    dono = int(_config.get("usuario_id", 0) or 0)
+    eh_dono = bool(dono) and uid == dono
+    try:
+        contexto = ""
+        if eh_dono:
+            # O Vitor usa a memória dele de sempre (memoria.py), não ficha
+            # de perfil — é a mesma memória que entra nas conversas no PC.
+            try:
+                import memoria as _mem
+                contexto = _mem.formatar_para_prompt()
+            except Exception:
+                contexto = ""
+        else:
+            try:
+                import perfil_discord
+                fatos = perfil_discord.fatos_de(uid)
+                if fatos:
+                    contexto = ("O que você já sabe dessa pessoa (da sua "
+                                "memória de usuários):\n- "
+                                + "\n- ".join(fatos[:6]))
+            except Exception:
+                pass
+
+        # Histórico de conversa com essa pessoa (o mesmo mecanismo de
+        # "abrir e lembrar" dos chats dela, só que privado da interface).
+        historico_txt = ""
+        try:
+            import historico_dm
+            historico_txt = historico_dm.formatar(uid)
+        except Exception:
+            pass
+
+        import modelo
+        resposta = modelo.responder_dm_discord(
+            mensagens=mensagens, nome=nome, user_id=uid,
+            contexto_membros=contexto, eh_dono=eh_dono,
+            historico_dm_txt=historico_txt)
+        resposta = (resposta or "").strip()
+        if resposta:
+            _dm_enviar(message, resposta)
+
+        # Guarda a troca no histórico da DM (as falas dele e as suas).
+        try:
+            import historico_dm
+            for m in mensagens:
+                historico_dm.adicionar(uid, nome, "pessoa", m)
+            if resposta:
+                historico_dm.adicionar(uid, nome, "emily", resposta)
+        except Exception as e:
+            print(f"[Discord] histórico de DM não salvou: {e}")
+
+        # Aprender sobre a pessoa, com as mesmas travas do servidor. O Vitor
+        # NÃO vira ficha de perfil: ele já tem a memória dele (memoria.py).
+        if not eh_dono:
+            try:
+                import perfil_discord
+                perfil_discord.observar(uid, autor.display_name, " ".join(mensagens),
+                                        falou_com_emily=True, eh_bot=False)
+                if perfil_discord.deve_extrair(uid):
+                    perfil_discord.extrair_em_segundo_plano(
+                        uid, nome, "\n".join(mensagens))
+            except Exception:
+                pass
+    except Exception as e:  # noqa: BLE001
+        print(f"[Discord] DM não respondida: {type(e).__name__}: {e}")
+
+
+def _dm_enviar(message, texto: str) -> None:
+    """Responde no direct, quebrado como pessoa digitando."""
+    import modelo as modelo_module
+    texto = modelo_module.remover_tags_fish(texto)
+    if not texto or not _loop:
+        return
+    partes = modelo_module.quebrar_resposta_discord(texto)
+
+    async def _enviar():
+        try:
+            for p in partes:
+                await message.channel.send(p)
+                await asyncio.sleep(1.2)
+        except discord.Forbidden:
+            print("[Discord] DM: a pessoa não aceita mensagem do bot.")
+        except Exception as e:
+            print(f"[Discord] Erro ao responder DM: {e}")
+
+    asyncio.run_coroutine_threadsafe(_enviar(), _loop)
+
+
+# ─────────────────────────────────────────────────────────────────
 # VOZ NA CALL
 # ─────────────────────────────────────────────────────────────────
 
@@ -1491,11 +2074,26 @@ async def _conectar_ouvindo(canal: discord.VoiceChannel):
     # da call estando "dentro" dela. Foi exatamente o loop de "Already connected
     # to a voice channel" no log.
     #
+    # MAS antes de matar, espera e olha de novo. O cliente foi criado com
+    # reconnect=True, então um is_connected() falso neste instante pode ser uma
+    # reconexão ACONTECENDO, não uma conexão morta — e disconnect(force=True)
+    # em cima dela derruba a call na frente de todo mundo. É o "desconecta
+    # sozinha do nada": a conexão daria um solavanco de meio segundo, o código
+    # viu caído, e forçou a saída de uma sessão que ficaria boa sozinha.
+    #
     # A espera depois do disconnect NÃO é enfeite: o Discord leva alguns segundos
     # pra derrubar a sessão de voz do lado do servidor, e reconectar antes disso
     # é o que produzia o TimeoutError no handshake do connect. Meio segundo era
     # curto demais.
     if ja_conectado is not None:
+        for _ in range(6):
+            await asyncio.sleep(0.5)
+            if ja_conectado.is_connected():
+                print(f"[Discord] A conexão que parecia meia-morta se recuperou "
+                      f"sozinha em '{canal.guild.name}'; adotando ela.")
+                if ja_conectado.channel and ja_conectado.channel.id != canal.id:
+                    await ja_conectado.move_to(canal)
+                return ja_conectado
         try:
             await ja_conectado.disconnect(force=True)
             print(f"[Discord] Limpei uma conexão de voz meia-morta em "
@@ -1587,12 +2185,70 @@ def _quem_esta_na_call() -> str:
     """Nomes de quem está na call agora, pro contexto do modelo."""
     if not _voice_client or not _voice_client.is_connected():
         return ""
-    nomes = [
-        APELIDOS_MEMBROS.get(m.id, m.display_name)
-        for m in _voice_client.channel.members
-        if not m.bot
-    ]
+    nomes = [_nome_de(m) for m in _voice_client.channel.members if not m.bot]
     return ", ".join(nomes)
+
+
+class _FontePCMTempoReal(discord.AudioSource):
+    """Entrega 20 ms por leitura sem bloquear o relógio do player do Discord.
+
+    O AudioPlayer tenta compensar leituras lentas disparando quadros acumulados
+    rapidamente. O FFmpeg pode bloquear esperando o próximo chunk do Fish;
+    portanto lemos o FFmpeg em outra thread e entregamos silêncio de 20 ms
+    enquanto ele não tem áudio. Não esperamos bufferizar a primeira fala.
+    """
+
+    _SILENCIO = bytes(3840)  # PCM16 estéreo, 48 kHz, 20 ms (discord.py)
+
+    def __init__(self, fonte: discord.AudioSource):
+        self._fonte = fonte
+        self._quadros = queue.Queue(maxsize=250)
+        self._terminou = threading.Event()
+        self._fechada = threading.Event()
+        self._leitora = threading.Thread(
+            target=self._ler_ffmpeg, daemon=True, name="discord-pcm-ffmpeg")
+        self._leitora.start()
+
+    def _ler_ffmpeg(self) -> None:
+        try:
+            while not self._fechada.is_set():
+                quadro = self._fonte.read()
+                if not quadro:
+                    break
+                while not self._fechada.is_set():
+                    try:
+                        self._quadros.put(quadro, timeout=0.1)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception as erro:
+            if not self._fechada.is_set():
+                print(f"[Discord] FFmpeg parou de ler PCM: {erro}")
+        finally:
+            self._terminou.set()
+
+    def read(self) -> bytes:
+        try:
+            return self._quadros.get_nowait()
+        except queue.Empty:
+            if self._terminou.is_set() or self._fechada.is_set():
+                # EOF pode chegar entre get_nowait e a consulta do evento.
+                # Confira a fila novamente para preservar o ultimo quadro.
+                try:
+                    return self._quadros.get_nowait()
+                except queue.Empty:
+                    return b""
+            return self._SILENCIO
+
+    def is_opus(self) -> bool:
+        return False
+
+    def cleanup(self) -> None:
+        if not self._fechada.is_set():
+            self._fechada.set()
+            limpar = getattr(self._fonte, "cleanup", None)
+            if limpar is not None:
+                limpar()
 
 
 async def _tocar_na_call_async(pcm: bytes, taxa: int, canais: int) -> bool:
@@ -1617,12 +2273,12 @@ async def _tocar_na_call_async(pcm: bytes, taxa: int, canais: int) -> bool:
             pass
 
     try:
-        fonte = discord.FFmpegPCMAudio(
+        fonte = _FontePCMTempoReal(discord.FFmpegPCMAudio(
             io.BytesIO(pcm),
             pipe=True,
             before_options=f"-f s16le -ar {taxa} -ac {canais}",
             options="-vn",
-        )
+        ))
         _voice_client.play(fonte, after=_fim)
     except Exception as e:
         print(f"[Discord] Erro ao tocar na call: {type(e).__name__}: {e}")
@@ -1657,7 +2313,8 @@ def tocar_na_call_bloqueando(pcm: bytes, taxa: int = 44100,
 
 
 def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
-                    modo_conversa: bool = False, quem_na_call: str = "") -> dict:
+                    modo_conversa: bool = False, quem_na_call: str = "",
+                    ao_decidir=None, ao_frase=None) -> dict:
     """
     A resposta dela pra uma fala da call, COM as ferramentas na mesa.
 
@@ -1692,6 +2349,24 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
     canal_voz = _voice_client.channel
     guild = canal_voz.guild
     membro = guild.get_member(user_id) if guild else None
+    if membro is not None and (getattr(membro, "display_name", None)
+                              or getattr(membro, "name", None)):
+        nome = _nome_de(membro)
+    dono = int(_config.get("usuario_id", 0) or 0)
+    eh_dono = bool(dono) and user_id == dono
+
+    # O perfil das pessoas importa na conversa comum também, não só quando uma
+    # ferramenta é usada. Este bloco é local/cacheado e não adiciona chamada de
+    # modelo ao caminho rápido.
+    contexto_membros = ""
+    try:
+        import perfil_discord
+        ids = [m.id for m in canal_voz.members if not m.bot]
+        contexto_membros = perfil_discord.contexto_de_membros(
+            ids, excluir=[dono] if dono else None)
+    except Exception as e:
+        print(f"[Discord] Contexto de membros da call indisponível: {e}")
+
     if membro is None:
         # Sem Member não há como saber o nível de acesso, e chutar seria dar
         # poder a quem não tem. Cai no caminho sem ferramenta, que só conversa.
@@ -1699,7 +2374,11 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
               f"na call sem ferramenta.")
         return modelo_module.responder_na_call(
             transcricao=transcricao, ultima_fala=fala, nome_autor=nome,
-            modo_conversa=modo_conversa, quem_esta_na_call=quem_na_call)
+            contexto_membros=contexto_membros,
+            modo_conversa=modo_conversa, quem_esta_na_call=quem_na_call,
+            dono_user_id=_memoria_dono(eh_dono, user_id),
+            nome_quem_falou=nome,
+            ao_decidir=ao_decidir, ao_frase=ao_frase)
 
     # ── CAMINHO RÁPIDO PARA CONVERSA ──
     #
@@ -1711,35 +2390,59 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
     # dar mais de uma volta.
     #
     # Então: só entra no caminho pesado quando a fala É de fato pedido de
-    # administração ou pergunta sobre o estado do servidor/Minecraft — que é
-    # exatamente o que parece_pedido_de_admin reconhece. Conversa comum vai pelo
-    # responder_na_call, que é UMA chamada leve e rápida, o mesmo caminho de
-    # antes de existir tool calling na call.
+    # administração, pesquisa/informação atual, ou ação útil do PC pedida pelo
+    # dono confirmado por ID. Conversa comum vai pelo responder_na_call, que é UMA
+    # chamada leve e rápida, o mesmo caminho de antes de existir tool calling na
+    # call.
     #
-    # Isso não perde a capacidade nova: "o servidor tá on?", "bane o fulano" e
-    # afins continuam caindo no caminho com ferramenta. Só a conversa é que para
-    # de pagar o custo dela.
-    precisa_ferramenta = discord_admin.parece_pedido_de_admin(
+    # Isso não perde capacidade: "o servidor tá on?", "pesquisa isso", "abre o
+    # navegador" (quando for o dono) e "bane o fulano" continuam caindo no caminho
+    # com ferramenta. Só a conversa é que para de pagar o custo dela.
+    import resto_call
+    fala_para_classificacao = resto_call.remover_vocativo_inicial(fala)
+    pede_ferramenta_util = modelo_module.fala_pede_ferramenta_na_call(
+        fala_para_classificacao, eh_dono=eh_dono)
+    pedido_admin_explicito = discord_admin.parece_ordem_de_admin(
         fala, dirigido_a_ela=True)
+    pedido_admin_amplo = discord_admin.parece_pedido_de_admin(
+        fala, dirigido_a_ela=True)
+    classificacao = cf.classificar(
+        fala_para_classificacao,
+        acao_explicita=bool(
+            pede_ferramenta_util or pedido_admin_explicito),
+        # A call já tem iniciativa espontânea própria e sem ferramenta. Não
+        # mandar desabafo/conversa ao catálogo pesado evita latência e ações por
+        # inferência de uma transcrição ruidosa.
+        permitir_iniciativa=False,
+    )
+    if pedido_admin_amplo and classificacao.proibe_ferramenta:
+        if discord_admin.parece_pergunta_de_capacidade(fala):
+            classificacao = cf.ClassificacaoFerramenta(
+                cf.FERRAMENTA_OPCIONAL,
+                "pergunta_de_capacidade_administrativa",
+            )
+        else:
+            classificacao = cf.ClassificacaoFerramenta(
+                cf.FERRAMENTA_OBRIGATORIA,
+                "consulta_factual_administrativa",
+            )
+    precisa_ferramenta = bool(
+        pedido_admin_amplo or classificacao.permite_ferramenta)
+    print(f"[CLASSIFICACAO-FERRAMENTA] canal=discord_call "
+          f"politica={classificacao.politica} motivo={classificacao.motivo} "
+          f"admin_amplo={pedido_admin_amplo} texto={fala[:80]!r}")
     if not precisa_ferramenta:
         print(f"[Discord] Call: '{fala[:50]}' é conversa; caminho rápido "
               f"(sem ferramenta).")
         return modelo_module.responder_na_call(
             transcricao=transcricao, ultima_fala=fala, nome_autor=nome,
-            modo_conversa=modo_conversa, quem_esta_na_call=quem_na_call)
+            contexto_membros=contexto_membros,
+            modo_conversa=modo_conversa, quem_esta_na_call=quem_na_call,
+            dono_user_id=_memoria_dono(eh_dono, user_id),
+            nome_quem_falou=nome,
+            ao_decidir=ao_decidir, ao_frase=ao_frase)
 
     nivel = discord_admin.nivel_do_membro(membro, _config)
-    mc_liberado = _mc_liberado_na_guild(guild)
-
-    contexto_membros = ""
-    try:
-        import perfil_discord
-        dono = int(_config.get("usuario_id", 0) or 0)
-        ids = [m.id for m in canal_voz.members if not m.bot]
-        contexto_membros = perfil_discord.contexto_de_membros(
-            ids, excluir=[dono] if dono else None)
-    except Exception as e:
-        print(f"[Discord] Contexto de membros da call indisponível: {e}")
 
 
     # origem="discord", NÃO uma origem nova de call. Isso é deliberado e é a
@@ -1751,11 +2454,10 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
     # possível pra não ter trava: qualquer um numa call, uma transcrição errada
     # de "apaga o canal", e não há mensagem escrita pra alguém revisar depois.
     #
-    # Com 'discord', a ferramenta destrutiva pede confirmação. O caminho de call
-    # não implementa o vaivém de confirmação, então na prática o que acontece é:
-    # ela diz que precisa confirmar e a ação NÃO executa. Isso é o resultado
-    # certo — destrutivo continua sendo coisa pra fazer pelo chat, onde fica
-    # escrito quem pediu e quem confirmou.
+    # Com 'discord', terceiros continuam precisando da confirmação escrita. A
+    # exceção experimental abaixo só existe para o dono CONFIRMADO PELO ID e só
+    # quando esta fala é uma ordem explícita. Conversa casual/transcrição incerta
+    # não seta autonomia_direta e portanto não executa destrutivo nenhum.
     discord_admin.definir_sessao(
         nivel=nivel,
         autor_id=user_id,
@@ -1763,22 +2465,11 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
         guild_id=guild.id,
         canal_id=canal_voz.id,
         origem="discord",
+        autonomia_direta=bool(
+            eh_dono and pedido_admin_explicito
+            and modelo_module.autonomia_experimental_ativa()
+        ),
     )
-    if mc_liberado:
-        try:
-            import enxada
-            enxada.definir_sessao(
-                autor_id=user_id,
-                autor_nome=nome,
-                eh_dono=(nivel == discord_admin.NIVEL_DONO),
-                coadmin=(nivel == discord_admin.NIVEL_COADMIN),
-                canal_id=canal_voz.id,
-                guild_id=guild.id,
-                origem="discord",
-            )
-        except Exception as e:
-            print(f"[Discord] Sessão do painel indisponível na call: {e}")
-            mc_liberado = False
 
     try:
         resultado = modelo_module.responder_discord_com_ferramentas(
@@ -1789,14 +2480,16 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
             nome_canal=canal_voz.name,
             nivel=nivel,
             eh_dono=(nivel == discord_admin.NIVEL_DONO),
-            # parece_acao=False: numa call a maior parte é conversa, e COBRAR
-            # ferramenta faria ela executar coisa a partir de uma frase jogada.
-            # O prompt de call já manda usar ferramenta quando a pergunta é de
-            # fato sobre o estado de algo.
-            parece_acao=False,
-            incluir_servidor_mc=mc_liberado,
+            # Pesquisa/ação útil explicitamente roteada precisa chamar ferramenta
+            # de verdade. Administração mantém a política antiga: o próprio laço
+            # decide se executa, para uma frase jogada não virar ação destrutiva.
+            parece_acao=classificacao.exige_ferramenta,
+            politica_ferramenta=classificacao.politica,
+            motivo_classificacao=classificacao.motivo,
             contexto_membros=contexto_membros,
             falada_na_call=True,
+            dono_user_id=_memoria_dono(
+                nivel == discord_admin.NIVEL_DONO, user_id),
         )
     except Exception as e:
         print(f"[Discord] Laço de ferramentas falhou na call: "
@@ -1804,12 +2497,6 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
         return vazio
     finally:
         discord_admin.limpar_sessao()
-        if mc_liberado:
-            try:
-                import enxada
-                enxada.limpar_sessao()
-            except Exception:
-                pass
 
     bruto = (getattr(resultado, "texto", "") or "").strip()
 
@@ -1821,12 +2508,13 @@ def _pensar_na_call(user_id: int, nome: str, fala: str, transcricao: str,
 
     fala_limpa, resto = modelo_module.encurtar_para_call(
         modelo_module.limpar_para_tts(bruto))
+    resto = modelo_module.remover_tags_fish(resto)
     if not fala_limpa:
         return vazio
 
     if getattr(resultado, "agiu", False):
         print(f"[Discord] Na call, executei ferramenta pra {nome}: "
-              f"'{fala[:50]}'")
+              f"'{fala_limpa[:50]}'")
 
     return {"responder": True, "resposta": fala_limpa, "detalhe_texto": resto}
 
@@ -1904,14 +2592,21 @@ async def _ligar_escuta_de_call() -> None:
     try:
         resto_call.definir_saidas(
             tocar=tocar_na_call_bloqueando,
+            tocar_stream=lambda texto, cancelar_se=None: __import__(
+                "voz").falar_na_call_stream(texto, cancelar_se=cancelar_se),
             mandar_texto=enviar_texto_discord,
             quem_na_call=_quem_esta_na_call,
             pensar=_pensar_na_call,
+            pensar_espontaneo=lambda transcricao, quem: __import__(
+                "modelo").iniciativa_na_call(transcricao, quem),
         )
         escuta_call.definir_reconexao(_pedir_reconexao_de_voz)
+        escuta_call.observar(_coletar_estilo_vitor_na_call)
+        escuta_call.observar(_aprender_com_call)
         # Cada entrada em call é uma conversa nova: linha aberta de call
-        # anterior não pode fazer ela responder alguém do nada.
+        # anterior nem transcrição velha podem fazer ela responder alguém do nada.
         resto_call.zerar_conversa()
+        escuta_call.zerar_historico()
 
         recado = await escuta_call.comecar_a_ouvir(_voice_client)
         print(f"[Discord] {recado}")
@@ -1934,6 +2629,42 @@ async def _ligar_escuta_de_call() -> None:
               f"{type(e).__name__}: {e}")
         traceback.print_exc()
         print("=" * 70)
+
+
+def _coletar_estilo_vitor_na_call(turno) -> None:
+    """Somente fala atribuída ao ID configurado, nunca nomes/apelidos."""
+    dono = int(_config.get("usuario_id", 0) or 0)
+    if dono and turno.user_id == dono:
+        import estilo_vitor
+        estilo_vitor.coletar(turno.texto, "fala", "call", autor_id=str(dono))
+        import perfil_discord
+        perfil_discord.aprender_associacao_explicitada(turno.texto)
+        perfil_discord.aprender_fato_explicitado_pelo_dono(turno.texto)
+
+
+def _aprender_com_call(turno) -> None:
+    """Observa cada turno transcrito por ID, mesmo quando Emily não responde."""
+    dono = int(_config.get("usuario_id", 0) or 0)
+    if not turno.texto or not turno.user_id or turno.user_id == dono:
+        return
+    import perfil_discord
+    membro = None
+    if _voice_client and _voice_client.is_connected():
+        membro = _voice_client.channel.guild.get_member(turno.user_id)
+    if membro is not None and membro.bot:
+        return
+    nome = (membro.display_name if membro is not None else turno.nome)
+    # A fala é matéria da ficha independentemente do gatilho de resposta;
+    # só uma chamada à Emily conta como interação para o limiar de extração.
+    import resto_call
+    perfil_discord.observar(
+        turno.user_id, nome, turno.texto,
+        falou_com_emily=resto_call.chamada_direta(turno.texto),
+        origem="call",
+    )
+    if perfil_discord.deve_extrair(turno.user_id):
+        perfil_discord.extrair_em_segundo_plano(
+            turno.user_id, nome, turno.texto)
 
 
 def _desligar_escuta_de_call() -> None:
@@ -1964,14 +2695,16 @@ async def _entrar_falar_e_sair(canal_voz: discord.VoiceChannel, texto: str) -> N
         while _voice_client.is_playing():
             await asyncio.sleep(0.1)
 
-        audio_bytes = voz_module.gerar_audio_bytes(texto)
+        audio_bytes = voz_module.gerar_audio_bytes(texto, para_call=True)
         if not audio_bytes:
             print("[Discord] gerar_audio_bytes retornou vazio!")
             return
 
         print(f"[Discord] Tocando áudio na call — {len(audio_bytes)} bytes")
 
-        _avisar_anti_eco(audio_bytes, 44100, 1, texto)
+        import modelo as modelo_module
+        _avisar_anti_eco(
+            audio_bytes, 44100, 1, modelo_module.remover_tags_fish(texto))
 
         source = discord.FFmpegPCMAudio(
             io.BytesIO(audio_bytes),
@@ -2031,15 +2764,15 @@ async def _buscar_historico_canal(canal: discord.TextChannel, limite: int = 100)
 
 _STATUS_MAP = {
     "aguardando": {
-        "activity": discord.Activity(type=discord.ActivityType.listening, name="o Vitor 👂"),
+        "activity": discord.Activity(type=discord.ActivityType.listening, name="vendo anime enquanto o vitor programa"),
         "status":   discord.Status.online,
     },
     "ouvindo": {
-        "activity": discord.Activity(type=discord.ActivityType.listening, name="o Vitor falar 🎙️"),
+        "activity": discord.Activity(type=discord.ActivityType.listening, name="hackeando o governo russo.."),
         "status":   discord.Status.online,
     },
     "falando": {
-        "activity": discord.Activity(type=discord.ActivityType.playing, name="respondendo o Vitor 💬"),
+        "activity": discord.Activity(type=discord.ActivityType.playing, name="jogando gta 6"),
         "status":   discord.Status.online,
     },
     "gravando": {
@@ -2139,13 +2872,157 @@ async def _tocar_pcm_async(audio_bytes: bytes, sample_rate: int = 22050, channel
     _avisar_anti_eco(audio_bytes, sample_rate, channels)
 
     try:
-        source = discord.FFmpegPCMAudio(
+        source = _FontePCMTempoReal(discord.FFmpegPCMAudio(
             io.BytesIO(audio_bytes),
             pipe=True,
-        )
+            before_options=f"-f s16le -ar {sample_rate} -ac {channels}",
+            options="-vn",
+        ))
         _voice_client.play(source)
     except Exception as e:
         print(f"[Discord] Erro ao tocar PCM: {e}")
+
+
+class _PipePCMDiscord:
+    """Arquivo bloqueante alimentado enquanto o Fish ainda sintetiza.
+
+    O ``FFmpegPCMAudio(pipe=True)`` lê este objeto numa thread própria. ``read``
+    espera novos pedaços em vez de devolver EOF quando a fila fica vazia; assim
+    o Discord começa a transmitir no primeiro chunk da Fish sem encerrar o
+    processo entre uma chegada e outra.
+    """
+
+    def __init__(self):
+        self._fila = queue.Queue()
+        self._pendente = bytearray()
+        self._fechado = False
+        self._aceitando = True
+
+    def write(self, dados: bytes) -> None:
+        if dados and self._aceitando:
+            self._fila.put(bytes(dados))
+
+    def close(self) -> None:
+        if self._aceitando:
+            self._aceitando = False
+            self._fila.put(None)
+
+    def read(self, tamanho: int = -1) -> bytes:
+        alvo = tamanho if tamanho and tamanho > 0 else 8192
+        if not self._pendente and not self._fechado:
+            pedaco = self._fila.get()
+            if pedaco is None:
+                self._fechado = True
+            else:
+                self._pendente.extend(pedaco)
+        # Depois do primeiro pedaço, agrega apenas o que JÁ chegou. Nunca espera
+        # completar BLOCKSIZE: essa espera somaria latência ao primeiro som.
+        while len(self._pendente) < alvo and not self._fechado:
+            try:
+                pedaco = self._fila.get_nowait()
+            except queue.Empty:
+                break
+            if pedaco is None:
+                self._fechado = True
+                break
+            self._pendente.extend(pedaco)
+        if not self._pendente:
+            return b""
+        quantidade = min(alvo, len(self._pendente))
+        saida = bytes(self._pendente[:quantidade])
+        del self._pendente[:quantidade]
+        return saida
+
+
+async def _tocar_stream_pcm_async(pipe: _PipePCMDiscord, sample_rate: int,
+                                  channels: int, texto: str = "") -> bool:
+    """Liga um pipe PCM ao FFmpeg e só termina depois do último chunk."""
+    global _voice_client
+    if not _voice_client or not _voice_client.is_connected():
+        canal_voz_id = _config.get("canal_voz_id", 0)
+        if not canal_voz_id or not await _conectar_voz(canal_voz_id):
+            pipe.close()
+            return False
+
+    while _voice_client.is_playing():
+        await asyncio.sleep(0.05)
+
+    acabou = asyncio.Event()
+
+    def _fim(erro):
+        if erro:
+            print(f"[Discord] Erro no fim do stream PCM: {erro}")
+        try:
+            _loop.call_soon_threadsafe(acabou.set)
+        except RuntimeError:
+            pass
+
+    try:
+        fonte = _FontePCMTempoReal(discord.FFmpegPCMAudio(
+            pipe,
+            pipe=True,
+            before_options=f"-f s16le -ar {sample_rate} -ac {channels}",
+            options="-vn",
+        ))
+        _voice_client.play(fonte, after=_fim)
+        await acabou.wait()
+        return True
+    except Exception as e:
+        pipe.close()
+        print(f"[Discord] Erro ao tocar stream PCM: {type(e).__name__}: {e}")
+        return False
+
+
+class StreamPCMDiscord:
+    """Handle thread-safe de uma fala incremental no canal de voz."""
+
+    def __init__(self, sample_rate: int, channels: int, texto: str = ""):
+        self._pipe = _PipePCMDiscord()
+        self._sample_rate = max(1, int(sample_rate))
+        self._channels = max(1, int(channels))
+        self._texto = texto
+        self._total = 0
+        self._futuro = asyncio.run_coroutine_threadsafe(
+            _tocar_stream_pcm_async(
+                self._pipe, self._sample_rate, self._channels, texto),
+            _loop,
+        )
+
+    def escrever(self, dados: bytes) -> None:
+        if not dados:
+            return
+        self._total += len(dados)
+        try:
+            import resto_call
+            if resto_call.ligada():
+                duracao = self._total / float(
+                    self._sample_rate * self._channels * 2)
+                resto_call.silenciar_por(duracao, self._texto)
+        except Exception:
+            pass
+        self._pipe.write(dados)
+
+    def fechar(self, esperar: bool = False) -> bool:
+        self._pipe.close()
+        if not esperar:
+            return True
+        try:
+            return bool(self._futuro.result(timeout=120))
+        except Exception as e:
+            print(f"[Discord] Falha ao fechar stream PCM: {type(e).__name__}: {e}")
+            return False
+
+
+def abrir_stream_pcm_discord(sample_rate: int = 44100, channels: int = 1,
+                             texto: str = ""):
+    """Abre uma fala incremental; ``None`` quando o bot não está disponível."""
+    if not _pronto or not _loop:
+        return None
+    try:
+        return StreamPCMDiscord(sample_rate, channels, texto)
+    except Exception as e:
+        print(f"[Discord] Não consegui abrir stream PCM: {type(e).__name__}: {e}")
+        return None
 
 
 async def _enviar_texto_async(texto: str) -> None:
@@ -2177,14 +3054,26 @@ def definir_callback_texto(fn) -> None:
     _callback_texto = fn
 
 
-def ativar_escuta_discord() -> None:
-    _escuta_discord_ativa.set()
-    print("[Discord] Escuta de texto ativada!")
+def ativar_escuta_discord() -> bool:
+    import discord_monitor
+    ativo = discord_monitor.selecionar(True)
+    print("[Discord] Escuta de texto ativada!" if ativo else
+          "[Discord] Não consegui transferir a escuta para este PC.")
+    return ativo
 
 
-def desativar_escuta_discord() -> None:
-    _escuta_discord_ativa.clear()
-    print("[Discord] Escuta de texto desativada!")
+def desativar_escuta_discord() -> bool:
+    import discord_monitor
+    desligado = discord_monitor.selecionar(False)
+    print("[Discord] Escuta de texto desativada!" if desligado else
+          "[Discord] Não consegui desligar a escuta sincronizada.")
+    return desligado
+
+
+def escuta_ativa() -> bool:
+    """True se a Emily está acompanhando/respondendo o chat do Discord agora.
+    Fonte da verdade pra o toggle da interface refletir o estado real."""
+    return _escuta_discord_ativa.is_set()
 
 
 def desconectar_voz() -> None:
@@ -2196,6 +3085,7 @@ def desconectar_voz() -> None:
         if _voice_client and _voice_client.is_connected():
             _desligar_escuta_de_call()
             await _voice_client.disconnect()
+            _voice_client = None
             print("[Discord] Bot desconectado do canal de voz.")
 
     future = asyncio.run_coroutine_threadsafe(_desconectar(), _loop)
@@ -2274,6 +3164,9 @@ def listar_calls() -> str:
 
 @_client.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if os.getenv("EMILY_RUNTIME_CLOUD") == "1" and _client.user and member.id == _client.user.id:
+        from cloud_runtime_server import registrar_estado_voz
+        registrar_estado_voz(after.channel)
     global _emily_em_call_ativa
     usuario_id = _config.get("usuario_id", 0)
 
@@ -2336,6 +3229,10 @@ async def _conectar_voz(canal_id: int) -> bool:
 def inicializar() -> None:
     global _config
 
+    from cloud_runtime_client import hospedado_na_oracle
+    if hospedado_na_oracle() and os.getenv("EMILY_RUNTIME_CLOUD") != "1":
+        print("[Discord] Bot hospedado na Oracle; controle remoto disponível.")
+        return
     _config = _carregar_config()
     token   = _config.get("token", "")
 
@@ -2354,3 +3251,7 @@ def inicializar() -> None:
 
     threading.Thread(target=_rodar, daemon=True).start()
     print("[Discord] Bot iniciando em background...")
+
+
+from cloud_runtime_client import instalar_proxy as _instalar_proxy_oracle
+_instalar_proxy_oracle(globals())

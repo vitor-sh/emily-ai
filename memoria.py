@@ -3,21 +3,25 @@ memoria.py — Sistema de memória inteligente da Emily
 A Emily extrai fatos relevantes de QUALQUER conversa/ação automaticamente.
 """
 
+import hashlib
 import json
 import os
 import re
 import threading
 import datetime
+import time
 from typing import Any, Dict, List, Optional
 
+from emily_paths import arquivo_dados
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ARQUIVO  = os.path.join(BASE_DIR, "memoria.json")
+ARQUIVO  = str(arquivo_dados("memoria.json"))
 
 # ──────────────────────────────────────────────────────────────
 # Estrutura padrão da memória
 # ──────────────────────────────────────────────────────────────
 _ESTRUTURA_PADRAO: Dict[str, Any] = {
-    "nome_usuario": "Vitor",
+    "nome_usuario": os.getenv("EMILY_USUARIO", "Vitor"),
     "fatos":        [],          # lista de strings com fatos sobre o usuário
     "preferencias": {},          # {"jogos": [...], "apps": [...], ...}
     "pedidos_frequentes": {},    # {"organizar downloads": 3, ...}
@@ -25,16 +29,23 @@ _ESTRUTURA_PADRAO: Dict[str, Any] = {
 }
 
 # Lock para evitar race conditions em gravações concorrentes
-_lock = threading.Lock()
+_lock = threading.RLock()   # reentrante: sync chama salvar_memoria dentro do lock
 
 
 # ──────────────────────────────────────────────────────────────
 # I/O
 # ──────────────────────────────────────────────────────────────
 
+def _memoria_vazia() -> Dict[str, Any]:
+    # Cópia independente: dict() raso compartilhava a lista padrão de fatos
+    # entre arquivos/sessões, e uma sync podia "vazar" fatos entre perfis.
+    return {k: type(v)() if isinstance(v, (list, dict)) else v
+            for k, v in _ESTRUTURA_PADRAO.items()}
+
+
 def carregar_memoria() -> Dict[str, Any]:
     if not os.path.exists(ARQUIVO):
-        return dict(_ESTRUTURA_PADRAO)
+        return _memoria_vazia()
     try:
         with open(ARQUIVO, "r", encoding="utf-8") as f:
             dados = json.load(f)
@@ -44,14 +55,25 @@ def carregar_memoria() -> Dict[str, Any]:
                 dados[k] = v if not isinstance(v, (list, dict)) else type(v)()
         return dados
     except (json.JSONDecodeError, OSError):
-        return dict(_ESTRUTURA_PADRAO)
+        return _memoria_vazia()
 
 
 def salvar_memoria(memoria: Dict[str, Any]) -> None:
+    try:
+        import modo_demo
+        if modo_demo.ativo():
+            return
+    except Exception:
+        pass
     with _lock:
         memoria["ultima_atualizacao"] = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
-        with open(ARQUIVO, "w", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(ARQUIVO), exist_ok=True)
+        temporario = ARQUIVO + ".tmp"
+        with open(temporario, "w", encoding="utf-8") as f:
             json.dump(memoria, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporario, ARQUIVO)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -129,18 +151,23 @@ def adicionar_fato(fato: str, usar_llm: bool = True) -> bool:
 
     fatos.append(fato)
     mem["fatos"] = fatos
+    # Re-adicionar um fato apagado revive ele: tombstone fora.
+    mem.get("apagados", {}).pop(_hash_fato(fato), None)
     salvar_memoria(mem)
     print(f"[MEMORIA] Novo fato salvo: {fato}")
     return True
 
 
 def remover_fato(fato: str) -> bool:
-    """Remove um fato exato da memória."""
+    """Remove um fato exato da memória (e registra tombstone pra sincronização)."""
     mem = carregar_memoria()
     fatos = mem.get("fatos", [])
     if fato in fatos:
         fatos.remove(fato)
         mem["fatos"] = fatos
+        apagados = mem.setdefault("apagados", {})
+        apagados[_hash_fato(fato)] = time.time()
+        _podar_apagados(apagados)
         salvar_memoria(mem)
         return True
     return False
@@ -152,6 +179,9 @@ def remover_fato_por_indice(idx: int) -> bool:
     if 0 <= idx < len(fatos):
         removido = fatos.pop(idx)
         mem["fatos"] = fatos
+        apagados = mem.setdefault("apagados", {})
+        apagados[_hash_fato(removido)] = time.time()
+        _podar_apagados(apagados)
         salvar_memoria(mem)
         print(f"[MEMORIA] Fato removido: {removido}")
         return True
@@ -162,12 +192,105 @@ def listar_fatos() -> List[str]:
     return carregar_memoria().get("fatos", [])
 
 
+# ─────────────────────────────────────────────────────────────
+# Sincronização com o celular
+# ─────────────────────────────────────────────────────────────
+
+MAX_FATOS = 200            # teto de fatos (o celular usa o mesmo número)
+TTL_APAGADOS = 30 * 24 * 3600   # tombstone de exclusão vale 30 dias
+
+
+def _hash_fato(texto: str) -> str:
+    """
+    Chave estável de um fato: sha256 do texto aparado.
+    O celular calcula O MESMO hash (MessageDigest SHA-256 em Kotlin) — os dois
+    lados conversam por hash, e a exclusão viaja como tombstone {hash: quando}.
+    """
+    return hashlib.sha256((texto or "").strip().encode("utf-8")).hexdigest()
+
+
+def _podar_apagados(apagados: Dict[str, float]) -> None:
+    agora = time.time()
+    for velho in [k for k, v in apagados.items() if v < agora - TTL_APAGADOS]:
+        del apagados[velho]
+
+
+def sincronizar_externa(fatos_externos: List[Any], apagados_externos: Dict[str, float]) -> Dict[str, Any]:
+    """
+    Une a memória daqui com a do celular em UMA chamada (empurra e puxa junto).
+
+    Fatos só entram ou saem (nunca são editados), e cada fato do celular diz se
+    foi CRIADO/EDITADO lá (local_novo=True) ou apenas importado daqui e intacto
+    (local_novo=False). Isso resolve tudo SEM comparar relógios entre máquinas:
+
+      - local_novo=True  → intenção explícita do usuário no celular: vence
+        qualquer tombstone (revive) e entra se ainda não existir;
+      - local_novo=False → o celular só reconfirma o que veio daqui: se o PC
+        apagou (tombstone), continua apagado;
+      - exclusões do celular chegam como tombstone {hash: quando} e são unidas
+        aos daqui (30 dias de validade), apagando o fato nos dois lados.
+
+    Determinístico, sem LLM. Devolve o ESTADO FINAL (o celular assume por
+    inteiro e limpa as flags locais).
+    """
+    with _lock:
+        mem = carregar_memoria()
+        apagados = mem.setdefault("apagados", {})
+        _podar_apagados(apagados)
+        # 1) tombstones do celular: união, mantendo o mais recente por hash
+        for h, quando in (apagados_externos or {}).items():
+            apagados[h] = max(float(quando or 0), apagados.get(h, 0))
+        _podar_apagados(apagados)
+
+        atuais = list(mem.get("fatos", []))
+        por_hash = {_hash_fato(f): f for f in atuais}
+        # 2) fatos do celular
+        for item in (fatos_externos or []):
+            if isinstance(item, dict):
+                texto = str(item.get("texto") or "").strip()
+                local_novo = bool(item.get("local_novo"))
+            else:
+                texto = str(item or "").strip()
+                local_novo = False
+            if not texto:
+                continue
+            h = _hash_fato(texto)
+            if local_novo:
+                # intenção explícita no celular: vence tombstone e entra
+                apagados.pop(h, None)
+                if h not in por_hash:
+                    atuais.append(texto)
+                    por_hash[h] = texto
+            else:
+                # reconfirmação: só entra se NÃO estiver apagado
+                if h in apagados:
+                    continue
+                if h not in por_hash:
+                    atuais.append(texto)
+                    por_hash[h] = texto
+        # 3) exclusões: fato daqui que virou tombstone sai
+        atuais = [f for f in atuais if _hash_fato(f) not in apagados]
+        # 4) teto de segurança
+        if len(atuais) > MAX_FATOS:
+            atuais = atuais[-MAX_FATOS:]
+
+        mem["fatos"] = atuais
+        mem["apagados"] = apagados
+        salvar_memoria(mem)
+        return {"fatos": list(atuais), "apagados": dict(apagados)}
+
 # ──────────────────────────────────────────────────────────────
 # Pedidos frequentes
 # ──────────────────────────────────────────────────────────────
 
 def registrar_pedido(pedido: str) -> None:
     """Incrementa o contador de um tipo de pedido."""
+    try:
+        import modo_demo
+        if modo_demo.ativo():
+            return
+    except Exception:
+        pass
     if not pedido:
         return
     mem = carregar_memoria()
@@ -191,7 +314,8 @@ def formatar_para_prompt(memoria: Optional[Dict[str, Any]] = None) -> str:
     if not memoria:
         return ""
 
-    linhas = ["[O que você sabe sobre o Vitor:]"]
+    nome = memoria.get("nome_usuario") or os.getenv("EMILY_USUARIO", "Vitor")
+    linhas = [f"[O que você sabe sobre {nome}:]"]
 
     if memoria.get("nome_usuario"):
         linhas.append(f"- Nome: {memoria['nome_usuario']}")
@@ -228,31 +352,30 @@ def lembrar_nome(memoria: Optional[Dict[str, Any]] = None) -> str:
 # ──────────────────────────────────────────────────────────────
 
 def _prompt_extracao(contexto: str) -> str:
-    return f"""Analise esta conversa/ação entre o usuário Vitor e sua assistente Emily.
+    nome = os.getenv("EMILY_USUARIO", "Vitor")
+    return f"""Analise esta conversa entre o usuário {nome} e sua assistente Emily.
 
 CONTEXTO:
 {contexto}
 
-Sua tarefa é extrair APENAS fatos pessoais relevantes sobre o Vitor que merecem ser lembrados a longo prazo.
+Sua tarefa é decidir se há ALGO REALMENTE RELEVANTE sobre {nome} que mereça ser lembrado a longo prazo. Por padrão, a resposta deve ser vazia ([]). Só extraia fatos se FOR realmente importante e DURÁVEL.
 
-Exemplos do que vale guardar:
-- Gostos, preferências, hobbies (ex: "Gosta de jogos de RPG")
-- Habilidades, profissão, área de estudo (ex: "Programa em Python")
-- Hábitos recorrentes (ex: "Costuma trabalhar à noite")
-- Informações pessoais relevantes (ex: "Tem um monitor ultrawide")
-- Preferências de comportamento da Emily (ex: "Prefere respostas diretas")
+REGRAS RÍGIDAS — extraia APENAS se encaixar em UMA das categorias abaixo:
 
-NÃO extraia:
-- Coisas triviais ou de uma só vez
-- Comandos técnicos pontuais
-- Perguntas que não revelam preferência
-- Fatos sobre terceiros que não sejam relevantes pro Vitor
+1. Dados biográficos dele: idade, profissão, cidade, onde estuda — algo PERMANENTE
+2. Gostos e preferências FORTES: algo que ele ama ou odeia de verdade, não "até que gosto"
+3. Preferências de comportamento DA EMILY: como ela deve agir ("não usa mais Kiro", "prefere respostas curtas")
+4. Informações de saúde, alergias, limitações físicas
+5. Algo que ele PEDIU EXPLICITAMENTE pra ser lembrado ("guarda aí", "lembra disso", "não esquece")
+
+NÃO extraia NUNCA:
+- Coisas triviais que ele disse uma vez só ("viu um vídeo", "ouviu uma música")
+- O contexto imediato da conversa ("ele perguntou sobre X", "pediu pra tocar Y")
+- Preferências passageiras ou hipotéticas
+- Qualquer coisa que não seja um traço durável da personalidade, gosto ou vida dele
 
 Responda SOMENTE com uma lista JSON de strings, sem explicações.
-Se não houver nada relevante, responda com: []
-
-Exemplo de resposta válida:
-["Gosta de jogos de RPG e estratégia", "Programa em Python e JavaScript"]"""
+Se NÃO houver nada relevante, responda com: []"""
 
 
 def extrair_fatos_da_conversa(usuario: str, emily: str) -> List[str]:
@@ -307,11 +430,27 @@ def extrair_fatos_de_acao(tipo_acao: str, detalhes: str) -> List[str]:
     return fatos
 
 
+# Controla a frequência da extração automática: a cada N chamadas em que não
+# houve pedido explícito, uma única tenta extrair. Sem isto, TODA resposta
+# disparava uma chamada LLM de extração e acumulava fatos triviais.
+_contador_extracao = {"n": 0}
+_PASSOS_ENTRE_EXTRACOES = 6
+
+
+def _deve_extrair_agora() -> bool:
+    _contador_extracao["n"] += 1
+    return _contador_extracao["n"] % _PASSOS_ENTRE_EXTRACOES == 0
+
+
 def processar_conversa_async(usuario: str, emily: str) -> None:
     """
     Extrai fatos da conversa em background sem bloquear a UI.
-    Chamado após cada resposta completa da Emily.
+    Chamado após cada resposta completa da Emily, mas só tenta a cada N
+    mensagens (não em toda). O prompt já é rígido — por padrão devolve [].
     """
+    if not _deve_extrair_agora():
+        return
+
     def _worker():
         fatos = extrair_fatos_da_conversa(usuario, emily)
         novos = 0

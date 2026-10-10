@@ -1,0 +1,3173 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emily</title>
+<style>html,body{background:#1c1b19}body{opacity:0}</style>
+<script>
+  /* Cache-busting. A WebView2 cacheia estilo.css e app.js POR URL, e servia a
+     versão velha a cada mudança — o design mudava no arquivo e não na tela.
+     Como é app local lendo arquivo local, reler a cada abertura custa nada e
+     garante que a tela reflita o código. document.write aqui, durante o parse
+     do head, carrega o CSS de forma bloqueante (sem flash) e o JS em seguida. */
+  <style>/* ════════════════════════════════════════════════════════════════
+   estilo.css — o design da Emily
+
+   A paleta é NEUTRA E QUENTE, não azul-arroxeada. Era o roxo em seis
+   lugares por tela que fazia a interface antiga parecer "de gamer":
+   acento usado seis vezes deixa de ser acento e vira fundo.
+
+   Regra que este arquivo segue: --acento aparece no MÁXIMO em dois
+   elementos por tela. Botão primário é neutro. Borda é 1px quase
+   invisível, sem glow. Quem dá hierarquia é espaço e peso de fonte,
+   não cor.
+   ════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* Superfícies, da mais funda pra mais alta */
+  --bg:        #1c1b19;
+  --bg-side:   #171614;
+  --bg-raise:  #232220;
+  --bg-hover:  #2b2926;
+  --bg-active: #322f2b;
+
+  /* Linhas: uma só, e fina */
+  --line:      #302d29;
+  --line-forte:#3d3935;
+
+  /* Texto quente, nunca branco puro */
+  --txt:       #edebe7;
+  --txt-2:     #a5a19a;
+  --txt-3:     #6e6a63;
+
+  /* O acento único */
+  --acento:    #c96442;
+  --acento-mo: #d9795a;
+  --acento-fu: rgba(201,100,66,.14);
+
+  /* Semânticos, só pra estado */
+  --ok:        #7fae76;
+  --aviso:     #d3a35c;
+  --erro:      #cf6b5c;
+
+  /* Tipografia */
+  --sans: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --serif: Georgia, "Times New Roman", serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  /* Ritmo: escala de 4 */
+  --r1: 4px;  --r2: 8px;  --r3: 12px; --r4: 16px;
+  --r5: 24px; --r6: 32px; --r7: 48px; --r8: 64px;
+
+  --raio:   10px;
+  --raio-g: 14px;
+  --raio-p: 6px;
+
+  /* Movimento. Um easing só, pra tudo parecer o mesmo produto. */
+  --mola: cubic-bezier(.32, .72, 0, 1);
+  --rapido: 120ms var(--mola);
+  --medio:  220ms var(--mola);
+  --lento:  380ms var(--mola);
+
+  --barra-h: 44px;
+  --lateral-w: 264px;
+  --leitura: 720px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* O atributo hidden PERDE de qualquer regra de display do autor.
+   `[hidden]` é só `display:none` na folha do navegador, com especificidade
+   zero — então `.modal-fundo { display: grid }` ganhava dele e o fundo do
+   modal, um preto de 60% em cima de tudo, ficava visível desde o boot:
+   a interface parecia "apagada" e não aceitava um clique, porque a camada
+   invisível comia todos. Mesmo problema no `.anexos { display: flex }`.
+   Esta regra tem que vir ANTES dos componentes e é o único !important
+   do arquivo. */
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--txt);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* A janela toda entra com um fade curto: abrir com o conteúdo já
+   montado e imóvel dá a impressão de travamento. */
+body { opacity: 1; transition: opacity var(--lento); }
+body.carregando { opacity: 0; }
+
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+input, textarea { font: inherit; color: inherit; background: none; border: 0; outline: 0; }
+svg { width: 100%; height: 100%; fill: none; stroke: currentColor;
+      stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+::selection { background: var(--acento-fu); }
+
+/* Scrollbar discreta: a antiga desenhava uma barra clara no meio da
+   coluna de configurações e cortava a tela em duas. */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: transparent; border-radius: 99px;
+  border: 3px solid transparent; background-clip: content-box;
+  transition: background var(--medio);
+}
+*:hover::-webkit-scrollbar-thumb { background: #3a3733; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #4a4640 !important; background-clip: content-box; }
+
+/* ════════════════════════════════════════════════════════════════
+   BARRA DE TÍTULO
+   A antiga tinha avatar + nome à esquerda e uma pílula verde grande
+   encostada nos controles de janela — dois grupos clicáveis brigando
+   pelo mesmo canto. Agora o status é um ponto pequeno, e a identidade
+   dela não é repetida: já está no centro da tela e na sidebar.
+   ════════════════════════════════════════════════════════════════ */
+
+.barra {
+  height: var(--barra-h);
+  display: flex; align-items: center;
+  padding-left: var(--r2);
+  background: var(--bg-side);
+  border-bottom: 1px solid var(--line);
+  user-select: none;
+  position: relative; z-index: 20;
+}
+.barra-arrasta { flex: 1; height: 100%; }
+.barra-esq, .barra-dir { display: flex; align-items: center; gap: var(--r1); }
+.barra-dir { padding-right: var(--r1); }
+
+.icone-btn {
+  width: 30px; height: 30px; padding: 7px;
+  border-radius: var(--raio-p);
+  color: var(--txt-2);
+  transition: background var(--rapido), color var(--rapido);
+}
+.icone-btn:hover { background: var(--bg-hover); color: var(--txt); }
+.icone-btn:active { transform: scale(.94); }
+.icone-btn.mini { width: 22px; height: 22px; padding: 5px; }
+
+.janela-btn {
+  width: 34px; height: 30px; padding: 10px;
+  border-radius: var(--raio-p);
+  color: var(--txt-3);
+  transition: background var(--rapido), color var(--rapido);
+}
+.janela-btn:hover { background: var(--bg-hover); color: var(--txt); }
+.janela-btn.perigo:hover { background: var(--erro); color: #fff; }
+
+.status {
+  display: flex; align-items: center; gap: 7px;
+  margin-right: var(--r3); padding: 0 var(--r2);
+  font-size: 12px; color: var(--txt-2);
+  white-space: nowrap; max-width: 260px;
+}
+.status-txt { overflow: hidden; text-overflow: ellipsis; }
+.status-ponto {
+  width: 7px; height: 7px; flex: 0 0 7px; border-radius: 99px;
+  background: var(--txt-3);
+  transition: background var(--medio);
+}
+/* Só o estado ATIVO ganha cor e movimento. Parado é cinza e quieto —
+   status que pisca sem parar vira ruído e deixa de comunicar. */
+.status[data-e="ocupada"]   .status-ponto,
+.status[data-e="pensando"]  .status-ponto { background: var(--aviso); animation: pulso 1.4s ease-in-out infinite; }
+.status[data-e="falando"]   .status-ponto { background: var(--ok);    animation: pulso 1.1s ease-in-out infinite; }
+.status[data-e="ouvindo"]   .status-ponto,
+.status[data-e="gravando"]  .status-ponto { background: var(--erro);  animation: pulso .8s ease-in-out infinite; }
+.status[data-e="monitorando"] .status-ponto { background: var(--acento); animation: pulso 2s ease-in-out infinite; }
+.status[data-e="erro"] .status-ponto { background: var(--erro); }
+
+@keyframes pulso {
+  0%, 100% { opacity: 1;   box-shadow: 0 0 0 0 currentColor; }
+  50%      { opacity: .55; box-shadow: 0 0 0 3px transparent; }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   ESQUELETO
+   ════════════════════════════════════════════════════════════════ */
+
+.corpo { display: flex; height: calc(100% - var(--barra-h)); }
+
+.lateral {
+  width: var(--lateral-w); flex: 0 0 var(--lateral-w);
+  display: flex; flex-direction: column;
+  background: var(--bg-side);
+  border-right: 1px solid var(--line);
+  padding: var(--r3) var(--r2) 0;
+  transition: margin-left var(--medio), opacity var(--medio);
+}
+body.sem-lateral .lateral { margin-left: calc(var(--lateral-w) * -1); opacity: 0; }
+
+/* Alça de redimensionar a barra lateral. Fica na fronteira lateral↔palco;
+   arrastar muda --lateral-w e o chat reflui sozinho (a coluna de leitura
+   é centrada com largura máxima, então tudo se acomoda). */
+.lateral-resize {
+  flex: 0 0 5px; margin-left: -3px; z-index: 15;
+  cursor: col-resize; position: relative;
+  transition: opacity var(--medio);
+}
+.lateral-resize::after {           /* linha fina que acende no hover/drag */
+  content: ""; position: absolute; top: 0; bottom: 0; left: 2px;
+  width: 1px; background: transparent; transition: background var(--rapido);
+}
+.lateral-resize:hover::after,
+body.redimensionando .lateral-resize::after { background: var(--acento); }
+body.sem-lateral .lateral-resize { opacity: 0; pointer-events: none; }
+/* Enquanto arrasta: sem transição (senão a barra "persegue" o mouse) e sem
+   seleção de texto acidental. */
+body.redimensionando, body.redimensionando * { user-select: none; cursor: col-resize !important; }
+body.redimensionando .lateral { transition: none; }
+
+.palco {
+  flex: 1; min-width: 0; position: relative;
+  display: flex; flex-direction: column;
+  background: var(--bg);
+}
+
+/* ── Botão "Nova conversa" ────────────────────────────────────────
+   Neutro, não colorido. Era um bloco roxo preenchido, e botão
+   primário colorido numa tela onde a ação é óbvia só grita. */
+.btn-novo {
+  display: flex; align-items: center; gap: var(--r2);
+  width: 100%; padding: 9px var(--r3) 9px 10px;
+  border-radius: var(--raio);
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  color: var(--txt); font-size: 13.5px; font-weight: 500;
+  transition: background var(--rapido), border-color var(--rapido), transform var(--rapido);
+}
+.btn-novo:hover { background: var(--bg-hover); border-color: var(--line-forte); }
+.btn-novo:active { transform: scale(.985); }
+.btn-novo svg { width: 16px; height: 16px; flex: 0 0 16px; color: var(--txt-2); }
+.btn-novo span { flex: 1; text-align: left; }
+.btn-novo kbd {
+  font-family: var(--sans); font-size: 10.5px; color: var(--txt-3);
+  letter-spacing: .04em; opacity: 0; transition: opacity var(--medio);
+}
+.btn-novo:hover kbd { opacity: 1; }
+
+/* ── Busca ────────────────────────────────────────────────────── */
+.busca {
+  display: flex; align-items: center; gap: var(--r2);
+  margin-top: var(--r3); padding: 0 10px;
+  height: 32px; border-radius: var(--raio-p);
+  color: var(--txt-3);
+  transition: background var(--rapido);
+}
+.busca:focus-within { background: var(--bg-raise); color: var(--txt-2); }
+.busca svg { width: 14px; height: 14px; flex: 0 0 14px; }
+.busca input { flex: 1; min-width: 0; font-size: 13px; color: var(--txt); }
+.busca input::placeholder { color: var(--txt-3); }
+
+/* ── Lista de conversas ───────────────────────────────────────── */
+.conversas {
+  flex: 1; overflow-y: auto; overflow-x: hidden;
+  margin: var(--r3) calc(var(--r2) * -1) 0;
+  padding: 0 var(--r2) var(--r4);
+}
+.grupo-rot {
+  padding: var(--r3) 10px var(--r1);
+  font-size: 10.5px; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--txt-3);
+}
+.grupo-rot:first-child { padding-top: var(--r1); }
+
+.conv {
+  display: flex; align-items: center; gap: var(--r2);
+  padding: 7px 6px 7px 10px; border-radius: var(--raio-p);
+  color: var(--txt-2); font-size: 13px;
+  cursor: pointer; position: relative;
+  animation: entra-lista var(--medio) both;
+  transition: background var(--rapido), color var(--rapido);
+}
+.conv:hover { background: var(--bg-raise); color: var(--txt); }
+.conv.ativa { background: var(--bg-active); color: var(--txt); }
+/* A conversa aberta ganha um filete no acento — este é UM dos dois
+   usos de cor por tela. */
+.conv.ativa::before {
+  content: ""; position: absolute; left: 2px; top: 50%;
+  width: 2px; height: 15px; margin-top: -7.5px;
+  border-radius: 2px; background: var(--acento);
+  animation: filete var(--medio) both;
+}
+.conv-titulo {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+.conv-titulo[contenteditable="true"] {
+  background: var(--bg); outline: 1px solid var(--acento);
+  border-radius: 3px; padding: 1px 4px; margin: -1px -4px;
+  text-overflow: clip; color: var(--txt);
+}
+.conv-acoes { display: flex; gap: 1px; opacity: 0; transition: opacity var(--rapido); }
+.conv:hover .conv-acoes, .conv.ativa .conv-acoes { opacity: 1; }
+.conv.editando .conv-acoes { opacity: 0; pointer-events: none; }
+
+@keyframes entra-lista { from { opacity: 0; transform: translateX(-6px); } }
+@keyframes filete { from { height: 0; margin-top: 0; } }
+
+.vazio-lista {
+  padding: var(--r5) var(--r3); text-align: center;
+  font-size: 12.5px; color: var(--txt-3); line-height: 1.7;
+}
+
+/* ── Pé da sidebar ───────────────────────────────────────────── */
+.lateral-pe {
+  border-top: 1px solid var(--line);
+  padding: var(--r2) 0 var(--r3);
+  margin: 0 calc(var(--r2) * -1); padding-left: var(--r2); padding-right: var(--r2);
+}
+.linha-pe {
+  display: flex; align-items: center; gap: var(--r3);
+  width: 100%; padding: 8px 10px; border-radius: var(--raio-p);
+  color: var(--txt-2); font-size: 13px;
+  transition: background var(--rapido), color var(--rapido);
+}
+.linha-pe:hover { background: var(--bg-raise); color: var(--txt); }
+.linha-pe.ativa { background: var(--bg-active); color: var(--txt); }
+.linha-pe svg { width: 15px; height: 15px; flex: 0 0 15px; }
+
+.perfil { display: flex; align-items: center; gap: var(--r3); padding: var(--r2) 10px 0; }
+.perfil-av {
+  width: 26px; height: 26px; flex: 0 0 26px; border-radius: 99px;
+  background: var(--bg-active); color: var(--txt-2);
+  display: grid; place-items: center;
+  font-size: 11.5px; font-weight: 600;
+  overflow: hidden;
+}
+.perfil-av img { width: 100%; height: 100%; object-fit: cover; }
+.perfil-txt { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.perfil-txt strong { font-size: 12.5px; font-weight: 550; }
+.perfil-txt small { font-size: 11px; color: var(--txt-3); }
+
+/* ════════════════════════════════════════════════════════════════
+   TELAS E TRANSIÇÃO
+   Cada tela entra com fade + um empurrão de 8px. É o que o QSS não
+   fazia: lá a troca de página era um corte seco.
+   ════════════════════════════════════════════════════════════════ */
+
+.tela {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  animation: entra-tela var(--lento) both;
+}
+
+@keyframes entra-tela { from { opacity: 0; transform: translateY(8px); } }
+
+/* ── Tela inicial ────────────────────────────────────────────── */
+.inicio {
+  justify-content: center; align-items: center;
+  padding: var(--r6) var(--r5) var(--r7);
+  overflow-y: auto;
+}
+.hero { text-align: center; margin-bottom: var(--r6); }
+
+/* O avatar perdeu o anel roxo e encolheu de ~190px pra 96px. Ele era
+   o elemento mais pesado da tela e competia com o campo de digitar,
+   que é onde o olho precisa cair. */
+.hero-av {
+  width: 96px; height: 96px; margin: 0 auto var(--r5);
+  border-radius: 99px; overflow: hidden;
+  background: var(--bg-raise);
+  animation: entra-hero 700ms var(--mola) both;
+}
+.hero-av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* A serifada no cumprimento é metade da personalidade da tela: ela
+   sozinha tira o ar de "painel de controle". */
+.hero-oi {
+  font-family: var(--serif); font-size: 34px; font-weight: 400;
+  letter-spacing: -.01em; color: var(--txt);
+  animation: entra-hero 700ms 60ms var(--mola) both;
+}
+.hero-sub {
+  margin-top: var(--r2); font-size: 14.5px; color: var(--txt-2);
+  animation: entra-hero 700ms 120ms var(--mola) both;
+}
+@keyframes entra-hero { from { opacity: 0; transform: translateY(12px); } }
+
+.sugestoes {
+  width: 100%; max-width: var(--leitura);
+  margin-top: var(--r5);
+  display: flex; flex-direction: column; gap: 2px;
+}
+/* Linhas planas com ícone de traço, não cards com borda e emoji
+   colorido. Emoji tem cor, peso e baseline que a gente não controla —
+   é o detalhe que mais fazia a tela parecer amadora. */
+.sugestao {
+  display: flex; align-items: center; gap: var(--r3);
+  padding: 11px var(--r3); border-radius: var(--raio);
+  color: var(--txt-2); font-size: 13.5px; text-align: left;
+  transition: background var(--rapido), color var(--rapido);
+  animation: entra-sug 500ms var(--mola) both;
+}
+.sugestao:hover { background: var(--bg-raise); color: var(--txt); }
+.sugestao svg { width: 16px; height: 16px; flex: 0 0 16px; color: var(--txt-3); }
+.sugestao:hover svg { color: var(--acento); }
+.sugestao span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes entra-sug { from { opacity: 0; transform: translateY(10px); } }
+
+/* ════════════════════════════════════════════════════════════════
+   COMPOSER
+   ════════════════════════════════════════════════════════════════ */
+
+.composer { width: 100%; max-width: var(--leitura); margin: 0 auto; }
+.composer-vaga { width: 100%; display: flex; justify-content: center; }
+.chat > .composer-vaga { padding: 0 var(--r5) var(--r4); }
+.inicio > .composer-vaga { padding: 0; }
+
+.composer-caixa {
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--r1);
+  padding: 8px 8px 6px;
+  background: var(--bg-raise);
+  border: 1px solid var(--line);
+  border-radius: var(--raio-g);
+  transition: border-color var(--medio), background var(--medio);
+}
+/* Sem glow. A caixa antiga tinha um halo roxo de vários pixels; aqui o
+   foco é uma borda 1px que só clareia. */
+.composer-caixa:focus-within { border-color: var(--line-forte); background: #262421; }
+
+#entrada {
+  width: 100%; min-width: 0;
+  padding: 6px 6px 2px; max-height: 200px;
+  font-size: 14.5px; line-height: 1.5;
+  resize: none; overflow-y: auto;
+}
+#entrada::placeholder { color: var(--txt-3); }
+/* Tira o quadrado laranja de foco SÓ do campo de digitar: a regra global de
+   acessibilidade (:focus-visible com contorno no acento) fica pra o resto. */
+#entrada:focus, #entrada:focus-visible { outline: none; box-shadow: none; }
+
+/* Barra de baixo do composer: à esquerda o "+", modelo e raciocínio;
+   à direita tela, microfone e enviar. */
+.composer-barra { display: flex; align-items: center; justify-content: space-between; gap: var(--r1); }
+.composer-barra-esq { display: flex; align-items: center; gap: 4px; min-width: 0; }
+
+.pilula {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 28px; padding: 0 9px; border-radius: 99px;
+  background: transparent; border: 1px solid var(--line);
+  color: var(--txt-2); font-size: 12.5px; font-weight: 500; white-space: nowrap;
+  transition: background var(--rapido), border-color var(--rapido), color var(--rapido);
+}
+.pilula:hover { background: var(--bg-hover); color: var(--txt); border-color: var(--line-forte); }
+.pilula.sutil { border-color: transparent; color: var(--txt-3); }
+.pilula.sutil:hover { color: var(--txt-2); background: var(--bg-hover); }
+.pilula-seta { width: 12px; height: 12px; opacity: .65; }
+
+.composer-acoes { display: flex; align-items: center; gap: 2px; }
+
+/* O botão de enviar só ganha o acento quando há o que enviar. Antes
+   eram dois círculos roxos acesos o tempo todo. */
+.btn-enviar {
+  width: 30px; height: 30px; padding: 7px; border-radius: 99px;
+  background: var(--bg-active); color: var(--txt-3);
+  transition: background var(--medio), color var(--medio), transform var(--rapido);
+}
+.btn-enviar:not(:disabled) { background: var(--acento); color: #fff; }
+.btn-enviar:not(:disabled):hover { background: var(--acento-mo); }
+.btn-enviar:not(:disabled):active { transform: scale(.92); }
+.btn-enviar:disabled { cursor: default; }
+
+.composer-dica {
+  margin-top: var(--r2); text-align: center;
+  font-size: 11px; color: var(--txt-3);
+  opacity: 0; transition: opacity var(--medio);
+}
+.composer:focus-within .composer-dica { opacity: 1; }
+
+/* ── Anexos em espera ────────────────────────────────────────── */
+.anexos { display: flex; flex-wrap: wrap; gap: var(--r2); margin-bottom: var(--r2); }
+.anexo {
+  display: flex; align-items: center; gap: var(--r2);
+  padding: var(--r1) var(--r2) var(--r1) var(--r1);
+  background: var(--bg-raise); border: 1px solid var(--line);
+  border-radius: var(--raio-p); font-size: 12px; color: var(--txt-2);
+  animation: entra-anexo var(--medio) both;
+}
+.anexo img { width: 30px; height: 30px; border-radius: 4px; object-fit: cover; }
+.anexo-ico { width: 30px; height: 30px; padding: 7px; color: var(--txt-3); }
+.anexo-nome { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@keyframes entra-anexo { from { opacity: 0; transform: scale(.9); } }
+
+/* ── Popover (menu do +, seletor de modelo/raciocínio) ─────────── */
+.popover {
+  position: fixed; z-index: 60;
+  min-width: 210px; max-width: 300px;
+  background: var(--bg-raise); border: 1px solid var(--line-forte);
+  border-radius: var(--raio); padding: 6px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, .45);
+  animation: pop-in var(--rapido) both;
+}
+@keyframes pop-in { from { opacity: 0; transform: translateY(6px) scale(.98); } }
+.popover-item {
+  display: flex; align-items: flex-start; gap: var(--r2);
+  width: 100%; padding: 8px; border-radius: var(--raio-p);
+  color: var(--txt); text-align: left; cursor: pointer;
+  transition: background var(--rapido);
+}
+.popover-item:hover { background: var(--bg-hover); }
+.popover-item .pi-ico { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 1px; color: var(--txt-2); }
+.popover-item .pi-txt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+.popover-item .pi-txt strong { font-size: 13px; font-weight: 550; }
+.popover-item .pi-txt small { font-size: 11.5px; color: var(--txt-3); }
+.popover-item .pi-check { margin-left: auto; width: 16px; height: 16px; flex: 0 0 16px; color: var(--acento); opacity: 0; }
+.popover-item.ativo .pi-check { opacity: 1; }
+.popover-item.ativo .pi-txt strong { color: var(--acento); }
+
+/* ── Editor de perfil ──────────────────────────────────────────── */
+.campo { display: flex; flex-direction: column; gap: 6px; margin-top: var(--r2); }
+.campo > span { font-size: 12.5px; color: var(--txt-2); font-weight: 550; }
+.campo input, .campo textarea {
+  width: 100%; padding: 10px 12px;
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--raio-p); color: var(--txt);
+  font-size: 14px; line-height: 1.5; resize: vertical;
+  transition: border-color var(--rapido);
+}
+.campo input:focus, .campo textarea:focus { outline: none; border-color: var(--line-forte); }
+.perf-foto { display: flex; align-items: center; gap: var(--r3); }
+.perf-av {
+  width: 56px; height: 56px; flex: 0 0 56px; border-radius: 99px;
+  background: var(--bg-active); color: var(--txt-2);
+  display: grid; place-items: center; overflow: hidden;
+  font-size: 22px; font-weight: 600;
+}
+.perf-av img { width: 100%; height: 100%; object-fit: cover; }
+.perf-foto-txt { display: flex; flex-direction: column; gap: 4px; }
+.perf-foto-txt small { font-size: 11.5px; color: var(--txt-3); }
+.perf-salvar { display: flex; justify-content: flex-end; margin-top: var(--r3); }
+.btn-linha.destaque { background: var(--acento); color: #fff; border-color: var(--acento); }
+.btn-linha.destaque:hover { background: var(--acento-mo); }
+
+/* O canto de perfil vira clicável (abre o editor). */
+.perfil { cursor: pointer; border-radius: var(--raio-p); transition: background var(--rapido); }
+.perfil:hover { background: var(--bg-hover); }
+
+/* ════════════════════════════════════════════════════════════════
+   CHAT
+   Sem balões. Balão em conversa longa desperdiça metade da largura e
+   força o olho a ir e voltar; bloco de largura de leitura com o autor
+   marcado por peso e cor lê muito melhor.
+   ════════════════════════════════════════════════════════════════ */
+
+.chat { padding-top: var(--r4); }
+.fluxo { flex: 1; overflow-y: auto; overflow-x: hidden; scroll-behavior: smooth; }
+.fluxo-in {
+  max-width: var(--leitura); margin: 0 auto;
+  padding: var(--r4) var(--r5) var(--r6);
+  display: flex; flex-direction: column; gap: var(--r5);
+}
+
+.msg { position: relative; animation: entra-msg 320ms var(--mola) both; max-width: 100%; }
+@keyframes entra-msg { from { opacity: 0; transform: translateY(8px); } }
+
+/* Layout no estilo do Claude, mantendo os rótulos de autor que o Vitor
+   gostou: a mensagem DELE vira um balão encostado à direita; a da Emily
+   ocupa a largura toda e desce à esquerda, sem balão. O contraste de
+   posição é o que separa quem falou — os dois blocos retos e iguais eram o
+   que deixava a conversa "reta demais". */
+.msg.de-user  { align-self: flex-end; max-width: 82%; }
+.msg.de-emily { align-self: stretch; }
+
+.msg-autor {
+  display: flex; align-items: center; gap: var(--r2);
+  margin-bottom: var(--r2);
+  font-size: 12px; font-weight: 600; letter-spacing: .01em;
+}
+.msg.de-user  .msg-autor { color: var(--txt-2); justify-content: flex-end; }
+.msg.de-emily .msg-autor { color: var(--acento); }
+.msg-autor .av {
+  width: 18px; height: 18px; border-radius: 99px; overflow: hidden;
+  background: var(--bg-active); flex: 0 0 18px;
+}
+.msg-autor .av img { width: 100%; height: 100%; object-fit: cover; }
+
+.msg-corpo { font-size: 14.5px; line-height: 1.68; color: var(--txt); }
+/* O balão do Vitor: fundo levemente elevado, cantos arredondados e o de
+   baixo-direita mais fechado, como o do Claude. A da Emily não tem balão —
+   é texto corrido na largura de leitura. */
+.msg.de-user .msg-corpo {
+  background: var(--bg-raise); color: #e7e4df;
+  padding: 10px var(--r4);
+  border-radius: var(--raio-g) var(--raio-g) var(--raio-p) var(--raio-g);
+}
+.msg-corpo > * + * { margin-top: .7em; }
+.msg-corpo strong { font-weight: 600; color: #fff; }
+.msg-corpo em { font-style: italic; }
+.msg-corpo a { color: var(--acento-mo); text-decoration: none; border-bottom: 1px solid transparent; }
+.msg-corpo a:hover { border-bottom-color: currentColor; }
+.msg-corpo ul, .msg-corpo ol { padding-left: 1.3em; }
+.msg-corpo li + li { margin-top: .3em; }
+.msg-corpo code {
+  font-family: var(--mono); font-size: .89em;
+  background: #2a2724; border: 1px solid var(--line);
+  padding: .1em .35em; border-radius: 4px; color: #e3ddd4;
+}
+.msg-corpo img { max-width: 100%; border-radius: var(--raio); display: block; }
+
+/* Bloco de código com cabeçalho e botão de copiar. A interface antiga
+   renderizava markdown com três regex e não tinha bloco de código. */
+.bloco-cod {
+  border: 1px solid var(--line); border-radius: var(--raio);
+  background: #191715; overflow: hidden;
+}
+.bloco-cod-topo {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--r1) var(--r2) var(--r1) var(--r3);
+  background: #211f1c; border-bottom: 1px solid var(--line);
+  font-size: 11px; color: var(--txt-2); letter-spacing: .03em;
+  text-transform: none; font-weight: 500;
+}
+.bloco-cod pre { padding: var(--r3); overflow-x: auto; }
+.bloco-cod code {
+  background: none; border: 0; padding: 0;
+  font-family: var(--mono); font-size: 12.5px; line-height: 1.65;
+  color: #cdc7bd; white-space: pre;
+}
+/* Realce de código — tons quentes e apagados, pra combinar com o tema e
+   não virar néon. Ver destacar() no app.js. */
+.bloco-cod .tk-com   { color: #6e6a63; font-style: italic; }
+.bloco-cod .tk-str   { color: #a3b56a; }
+.bloco-cod .tk-num   { color: #d9975a; }
+.bloco-cod .tk-kw    { color: #cf8a9b; }
+.bloco-cod .tk-const { color: #c99bd0; }
+.bloco-cod .tk-fn    { color: #7fa6c9; }
+.btn-copiar-cod {
+  display: flex; align-items: center; gap: 5px;
+  padding: 3px 7px; border-radius: 4px;
+  font-size: 11px; color: var(--txt-3);
+  transition: background var(--rapido), color var(--rapido);
+}
+.btn-copiar-cod:hover { background: var(--bg-hover); color: var(--txt); }
+.btn-copiar-cod svg { width: 12px; height: 12px; }
+
+/* ── Ações por mensagem: copiar, regenerar, apagar ────────────── */
+.msg-acoes {
+  display: flex; gap: 1px; margin-top: var(--r2);
+  opacity: 0; transform: translateY(-3px);
+  transition: opacity var(--medio), transform var(--medio);
+}
+.msg.de-user .msg-acoes { justify-content: flex-end; }
+.msg:hover .msg-acoes { opacity: 1; transform: none; }
+.msg-acao {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 8px; border-radius: var(--raio-p);
+  font-size: 11.5px; color: var(--txt-3);
+  transition: background var(--rapido), color var(--rapido);
+}
+.msg-acao:hover { background: var(--bg-raise); color: var(--txt-2); }
+.msg-acao.perigo:hover { color: var(--erro); }
+.msg-acao svg { width: 13px; height: 13px; flex: 0 0 13px; }
+.msg-acao.feito { color: var(--ok); }
+
+/* ── Digitando ──────────────────────────────────────────────── */
+.digitando { display: flex; gap: 4px; padding: 4px 0; }
+.digitando i {
+  width: 6px; height: 6px; border-radius: 99px;
+  background: var(--txt-3); animation: salta 1.3s ease-in-out infinite;
+}
+.digitando i:nth-child(2) { animation-delay: .16s; }
+.digitando i:nth-child(3) { animation-delay: .32s; }
+@keyframes salta {
+  0%, 60%, 100% { transform: translateY(0);    opacity: .4; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+
+/* Cursor de streaming: bloco piscando no fim do texto que está sendo
+   escrito, pra ficar claro que ela ainda não acabou. */
+.msg.escrevendo .msg-corpo::after {
+  content: ""; display: inline-block;
+  width: 7px; height: 15px; margin-left: 2px;
+  vertical-align: -2px; border-radius: 1px;
+  background: var(--acento); animation: pisca 1s steps(2) infinite;
+}
+@keyframes pisca { 50% { opacity: 0; } }
+
+/* ── Painel de progresso das ferramentas ─────────────────────── */
+.progresso {
+  border: 1px solid var(--line); border-radius: var(--raio);
+  background: var(--bg-raise); overflow: hidden;
+  animation: entra-msg 320ms var(--mola) both;
+}
+.progresso-topo {
+  display: flex; align-items: center; gap: var(--r2); width: 100%;
+  padding: 9px var(--r3); font-size: 12px; color: var(--txt-2);
+  border-bottom: 1px solid transparent; text-align: left;
+  transition: border-color var(--medio), background var(--rapido);
+}
+.progresso.aberto .progresso-topo { border-bottom-color: var(--line); }
+/* Recolhido, o cabeçalho é um botão discreto — clicar reabre. */
+.progresso:not(.trabalhando) .progresso-topo { cursor: pointer; }
+.progresso:not(.trabalhando) .progresso-topo:hover { background: var(--bg-hover); color: var(--txt); }
+.progresso-topo .girando {
+  width: 12px; height: 12px; flex: 0 0 12px;
+  border: 1.6px solid var(--line-forte); border-top-color: var(--acento);
+  border-radius: 99px; animation: gira .7s linear infinite;
+}
+@keyframes gira { to { transform: rotate(360deg); } }
+.progresso-rot { flex: 1; }
+/* A seta só aparece quando o painel já pode ser recolhido (não trabalhando),
+   e gira quando ele está aberto. */
+.progresso-chevron {
+  width: 14px; height: 14px; flex: 0 0 14px; color: var(--txt-3);
+  transition: transform var(--medio); display: none;
+}
+.progresso:not(.trabalhando) .progresso-chevron { display: block; }
+.progresso.aberto .progresso-chevron { transform: rotate(180deg); }
+/* Recolhido = passos escondidos. Abrir mostra. */
+.progresso-passos { display: none; flex-direction: column; }
+.progresso.aberto .progresso-passos { display: flex; }
+.passo {
+  display: flex; align-items: flex-start; gap: var(--r2);
+  padding: 7px var(--r3); font-size: 12.5px; color: var(--txt-2);
+  animation: entra-lista var(--medio) both;
+}
+.passo + .passo { border-top: 1px solid #262421; }
+.passo-ico { width: 14px; height: 14px; flex: 0 0 14px; margin-top: 2px; color: var(--txt-3); }
+.passo.ok .passo-ico { color: var(--ok); }
+.passo.falhou .passo-ico { color: var(--erro); }
+/* Comentário de processo ("peraí, deixa eu ver"): itálico, mais apagado —
+   é fala dela, não um passo de ferramenta. */
+.passo.fala .passo-ico { color: var(--acento); }
+.passo-nota { font-style: italic; color: var(--txt-2); }
+.passo-txt { flex: 1; min-width: 0; }
+.passo-txt b { font-weight: 550; color: var(--txt); font-family: var(--mono); font-size: 11.5px; }
+.passo-res { color: var(--txt-3); font-size: 12px; margin-top: 2px; word-break: break-word; }
+
+/* ── Voltar pro fim ─────────────────────────────────────────── */
+.ir-fim {
+  position: absolute; left: 50%; bottom: 104px;
+  width: 32px; height: 32px; padding: 8px; margin-left: -16px;
+  border-radius: 99px; background: var(--bg-raise);
+  border: 1px solid var(--line); color: var(--txt-2);
+  animation: entra-anexo var(--medio) both;
+  transition: background var(--rapido), transform var(--rapido);
+  z-index: 5;
+}
+.ir-fim:hover { background: var(--bg-hover); color: var(--txt); }
+.ir-fim:active { transform: scale(.9); }
+
+/* ── Cartão de imagem gerada ───────────────────────────────── */
+.img-card { border-radius: var(--raio); overflow: hidden; border: 1px solid var(--line); }
+.img-card img { width: 100%; display: block; }
+.img-acoes { display: flex; gap: var(--r2); padding: var(--r2) var(--r3); background: var(--bg-raise); }
+
+.btn-linha {
+  padding: 6px var(--r3); border-radius: var(--raio-p);
+  background: var(--bg-active); color: var(--txt-2);
+  font-size: 12.5px; border: 1px solid var(--line);
+  transition: background var(--rapido), color var(--rapido);
+}
+.btn-linha:hover { background: var(--bg-hover); color: var(--txt); }
+.btn-linha.primario { background: var(--acento); color: #fff; border-color: transparent; }
+.btn-linha.primario:hover { background: var(--acento-mo); }
+
+/* ════════════════════════════════════════════════════════════════
+   CONFIGURAÇÕES
+   A antiga espalhava o conteúdo em duas colunas de altura desigual,
+   com barra de rolagem no meio de uma delas, e deixava metade da tela
+   vazia. Aqui é UMA coluna centralizada com largura de leitura, o que
+   também resolve o problema de janela larga.
+   ════════════════════════════════════════════════════════════════ */
+
+.config { overflow-y: auto; }
+.config-in { width: 100%; max-width: var(--leitura); margin: 0 auto; padding: var(--r5) var(--r5) var(--r8); }
+
+.config-topo {
+  display: flex; align-items: center; gap: var(--r3);
+  margin-bottom: var(--r6);
+}
+.config-topo h1 { font-family: var(--serif); font-size: 26px; font-weight: 400; }
+.btn-voltar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px 5px 6px; border-radius: var(--raio-p);
+  color: var(--txt-2); font-size: 13px;
+  transition: background var(--rapido), color var(--rapido);
+}
+.btn-voltar:hover { background: var(--bg-raise); color: var(--txt); }
+.btn-voltar svg { width: 15px; height: 15px; }
+
+.secao { margin-bottom: var(--r7); animation: entra-sug 450ms var(--mola) both; }
+.secao-cab { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: var(--r3); }
+.secao-cab h2 {
+  font-size: 12px; font-weight: 600; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--txt-3);
+}
+.secao-nota { font-size: 12px; color: var(--txt-3); margin-bottom: var(--r3); }
+
+.lista { border: 1px solid var(--line); border-radius: var(--raio); overflow: hidden; }
+.item {
+  display: flex; align-items: center; gap: var(--r3);
+  padding: var(--r3) var(--r4); background: var(--bg-raise);
+  transition: background var(--rapido);
+}
+.item + .item { border-top: 1px solid var(--line); }
+.item.clicavel { cursor: pointer; }
+.item.clicavel:hover { background: var(--bg-hover); }
+.item-ico { width: 17px; height: 17px; flex: 0 0 17px; color: var(--txt-3); }
+.item-txt { flex: 1; min-width: 0; }
+.item-txt strong { display: block; font-size: 13.5px; font-weight: 500; }
+.item-txt small { display: block; font-size: 12px; color: var(--txt-3); margin-top: 1px; }
+.item-seta { width: 15px; height: 15px; color: var(--txt-3); }
+
+/* ── Interruptor ───────────────────────────────────────────── */
+.chave {
+  width: 38px; height: 22px; flex: 0 0 38px;
+  border-radius: 99px; background: var(--bg-active);
+  border: 1px solid var(--line); position: relative;
+  transition: background var(--medio), border-color var(--medio);
+}
+.chave::after {
+  content: ""; position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 99px;
+  background: var(--txt-3);
+  transition: transform var(--medio), background var(--medio);
+}
+.chave[aria-checked="true"] { background: var(--acento-fu); border-color: var(--acento); }
+.chave[aria-checked="true"]::after { transform: translateX(16px); background: var(--acento); }
+
+/* ── Apps rápidos ─────────────────────────────────────────── */
+.apps { display: flex; gap: var(--r3); flex-wrap: wrap; }
+.app {
+  display: flex; flex-direction: column; align-items: center; gap: var(--r2);
+  width: 84px; padding: var(--r3) var(--r2);
+  border: 1px solid var(--line); border-radius: var(--raio);
+  background: var(--bg-raise); color: var(--txt-2); font-size: 11.5px;
+  transition: background var(--rapido), border-color var(--rapido), transform var(--rapido);
+}
+.app:hover { background: var(--bg-hover); border-color: var(--line-forte); color: var(--txt); transform: translateY(-2px); }
+.app:active { transform: none; }
+.app-ico {
+  width: 34px; height: 34px; border-radius: var(--raio-p);
+  display: grid; place-items: center; overflow: hidden;
+  font-weight: 600; font-size: 14px; color: #fff;
+}
+.app-ico img { width: 100%; height: 100%; object-fit: contain; }
+
+/* ── Memória ──────────────────────────────────────────────── */
+.fatos { display: flex; flex-direction: column; }
+.fato {
+  display: flex; align-items: flex-start; gap: var(--r3);
+  padding: 10px var(--r4); background: var(--bg-raise);
+  font-size: 13px; color: var(--txt-2); line-height: 1.5;
+  animation: entra-lista var(--medio) both;
+}
+.fato + .fato { border-top: 1px solid var(--line); }
+/* Compacto por padrão: no máximo duas linhas com reticências. Clicar
+   abre o fato inteiro. 140 fatos de altura livre viravam um scroll sem fim. */
+.fato-txt {
+  flex: 1; min-width: 0; cursor: pointer;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.fato-txt.aberto { -webkit-line-clamp: unset; }
+.fato-x { opacity: 0; transition: opacity var(--rapido), color var(--rapido); flex: 0 0 auto; }
+.fato:hover .fato-x { opacity: 1; }
+.fato-x:hover { color: var(--erro); }
+.fato.saindo { animation: sai-fato 200ms var(--mola) both; }
+@keyframes sai-fato { to { opacity: 0; transform: translateX(14px); } }
+
+/* ── Paginação (memória) ──────────────────────────────────────── */
+.paginacao {
+  display: flex; align-items: center; justify-content: center;
+  gap: var(--r3); margin-top: var(--r3);
+}
+.pg-cont {
+  font-size: 12px; color: var(--txt-3);
+  font-variant-numeric: tabular-nums; min-width: 128px; text-align: center;
+}
+.pg-btn {
+  width: 30px; height: 30px; padding: 8px; border-radius: var(--raio-p);
+  border: 1px solid var(--line); background: var(--bg-raise); color: var(--txt-2);
+  transition: background var(--rapido), color var(--rapido);
+}
+.pg-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--txt); }
+.pg-btn:disabled { opacity: .35; cursor: default; }
+
+.add-fato {
+  display: flex; align-items: center; gap: var(--r2);
+  padding: var(--r3) var(--r4); background: var(--bg-raise);
+  border-top: 1px solid var(--line);
+}
+.add-fato input { flex: 1; font-size: 13px; }
+.add-fato input::placeholder { color: var(--txt-3); }
+
+/* ── Medidores de sistema ─────────────────────────────────── */
+.medidores { display: flex; gap: var(--r3); }
+.medidor {
+  flex: 1; padding: var(--r3) var(--r4);
+  border: 1px solid var(--line); border-radius: var(--raio);
+  background: var(--bg-raise);
+}
+.medidor-rot { font-size: 11px; color: var(--txt-3); letter-spacing: .05em; text-transform: uppercase; }
+.medidor-val { font-size: 20px; font-weight: 300; margin: 2px 0 var(--r2); font-variant-numeric: tabular-nums; }
+.barra-med { height: 3px; border-radius: 99px; background: var(--bg-active); overflow: hidden; }
+.barra-med i {
+  display: block; height: 100%; border-radius: 99px;
+  background: var(--txt-3); transition: width 600ms var(--mola), background var(--medio);
+}
+.barra-med i.alto { background: var(--aviso); }
+.barra-med i.critico { background: var(--erro); }
+
+/* ════════════════════════════════════════════════════════════════
+   TOASTS E MODAL
+   ════════════════════════════════════════════════════════════════ */
+
+.toasts {
+  position: fixed; bottom: var(--r5); left: 50%; transform: translateX(-50%);
+  display: flex; flex-direction: column; gap: var(--r2);
+  z-index: 60; pointer-events: none;
+}
+.toast {
+  display: flex; align-items: center; gap: var(--r2);
+  padding: 9px var(--r4); border-radius: 99px;
+  background: #302d29; border: 1px solid var(--line-forte);
+  font-size: 13px; color: var(--txt);
+  box-shadow: 0 8px 24px rgba(0,0,0,.4);
+  animation: entra-toast var(--medio) both;
+}
+.toast.saindo { animation: sai-toast 180ms var(--mola) both; }
+.toast svg { width: 14px; height: 14px; color: var(--ok); }
+.toast.erro svg { color: var(--erro); }
+@keyframes entra-toast { from { opacity: 0; transform: translateY(14px) scale(.96); } }
+@keyframes sai-toast   { to   { opacity: 0; transform: translateY(-6px); } }
+
+.modal-fundo {
+  position: fixed; inset: 0; z-index: 50;
+  background: rgba(10,9,8,.6);
+  display: grid; place-items: center;
+  animation: fade var(--medio) both;
+}
+.modal-fundo.saindo { animation: fade var(--rapido) reverse both; }
+@keyframes fade { from { opacity: 0; } }
+
+.modal {
+  width: 380px; max-width: calc(100vw - 48px);
+  background: var(--bg-raise); border: 1px solid var(--line-forte);
+  border-radius: var(--raio-g); padding: var(--r5);
+  box-shadow: 0 24px 60px rgba(0,0,0,.5);
+  animation: entra-modal 260ms var(--mola) both;
+}
+@keyframes entra-modal { from { opacity: 0; transform: scale(.97) translateY(6px); } }
+.modal h3 { font-size: 15.5px; font-weight: 600; margin-bottom: var(--r2); }
+.modal p { font-size: 13.5px; color: var(--txt-2); margin-bottom: var(--r5); }
+.modal-acoes { display: flex; justify-content: flex-end; gap: var(--r2); }
+.modal-in {
+  width: 100%; padding: 9px var(--r3); margin-bottom: var(--r5);
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--raio-p); font-size: 14px;
+}
+.modal-in:focus { border-color: var(--acento); }
+
+/* ════════════════════════════════════════════════════════════════
+   ACESSIBILIDADE E JANELA PEQUENA
+   ════════════════════════════════════════════════════════════════ */
+
+:focus-visible { outline: 2px solid var(--acento); outline-offset: 2px; border-radius: 3px; }
+
+/* Quem liga "reduzir movimento" no Windows não quer nada disso. Uma
+   regra só desliga tudo, porque toda animação daqui é decorativa. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}
+
+@media (max-width: 860px) {
+  :root { --lateral-w: 232px; }
+  .fluxo-in, .config-in { padding-left: var(--r4); padding-right: var(--r4); }
+  .chat > .composer-vaga { padding-left: var(--r4); padding-right: var(--r4); }
+}
+@media (max-width: 680px) {
+  body:not(.sem-lateral) .lateral { position: absolute; z-index: 30; height: 100%; }
+  .hero-oi { font-size: 27px; }
+  .hero-av { width: 76px; height: 76px; }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/* ════════════════════════════════════════════════════════════════
+   MUSIC PLAYER
+   Botão na sidebar, modal de playlist e barra fixa no rodapé.
+   ════════════════════════════════════════════════════════════════ */
+
+.btn-music {
+  display: flex; align-items: center; gap: var(--r2);
+  width: 100%; padding: 9px var(--r3) 9px 10px;
+  margin-bottom: var(--r2);
+  border-radius: var(--raio);
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--txt-2); font-size: 13px; font-weight: 500;
+  transition: background var(--rapido), color var(--rapido), border-color var(--rapido);
+}
+.btn-music:hover { background: var(--bg-hover); color: var(--txt); border-color: var(--line-forte); }
+.btn-music svg {
+  width: 16px; height: 16px; flex: 0 0 16px;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* O host do iframe precisa existir fora da tela, não display:none —
+   player escondido com display não emite som em alguns builds. */
+#yt-host {
+  position: fixed; left: -9999px; top: 0;
+  width: 320px; height: 180px; pointer-events: none;
+}
+
+/* ── Barra fixa no rodapé ─────────────────────────────────────── */
+.player-barra {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+  display: flex; align-items: center; gap: var(--r3);
+  padding: 8px var(--r4);
+  background: rgba(23,22,20,.92);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--line-forte);
+  animation: sobe-player var(--medio) both;
+}
+@keyframes sobe-player { from { transform: translateY(100%); } }
+
+.player-thumb {
+  width: 44px; height: 44px; flex: 0 0 44px;
+  object-fit: cover; border-radius: 8px;
+  background: var(--bg-active);
+}
+.player-info { min-width: 0; flex: 1; }
+.player-titulo {
+  display: block; font-size: 13.5px; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.player-sub { font-size: 11.5px; color: var(--txt-2); }
+
+.player-controles { display: flex; align-items: center; gap: var(--r1); }
+.player-play {
+  width: 38px; height: 38px; border-radius: 50%;
+  background: var(--acento) !important;
+  color: #171614 !important;
+}
+.player-play svg { width: 18px; height: 18px; fill: currentColor; stroke: none; }
+.player-controles .icone-btn svg,
+.player-fechar svg { fill: currentColor; stroke: none; }
+.player-fechar { margin-left: var(--r2); }
+
+/* Loop / shuffle ativos */
+.player-controles .ativa { color: var(--acento); }
+
+body.com-player .corpo { bottom: 60px; }
+
+/* ── Modal da playlist ────────────────────────────────────────── */
+.modal-player {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(10,9,8,.6);
+  display: grid; place-items: center;
+  animation: fade var(--medio) both;
+}
+.modal-player-caixa {
+  width: 440px; max-width: calc(100vw - 48px);
+  max-height: min(600px, calc(100vh - 80px));
+  display: flex; flex-direction: column;
+  background: var(--bg-raise); border: 1px solid var(--line-forte);
+  border-radius: var(--raio-g); padding: var(--r5);
+  box-shadow: 0 24px 60px rgba(0,0,0,.5);
+  animation: entra-modal 260ms var(--mola) both;
+}
+.modal-player-topo {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--r3);
+}
+.modal-player-topo h2 { font-size: 16px; font-weight: 650; }
+
+.modal-player-busca { display: flex; gap: var(--r2); margin-bottom: var(--r2); }
+.modal-player-busca input {
+  flex: 1; padding: 9px var(--r3);
+  background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--raio-p); font-size: 13.5px;
+}
+.modal-player-busca input:focus { border-color: var(--acento); outline: none; }
+.modal-player-busca .btn-enviar svg { stroke: none; fill: currentColor; }
+
+.modal-player-erro { font-size: 12.5px; color: #e07b7b; margin-bottom: var(--r2); }
+
+.modal-player-lista {
+  overflow-y: auto; min-height: 120px;
+  display: flex; flex-direction: column; gap: 4px;
+}
+.pl-item {
+  display: flex; align-items: center; gap: var(--r2);
+  padding: 6px; border-radius: 10px; cursor: pointer;
+  transition: background var(--rapido);
+}
+.pl-item:hover { background: var(--bg-hover); }
+.pl-item.tocando { background: var(--bg-active); }
+.pl-item img {
+  width: 42px; height: 42px; flex: 0 0 42px;
+  border-radius: 6px; object-fit: cover; background: var(--bg-active);
+}
+.pl-item-txt { min-width: 0; flex: 1; }
+.pl-item-txt strong {
+  display: block; font-size: 13px; font-weight: 550;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pl-item-txt small { font-size: 11px; color: var(--txt-2); }
+.pl-item-del {
+  opacity: 0; transition: opacity var(--rapido);
+}
+.pl-item:hover .pl-item-del { opacity: 1; }
+</style>
+</script>
+</head>
+<body class="carregando">
+
+<!-- ══ TOOLBAR ══════════════════════════════════════════════════
+     A janela agora usa a MOLDURA NATIVA do Windows (mover, redimensionar,
+     min/max/fechar vêm do sistema). Isto aqui é só uma faixa de app com o
+     botão da barra lateral e o indicador de estado. -->
+<header class="barra" id="barra">
+  <div class="barra-esq">
+    <button class="icone-btn" id="btn-sidebar" title="Recolher a barra lateral (Ctrl+B)">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+  </div>
+  <div class="barra-arrasta"></div>
+  <div class="barra-dir">
+    <div class="status" id="status">
+      <span class="status-ponto"></span>
+      <span class="status-txt">Aguardando</span>
+    </div>
+  </div>
+</header>
+
+<div class="corpo" id="corpo">
+  <!-- ══ SIDEBAR ════════════════════════════════════════════════ -->
+  <aside class="lateral" id="lateral">
+    <button class="btn-music" id="btn-music" title="Music Player">
+      <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      <span>Music Player</span>
+    </button>
+    <button class="btn-novo" id="btn-novo">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Nova conversa</span>
+      <kbd>Ctrl N</kbd>
+    </button>
+
+    <div class="busca">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
+      <input type="text" id="busca" placeholder="Buscar conversa" spellcheck="false">
+      <button class="icone-btn mini" id="busca-limpar" hidden>
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <nav class="conversas" id="conversas"></nav>
+
+    <footer class="lateral-pe">
+      <button class="linha-pe" id="btn-config">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 00.34 1.87l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.7 1.7 0 00-1.87-.34 1.7 1.7 0 00-1.03 1.56V21a2 2 0 11-4 0v-.11A1.7 1.7 0 007 19.3a1.7 1.7 0 00-1.87.34l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.7 1.7 0 002.7 15a1.7 1.7 0 00-1.56-1.03H1a2 2 0 110-4h.11A1.7 1.7 0 002.7 9a1.7 1.7 0 00-.34-1.87l-.06-.06a2 2 0 112.83-2.83l.06.06A1.7 1.7 0 007 4.7h.08A1.7 1.7 0 008.1 3.14V3a2 2 0 114 0v.11a1.7 1.7 0 001.03 1.56 1.7 1.7 0 001.87-.34l.06-.06a2 2 0 112.83 2.83l-.06.06A1.7 1.7 0 0021.3 9v.08a1.7 1.7 0 001.56 1.03H23a2 2 0 110 4h-.11a1.7 1.7 0 00-1.49 1.03z"/></svg>
+        <span>Configurações</span>
+      </button>
+      <div class="perfil" id="perfil">
+        <div class="perfil-av" id="perfil-av">V</div>
+        <div class="perfil-txt">
+          <strong id="perfil-nome">Vitor</strong>
+          <small id="perfil-sub">IA pessoal</small>
+        </div>
+      </div>
+    </footer>
+  </aside>
+
+  <!-- Alça pra arrastar e redimensionar a barra lateral. -->
+  <div class="lateral-resize" id="lateral-resize" title="Arraste pra ajustar · duplo-clique pra recolher"></div>
+
+  <!-- ══ PALCO ══════════════════════════════════════════════════ -->
+  <main class="palco" id="palco"></main>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div class="modal-fundo" id="modal-fundo" hidden></div>
+
+<!-- ══ MUSIC PLAYER ════════════════════════════════════════════
+     O iframe do YouTube fica OCULTO e é quem toca o áudio (API JS oficial).
+     A barra fixa no rodapé mostra thumb, título e os controles. -->
+<div id="yt-host" hidden></div>
+
+<div class="player-barra" id="player-barra" hidden>
+  <img class="player-thumb" id="player-thumb" alt="">
+  <div class="player-info">
+    <strong class="player-titulo" id="player-titulo">—</strong>
+    <small class="player-sub" id="player-sub">Music Player</small>
+  </div>
+  <div class="player-controles">
+    <button class="icone-btn" id="player-prev" title="Anterior">
+      <svg viewBox="0 0 24 24"><path d="M19 20L9 12l10-8v16z"/><path d="M5 19V5"/></svg>
+    </button>
+    <button class="icone-btn player-play" id="player-play" title="Tocar/Pausar">
+      <svg viewBox="0 0 24 24" id="player-ico-play"><path d="M8 5v14l11-7z"/></svg>
+      <svg viewBox="0 0 24 24" id="player-ico-pause" hidden><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+    </button>
+    <button class="icone-btn" id="player-next" title="Próxima">
+      <svg viewBox="0 0 24 24"><path d="M5 4l10 8-10 8V4z"/><path d="M19 5v14"/></svg>
+    </button>
+    <button class="icone-btn mini" id="player-loop" title="Repetir playlist">
+      <svg viewBox="0 0 24 24"><path d="M17 2l4 4-4 4"/><path d="M3 11v-1a4 4 0 014-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v1a4 4 0 01-4 4H3"/></svg>
+    </button>
+    <button class="icone-btn mini" id="player-shuffle" title="Aleatório">
+      <svg viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20L21 3"/><path d="M21 16v5h-5"/><path d="M15 15l6 6"/><path d="M4 4l5 5"/></svg>
+    </button>
+  </div>
+  <button class="icone-btn mini player-fechar" id="player-fechar" title="Fechar player">
+    <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  </button>
+</div>
+
+<!-- Modal da playlist: abre pelo botão Music Player na sidebar. -->
+<div class="modal-player" id="modal-player" hidden>
+  <div class="modal-player-caixa">
+    <header class="modal-player-topo">
+      <h2>Music Player</h2>
+      <button class="icone-btn" id="modal-player-fechar" title="Fechar">
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </header>
+    <form class="modal-player-busca" id="pl-form">
+      <input type="text" id="pl-query" placeholder="Nome da música ou link do YouTube" spellcheck="false">
+      <button type="submit" class="btn-enviar" title="Buscar e adicionar">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      </button>
+    </form>
+    <p class="modal-player-erro" id="pl-erro" hidden></p>
+    <nav class="modal-player-lista" id="pl-lista"></nav>
+  </div>
+</div>
+
+<!-- O composer é UM só e é MOVIDO entre a tela inicial e o chat, em vez de
+     existir duas vezes. Assim o que estava digitado não se perde na transição. -->
+<div class="composer" id="composer">
+  <div class="anexos" id="anexos" hidden></div>
+  <div class="composer-caixa" id="composer-caixa">
+    <textarea id="entrada" rows="1" placeholder="Fala com a Emily..." spellcheck="false"></textarea>
+    <div class="composer-barra">
+      <div class="composer-barra-esq">
+        <button class="icone-btn" id="btn-add" title="Atalhos e anexos">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button class="pilula" id="sel-modelo" title="Trocar o modelo da Emily">
+          <span id="sel-modelo-nome">Modelo</span>
+          <svg class="pilula-seta" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="pilula sutil" id="sel-racio" title="Nível de raciocínio">
+          <span id="sel-racio-nome">Raciocínio</span>
+          <svg class="pilula-seta" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+      </div>
+      <div class="composer-acoes">
+        <button class="icone-btn" id="btn-tela" title="Olhar a tela agora">
+          <svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 20h8"/></svg>
+        </button>
+        <button class="icone-btn" id="btn-mic" title="Falar (push-to-talk)">
+          <svg viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></svg>
+        </button>
+        <button class="btn-enviar" id="btn-enviar" title="Enviar (Enter)" disabled>
+          <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <p class="composer-dica">Enter envia · Shift+Enter quebra linha · Ctrl+V cola imagem</p>
+</div>
+
+<template id="tpl-inicio">
+  <section class="tela inicio">
+    <div class="hero">
+      <div class="hero-av"><img id="hero-img" alt=""></div>
+      <h1 class="hero-oi">Oi, <span id="hero-nome">Vitor</span>.</h1>
+      <p class="hero-sub">No que a gente mexe agora?</p>
+    </div>
+    <div class="composer-vaga" id="composer-vaga-inicio"></div>
+    <div class="sugestoes" id="sugestoes"></div>
+  </section>
+</template>
+
+<template id="tpl-chat">
+  <section class="tela chat">
+    <div class="fluxo" id="fluxo"><div class="fluxo-in" id="fluxo-in"></div></div>
+    <button class="ir-fim" id="ir-fim" hidden>
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+    </button>
+    <div class="composer-vaga" id="composer-vaga-chat"></div>
+  </section>
+</template>
+
+<!-- estilo.css e app.js entram pelo bootstrap com cache-busting no <head>. -->
+<script>/* ════════════════════════════════════════════════════════════════
+   app.js — a lógica da interface da Emily
+
+   O contrato com o Python é pequeno de propósito:
+
+   Python -> JS :  Emily.on(evento, dados)     (via evaluate_js)
+   JS -> Python :  pywebview.api.<metodo>(...)  (devolve Promise)
+
+   Nada aqui sabe como a Emily pensa. Isto desenha e avisa.
+   ════════════════════════════════════════════════════════════════ */
+
+/* ════════════════════════════════════════════════════════════════
+   MODO OFICINA
+   Api de mentira com dados de amostra, pra dar pra mexer no CSS num
+   navegador comum com DevTools.
+
+   NÃO é ligada por protocolo. O pywebview 5 também serve por http local,
+   então checar o protocolo instalava isto em cima da ponte de verdade e a
+   Emily abria com conversas de amostra. Quem decide é o esperarPonte():
+   ele chama isto só depois de esperar a ponte real e ela não vir.
+   ════════════════════════════════════════════════════════════════ */
+
+function oficina() {
+  if (pontePronta()) return false;
+  console.info('[emily] modo oficina: api de mentira, dados de amostra');
+
+  const conversas = [
+    { id: '1', titulo: 'Expulsar alguém do servidor', mexida: Date.now() / 1000 - 300 },
+    { id: '2', titulo: 'Mods pesados do modpack', mexida: Date.now() / 1000 - 7200 },
+    { id: '3', titulo: 'Erro de importação no main', mexida: Date.now() / 1000 - 100000 },
+    { id: '4', titulo: 'Preço da RTX 5090', mexida: Date.now() / 1000 - 900000 },
+  ];
+  const api = {
+    perfil: () => ({ nome: 'Vitor', sub: 'IA pessoal', avatar: '' }),
+    sugestoes: () => ([
+      { icone: 'cubo', texto: 'analisa a pasta de mods aí e me diz o que tem de bom' },
+      { icone: 'monitor', texto: 'olha minha tela e me diz o que tá errado' },
+      { icone: 'cubo', texto: 'como tá o servidor de Minecraft?' },
+      { icone: 'raio', texto: 'o que tá pendente no launcher?' },
+    ]),
+    listar_conversas: () => conversas,
+    abrir_conversa: () => ([
+      { papel: 'user', texto: 'olha minha tela e me diz o que tá errado' },
+      { papel: 'assistant', texto: 'Ó, achei. Falta o **import** na linha 12:\n\n```python\nimport ferramentas\n```\n\nDois detalhes:\n\n- o interpretador selecionado é o do sistema, não o do venv\n- o `modelo.py` tem alteração não salva\n\nQuer que eu conserte?' },
+    ]),
+    nova_conversa: () => 'novo',
+    renomear_conversa: () => true, apagar_conversa: () => true,
+    enviar: () => true, regenerar: () => true, copiar: () => true,
+    ptt: () => true, capturar_tela: () => true, enviar_arquivo: () => true,
+    escolher_arquivos: () => [], salvar_colado: () => null,
+    resolver_arrastados: () => [], salvar_imagem: () => 'demo.png',
+    listar_apps: () => ([
+      { nome: 'Discord', cor: '#5865F2', letra: 'D', tinta: '#fff', existe: true },
+      { nome: 'Steam', cor: '#171a21', letra: 'S', tinta: '#fff', existe: true },
+      { nome: 'Brave', cor: '#FB542B', letra: 'B', tinta: '#fff', existe: true },
+    ]),
+    abrir_app: () => true,
+    estado_automacao: () => ({ monitor_downloads: true, monitor_discord: false, mudo: false }),
+    set_toggle: () => true, organizar_downloads: () => 'Separei 23 arquivos por tipo.',
+    estado_modelo: () => ({
+      modelo: 'claude-opus-4-8', raciocinio: 'baixo',
+      modelos: [
+        { id: 'claude-opus-5', nome: 'Opus 5', sobre: 'Trabalho pesado' },
+        { id: 'claude-opus-4-8', nome: 'Opus 4.8', sobre: 'Casual, mais rápido' },
+      ],
+      niveis: [
+        { id: 'baixo', nome: 'Baixo' }, { id: 'medio', nome: 'Médio' }, { id: 'alto', nome: 'Alto' },
+      ],
+    }),
+    definir_modelo: () => true, definir_raciocinio: () => true,
+    estado_perfil: () => ({ nome: 'Vitor', avatar: '', personalidade_extra: '' }),
+    definir_perfil: () => true, escolher_avatar: () => '',
+    playlist: () => ([
+      { video_id: 'dQw4w9WgXcQ', titulo: 'Rick Astley - Never Gonna Give You Up', thumb: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/mqdefault.jpg' },
+      { video_id: '9bZkp7q19f0', titulo: 'PSY - GANGNAM STYLE', thumb: 'https://i.ytimg.com/vi/9bZkp7q19f0/mqdefault.jpg' },
+    ]),
+    playlist_buscar_e_add: () => ({ erro: 'Mock: backend não disponível no preview.' }),
+    playlist_remover: () => true,
+    listar_memoria: () => {
+      // Muitos fatos de propósito, pra dar pra ver a paginação na oficina.
+      const base = [
+        'Vitor gosta de Hollow Knight.',
+        'O usuário se chama Vitor, tem 19 anos, é brasileiro e mora em SP.',
+        'Trabalha com código (programador).',
+        'Gosta do estilo antigo do canal Celbit.',
+        'Costuma trabalhar até tarde, pelo menos até meia-noite.',
+      ];
+      return Array.from({ length: 23 }, (_, i) => base[i % base.length] + ` (#${i + 1})`);
+    },
+    add_fato: () => true, del_fato: () => true,
+    sistema: () => ({ cpu: 34 + Math.random() * 20, ram: 61,
+                      hora: new Date().toTimeString().slice(0, 5), data: 'sexta, 22/08' }),
+    janela: () => true,
+  };
+  window.pywebview = { api };
+  window.dispatchEvent(new Event('pywebviewready'));
+  return true;
+}
+
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+
+/* ── A ponte ────────────────────────────────────────────────────────
+   Duas armadilhas aqui, as duas já pagas.
+
+   1. Esperar SÓ o evento 'pywebviewready' não serve: dependendo de quando a
+      WebView2 injeta a api, o evento pode disparar ANTES do app.js carregar,
+      e o listener nunca é chamado.
+
+   2. O pywebview 5 serve o index.html por um HTTP local (é pra isso que o
+      bottle entra nas dependências), então `location.protocol` é 'http:'
+      TAMBÉM em produção. O modo oficina, que era ligado por protocolo,
+      instalava a api de mentira em cima da real — e a Emily abria mostrando
+      conversas de amostra em vez das do Vitor. Agora a de mentira só entra
+      depois de esperar a real e ela não vir. */
+
+const ESPERA_PONTE_MS = 30000;   // teto pra ponte real subir (boot frio)
+const ESPERA_OFICINA_MS = 1800;  // depois disso, sem ponte real, é oficina
+const TETO_CHAMADA_MS = 8000;    // teto de UMA chamada, contado depois da ponte
+
+const pontePronta = () => typeof window.pywebview?.api?.perfil === 'function';
+
+let _avisouPonte = false;
+function esperarPonte() {
+  if (pontePronta()) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const inicio = Date.now();
+    let caiuNaOficina = false;
+    const olhar = () => {
+      if (pontePronta()) return resolve(true);
+      const gasto = Date.now() - inicio;
+      // Navegador comum: a ponte real nunca vem. Depois da espera curta,
+      // entra a de mentira pra dar pra mexer no design.
+      if (!caiuNaOficina && gasto > ESPERA_OFICINA_MS && oficina()) {
+        caiuNaOficina = true;
+        return resolve(true);
+      }
+      if (gasto > ESPERA_PONTE_MS) {
+        if (!_avisouPonte) {
+          _avisouPonte = true;
+          console.error('[emily] a ponte com o Python não subiu');
+        }
+        return resolve(false);
+      }
+      setTimeout(olhar, 60);
+    };
+    window.addEventListener('pywebviewready', () => { if (pontePronta()) resolve(true); },
+                            { once: true });
+    olhar();
+  });
+}
+
+async function api(metodo, ...args) {
+  if (!await esperarPonte()) throw new Error('ponte indisponível');
+  const fn = window.pywebview.api[metodo];
+  if (!fn) throw new Error(`api.${metodo} não existe`);
+  return await Promise.race([
+    Promise.resolve(fn(...args)),
+    new Promise((_, rej) => setTimeout(
+      () => rej(new Error(`api.${metodo} passou de ${TETO_CHAMADA_MS}ms`)), TETO_CHAMADA_MS)),
+  ]);
+}
+
+/* Chamada que não deve derrubar a tela. Devolve null quando falha: é melhor
+   desenhar sem um dado do que não desenhar. */
+const tenta = (m, ...a) => api(m, ...a).catch(e => {
+  console.warn(`[emily] ${m} falhou:`, e.message || e);
+  return null;
+});
+
+const ESTADO = {
+  tela: 'inicio',
+  conversas: [],
+  atual: null,
+  filtro: '',
+  anexos: [],
+  ultimoPedido: '',
+  emilyAberta: null,
+  ditoNoCartao: '',
+  progresso: null,
+  // Frases de "processo" — os comentários que ela fala ANTES de agir ("peraí,
+  // deixa eu ver"). Vão pro painel de progresso, e são removidas da resposta
+  // final pra não ficar tudo embolado numa bolha só.
+  falasProcesso: [],
+};
+
+/* ════════════════════════════════════════════════════════════════
+   ÍCONES  (traço, monocromáticos — nada de emoji colorido)
+   ════════════════════════════════════════════════════════════════ */
+
+const ICO = {
+  copiar:  '<path d="M9 9h10v10a2 2 0 01-2 2H9a2 2 0 01-2-2V9z"/><path d="M15 5H7a2 2 0 00-2 2v8"/>',
+  refazer: '<path d="M20 11a8 8 0 10-2.6 5.9"/><path d="M20 4v7h-7"/>',
+  lixo:    '<path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13"/>',
+  lapis:   '<path d="M4 20h4l11-11a2.1 2.1 0 00-3-3L5 17v3z"/>',
+  check:   '<path d="M4 12.5l5 5L20 6.5"/>',
+  x:       '<path d="M6 6l12 12M18 6L6 18"/>',
+  pasta:   '<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>',
+  raio:    '<path d="M13 2L4 14h6l-1 8 9-12h-6l1-8z"/>',
+  cubo:    '<path d="M12 2l9 5v10l-9 5-9-5V7l9-5z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+  chat:    '<path d="M21 12a8 8 0 01-8 8H8l-5 3 1.5-5A8 8 0 1121 12z"/>',
+  monitor: '<rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 20h8"/>',
+  tecla:   '<rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/>',
+  seta:    '<path d="M9 6l6 6-6 6"/>',
+  volta:   '<path d="M15 6l-6 6 6 6"/>',
+  cerebro: '<path d="M12 5a3 3 0 00-3 3v.2A2.8 2.8 0 007 11a2.8 2.8 0 001 2.1V14a3 3 0 003 3h1a3 3 0 003-3v-.9A2.8 2.8 0 0017 11a2.8 2.8 0 00-2-2.8V8a3 3 0 00-3-3z"/>',
+  info:    '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
+  disco:   '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/>',
+  clipe:   '<path d="M21.4 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.2-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/>',
+  lupa:    '<circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/>',
+  musica:  '<path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/>',
+  globo:   '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18"/>',
+};
+
+const svg = (d, cls = '') => `<svg class="${cls}" viewBox="0 0 24 24">${d}</svg>`;
+
+/* ════════════════════════════════════════════════════════════════
+   TEXTO: escape e markdown
+   A interface antiga renderizava markdown com três regex e não tinha
+   bloco de código nenhum. Aqui é um parser pequeno mas de verdade:
+   fence, inline code, negrito, itálico, link, lista, parágrafo.
+   ════════════════════════════════════════════════════════════════ */
+
+const esc = t => String(t ?? '')
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+/* ── Realce de código ──────────────────────────────────────────────
+   Sem biblioteca externa (é app local, offline). Um tokenizador só, que
+   colore o que dá o visual de "código de verdade" na esmagadora maioria
+   das linguagens que ela manda: comentário, string, número, palavra-chave,
+   constante e nome de função. Não é um parser por linguagem — é um passe
+   genérico que acerta Python, JS, e a maioria das de sintaxe C-like. */
+
+const _COD_KW = new Set((
+  // controle e declaração — a união das linguagens comuns
+  'def class return if elif else for while try except finally raise with as ' +
+  'import from in is not and or lambda yield global nonlocal pass break continue assert del ' +
+  'async await function var let const new typeof instanceof of do switch case default throw ' +
+  'public private protected static void int float double char boolean string export interface ' +
+  'extends implements package super this end then elsif module fn use struct impl match'
+).split(' '));
+
+const _COD_CONST = new Set(
+  'True False None self __name__ true false null undefined nil NaN Infinity'.split(' '));
+
+function destacar(codigo) {
+  // Ordem importa: comentário e string primeiro, pra não colorir palavra
+  // dentro deles. O último grupo ([\s\S]) garante que nada escapa sem escape.
+  const re = /(#[^\n]*|\/\/[^\n]*|\/\*[\s\S]*?\*\/|"""[\s\S]*?"""|'''[\s\S]*?''')|("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`)|(\b\d[\d_.eExXbBoOaAfF]*\b)|([A-Za-z_$][\w$]*)(\s*\()?|([\s\S])/g;
+  let out = '';
+  codigo.replace(re, (m, com, str, num, id, chamada, resto) => {
+    if (com != null) out += `<span class="tk-com">${esc(com)}</span>`;
+    else if (str != null) out += `<span class="tk-str">${esc(str)}</span>`;
+    else if (num != null) out += `<span class="tk-num">${esc(num)}</span>`;
+    else if (id != null) {
+      const cls = _COD_KW.has(id) ? 'tk-kw'
+        : _COD_CONST.has(id) ? 'tk-const'
+          : chamada ? 'tk-fn' : null;
+      const marcado = cls ? `<span class="${cls}">${esc(id)}</span>` : esc(id);
+      out += marcado + (chamada || '');
+    } else out += esc(resto);
+    return '';
+  });
+  return out;
+}
+
+// Nome bonito da linguagem pra mostrar no topo do bloco.
+const _COD_NOME = {
+  py: 'Python', python: 'Python', js: 'JavaScript', javascript: 'JavaScript',
+  ts: 'TypeScript', typescript: 'TypeScript', jsx: 'JSX', tsx: 'TSX',
+  html: 'HTML', css: 'CSS', json: 'JSON', bash: 'Bash', sh: 'Shell',
+  shell: 'Shell', sql: 'SQL', java: 'Java', c: 'C', cpp: 'C++', 'c++': 'C++',
+  cs: 'C#', csharp: 'C#', go: 'Go', rust: 'Rust', rs: 'Rust', php: 'PHP',
+  rb: 'Ruby', ruby: 'Ruby', yaml: 'YAML', yml: 'YAML', md: 'Markdown',
+  toml: 'TOML', xml: 'XML', kt: 'Kotlin', kotlin: 'Kotlin', lua: 'Lua',
+};
+
+function inline(t) {
+  return esc(t)
+    .replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(?<![*\w])\*([^*\n]+)\*(?![*\w])/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank">$1</a>')
+    .replace(/(^|[\s(])(https?:\/\/[^\s)<]+)/g, '$1<a href="$2" target="_blank">$2</a>');
+}
+
+function markdown(bruto) {
+  const texto = String(bruto ?? '');
+  const saida = [];
+  // Fence primeiro: o conteúdo dele não passa por mais nenhuma regra.
+  const partes = texto.split(/```/);
+  partes.forEach((parte, i) => {
+    if (i % 2 === 1) {
+      const nl = parte.indexOf('\n');
+      const rotulo = (nl >= 0 ? parte.slice(0, nl) : '').trim().toLowerCase();
+      // Se não veio nome de linguagem, o "primeiro token" NÃO é linguagem —
+      // é código. Só corta a primeira linha como rótulo se ela for uma
+      // palavra só (nome de linguagem), senão é tudo código.
+      const ehRotulo = /^[a-z0-9+#]{1,15}$/.test(rotulo);
+      const cod = (ehRotulo && nl >= 0 ? parte.slice(nl + 1) : parte).replace(/^\n/, '').replace(/\n$/, '');
+      const lang = ehRotulo ? rotulo : '';
+      const nome = _COD_NOME[lang] || (lang ? lang : 'código');
+      saida.push(
+        `<div class="bloco-cod"><div class="bloco-cod-topo"><span>${esc(nome)}</span>` +
+        `<button class="btn-copiar-cod" data-cod="${encodeURIComponent(cod)}">` +
+        svg(ICO.copiar) + `copiar</button></div>` +
+        `<pre><code>${destacar(cod)}</code></pre></div>`
+      );
+    } else {
+      saida.push(blocos(parte));
+    }
+  });
+  return saida.join('');
+}
+
+function blocos(trecho) {
+  const linhas = String(trecho).split('\n');
+  const out = [];
+  let lista = null, para = [];
+
+  const fechaPara = () => {
+    if (para.length) { out.push(`<p>${inline(para.join(' '))}</p>`); para = []; }
+  };
+  const fechaLista = () => {
+    if (lista) { out.push(`<${lista.tag}>${lista.itens.join('')}</${lista.tag}>`); lista = null; }
+  };
+
+  for (const linha of linhas) {
+    const l = linha.trim();
+    if (!l) { fechaPara(); fechaLista(); continue; }
+
+    const mUl = l.match(/^[-*•]\s+(.*)$/);
+    const mOl = l.match(/^\d+[.)]\s+(.*)$/);
+    if (mUl || mOl) {
+      fechaPara();
+      const tag = mUl ? 'ul' : 'ol';
+      if (!lista || lista.tag !== tag) { fechaLista(); lista = { tag, itens: [] }; }
+      lista.itens.push(`<li>${inline((mUl || mOl)[1])}</li>`);
+      continue;
+    }
+    fechaLista();
+    para.push(l);
+  }
+  fechaPara(); fechaLista();
+  return out.join('');
+}
+
+/* ════════════════════════════════════════════════════════════════
+   TOASTS
+   ════════════════════════════════════════════════════════════════ */
+
+function toast(msg, tipo = 'ok') {
+  const el = document.createElement('div');
+  el.className = 'toast' + (tipo === 'erro' ? ' erro' : '');
+  el.innerHTML = svg(tipo === 'erro' ? ICO.info : ICO.check) + `<span>${esc(msg)}</span>`;
+  $('#toasts').appendChild(el);
+  setTimeout(() => {
+    el.classList.add('saindo');
+    el.addEventListener('animationend', () => el.remove(), { once: true });
+  }, 2200);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   MODAL
+   ════════════════════════════════════════════════════════════════ */
+
+function modal({ titulo, texto = '', campo = null, ok = 'Confirmar', perigo = false }) {
+  return new Promise(resolve => {
+    const fundo = $('#modal-fundo');
+    fundo.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true">
+        <h3>${esc(titulo)}</h3>
+        ${texto ? `<p>${esc(texto)}</p>` : ''}
+        ${campo !== null ? `<input class="modal-in" id="m-campo" value="${esc(campo)}">` : ''}
+        <div class="modal-acoes">
+          <button class="btn-linha" id="m-nao">Cancelar</button>
+          <button class="btn-linha ${perigo ? '' : 'primario'}" id="m-sim"
+                  ${perigo ? 'style="background:var(--erro);color:#fff;border-color:transparent"' : ''}>${esc(ok)}</button>
+        </div>
+      </div>`;
+    fundo.hidden = false;
+
+    const campoEl = $('#m-campo');
+    if (campoEl) { campoEl.focus(); campoEl.select(); }
+
+    const fecha = val => {
+      document.removeEventListener('keydown', tecla);
+      resolve(val);
+      fundo.classList.add('saindo');
+      // A limpeza NÃO pode depender só do animationend. Na WebView2, trocar a
+      // animação pela classe às vezes não dispara o evento, e aí o
+      // #modal-fundo — um overlay `position:fixed; inset:0` — nunca recebia
+      // hidden e ficava por cima de TUDO comendo os cliques. Era esse o
+      // congelamento depois de apagar uma conversa. O timeout é a garantia:
+      // um dos dois roda, o flag impede rodar duas vezes.
+      let limpou = false;
+      const limpar = () => {
+        if (limpou) return;
+        limpou = true;
+        fundo.classList.remove('saindo');
+        fundo.hidden = true;
+        fundo.innerHTML = '';
+      };
+      fundo.addEventListener('animationend', limpar, { once: true });
+      setTimeout(limpar, 220);
+    };
+    const confirma = () => fecha(campoEl ? campoEl.value.trim() : true);
+    const tecla = e => {
+      if (e.key === 'Escape') { e.preventDefault(); fecha(null); }
+      if (e.key === 'Enter' && campoEl) { e.preventDefault(); confirma(); }
+    };
+
+    $('#m-sim').onclick = confirma;
+    $('#m-nao').onclick = () => fecha(null);
+    fundo.onclick = e => { if (e.target === fundo) fecha(null); };
+    document.addEventListener('keydown', tecla);
+  });
+}
+
+/* ════════════════════════════════════════════════════════════════
+   NAVEGAÇÃO ENTRE TELAS
+   O composer é UM só e é movido de tela em tela, pra o que estava
+   digitado não se perder na transição.
+   ════════════════════════════════════════════════════════════════ */
+
+/* Monta a tela na hora, SÍNCRONO.
+
+   A primeira versão esperava o `animationend` da tela velha pra montar a
+   nova, com um setTimeout de segurança. Isso criava uma corrida: quem
+   chamava irPara() e logo depois procurava um elemento da tela nova às
+   vezes achava a tela velha ainda no lugar — foi assim que abrir uma
+   conversa deixava o chat vazio. Agora a nova entra imediatamente e a
+   animação de entrada dela é que faz a transição. */
+function irPara(tela, { forcar = false } = {}) {
+  if (ESTADO.tela === tela && !forcar) return;
+  const palco = $('#palco');
+
+  /* O composer VIVE dentro da tela, então limpar o palco o destruiria
+     junto — com ele o texto digitado e os anexos em espera. Antes de
+     limpar, ele é posto em segurança fora do palco. */
+  const composer = $('#composer');
+  if (composer) document.body.appendChild(composer);
+
+  palco.innerHTML = '';
+  if (tela === 'config') {
+    palco.appendChild(telaConfig());
+  } else if (tela === 'perfil') {
+    palco.appendChild(telaPerfil());
+  } else {
+    const tpl = $(tela === 'chat' ? '#tpl-chat' : '#tpl-inicio');
+    palco.appendChild(tpl.content.cloneNode(true));
+    const vaga = $(tela === 'chat' ? '#composer-vaga-chat' : '#composer-vaga-inicio');
+    if (vaga && composer) vaga.appendChild(composer);
+    if (tela === 'chat') ligarFluxo(); else montarInicio();
+    ajustarEntrada();
+  }
+  ESTADO.tela = tela;
+  $('#btn-config').classList.toggle('ativa', tela === 'config');
+}
+
+async function montarInicio() {
+  const perfil = await tenta('perfil') || {};
+  const nome = perfil.nome || 'Vitor';
+  $('#hero-nome').textContent = nome;
+  if (perfil.avatar) $('#hero-img').src = perfil.avatar;
+
+  const sugs = await tenta('sugestoes') || [];
+  const alvo = $('#sugestoes');
+  if (!alvo) return;
+  alvo.innerHTML = '';
+  sugs.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'sugestao';
+    b.style.animationDelay = `${160 + i * 55}ms`;
+    b.innerHTML = svg(ICO[s.icone] || ICO.raio) + `<span>${esc(s.texto)}</span>`;
+    b.onclick = () => { $('#entrada').value = s.texto; ajustarEntrada(); enviar(); };
+    alvo.appendChild(b);
+  });
+}
+
+function ligarFluxo() {
+  const fluxo = $('#fluxo');
+  if (!fluxo) return;
+  fluxo.addEventListener('scroll', () => {
+    const longe = fluxo.scrollHeight - fluxo.scrollTop - fluxo.clientHeight > 220;
+    const btn = $('#ir-fim');
+    if (btn) btn.hidden = !longe;
+  });
+  const btn = $('#ir-fim');
+  if (btn) btn.onclick = () => rolarFim(true);
+}
+
+function rolarFim(suave = false) {
+  const fluxo = $('#fluxo');
+  if (!fluxo) return;
+  fluxo.scrollTo({ top: fluxo.scrollHeight, behavior: suave ? 'smooth' : 'auto' });
+}
+
+/* Só rola sozinho se o Vitor já estava no fim. Rolar por cima de
+   alguém que subiu pra reler é o jeito mais rápido de irritar. */
+function rolarSePerto() {
+  const fluxo = $('#fluxo');
+  if (!fluxo) return;
+  if (fluxo.scrollHeight - fluxo.scrollTop - fluxo.clientHeight < 240) rolarFim();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   MENSAGENS
+   ════════════════════════════════════════════════════════════════ */
+
+let _avatarEmily = '';
+
+function novaMsg(autor, html, { escrevendo = false } = {}) {
+  if (ESTADO.tela !== 'chat') irPara('chat');
+  const alvo = $('#fluxo-in');
+  if (!alvo) return null;
+
+  const el = document.createElement('article');
+  el.className = `msg de-${autor}` + (escrevendo ? ' escrevendo' : '');
+  const av = autor === 'emily' && _avatarEmily
+    ? `<span class="av"><img src="${_avatarEmily}" alt=""></span>` : '';
+  el.innerHTML =
+    `<header class="msg-autor">${av}<span>${autor === 'emily' ? 'Emily' : 'Você'}</span></header>` +
+    `<div class="msg-corpo">${html}</div>`;
+  alvo.appendChild(el);
+  acoesDaMsg(el, autor);
+  rolarSePerto();
+  return el;
+}
+
+function acoesDaMsg(el, autor) {
+  const barra = document.createElement('div');
+  barra.className = 'msg-acoes';
+
+  const botao = (ico, rot, fn, cls = '') => {
+    const b = document.createElement('button');
+    b.className = 'msg-acao ' + cls;
+    b.innerHTML = svg(ico) + `<span>${rot}</span>`;
+    b.onclick = () => fn(b);
+    barra.appendChild(b);
+    return b;
+  };
+
+  botao(ICO.copiar, 'Copiar', async b => {
+    const txt = el.querySelector('.msg-corpo')?.innerText || '';
+    await tenta('copiar', txt);
+    b.classList.add('feito');
+    b.innerHTML = svg(ICO.check) + '<span>Copiado</span>';
+    setTimeout(() => {
+      b.classList.remove('feito');
+      b.innerHTML = svg(ICO.copiar) + '<span>Copiar</span>';
+    }, 1600);
+  });
+
+  if (autor === 'emily') {
+    botao(ICO.refazer, 'Regenerar', async () => {
+      const pedido = ESTADO.ultimoPedido;
+      if (!pedido) return toast('Não tenho o pedido original pra refazer', 'erro');
+      el.classList.add('saindo');
+      el.remove();
+      await tenta('regenerar', pedido);
+    });
+  }
+
+  botao(ICO.lixo, '', async () => {
+    el.style.transition = 'opacity 160ms, transform 160ms';
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(10px)';
+    setTimeout(() => el.remove(), 170);
+  }, 'perigo');
+
+  el.appendChild(barra);
+}
+
+/* ── A fala dela: chega frase por frase pelo status ──────────────
+   O caminho normal é atualizar_status('falando', frase). Cada frase é
+   acrescentada à MESMA mensagem enquanto o estado continua 'falando'.
+
+   Mas ela também fala COMENTÁRIOS de processo antes de agir ("peraí, deixa
+   eu carregar as ferramentas"). Esses chegam pelo canal de progresso E, como
+   são falados, de novo pelo status — e antes ficavam colados na resposta
+   final ("...aquiTá ligada sim"). Agora eles são REMOVIDOS da bolha: o texto
+   cru de tudo que foi falado fica em ditoNoCartao, e o que aparece é isso
+   menos as frases de processo. Order-independent: não importa se o comentário
+   chega antes ou depois. */
+
+function _textoLimpoDaBolha() {
+  let t = ESTADO.ditoNoCartao || '';
+  for (const p of ESTADO.falasProcesso || []) {
+    if (p) t = t.split(p).join(' ');
+  }
+  return t.replace(/\s+/g, ' ').trim();
+}
+
+function _renderBolha() {
+  const t = _textoLimpoDaBolha();
+  if (!t) return;   // só teve comentário de processo até agora; sem bolha vazia
+  if (!ESTADO.emilyAberta || !ESTADO.emilyAberta.isConnected) {
+    ESTADO.emilyAberta = novaMsg('emily', '', { escrevendo: true });
+  }
+  const corpo = ESTADO.emilyAberta.querySelector('.msg-corpo');
+  if (corpo) corpo.innerHTML = markdown(t);
+  rolarSePerto();
+}
+
+function emilyEscreve(frase) {
+  const limpa = String(frase || '').trim();
+  if (!limpa) return;
+  // Acumula tudo que foi falado (cru). Dedup: o TTS às vezes reenvia a frase
+  // inteira em vez do pedaço novo.
+  const antes = ESTADO.ditoNoCartao;
+  if (!antes) ESTADO.ditoNoCartao = limpa;
+  else if (antes === limpa || antes.endsWith(limpa)) { /* repetição */ }
+  else ESTADO.ditoNoCartao = limpa.startsWith(antes) ? limpa : `${antes} ${limpa}`;
+  _renderBolha();
+}
+
+function emilyFecha() {
+  if (ESTADO.emilyAberta) ESTADO.emilyAberta.classList.remove('escrevendo');
+  ESTADO.emilyAberta = null;
+  ESTADO.ditoNoCartao = '';
+  ESTADO.falasProcesso = [];
+}
+
+/* O texto CRU e final da resposta, mandado pelo Python no fim do turno.
+   Por que ele existe: a bolha ao vivo é remontada das frases faladas, e a
+   fala PERDE as quebras de linha e as cercas de código (```), então bloco de
+   código chegava numa linha só e sem realce. O cru preserva tudo — aqui a
+   bolha é reescrita com ele, com markdown e código colorido de verdade. */
+function emilyRespostaFinal(texto) {
+  const t = String(texto || '').trim();
+  if (!t) return;
+  // A bolha do turno: a que está aberta, ou a última da Emily no fluxo.
+  let bolha = ESTADO.emilyAberta;
+  if (!bolha || !bolha.isConnected) {
+    const todas = $$('.msg.de-emily');
+    bolha = todas[todas.length - 1] || null;
+  }
+  const corpo = bolha && bolha.querySelector('.msg-corpo');
+  if (corpo) corpo.innerHTML = markdown(t);
+  else novaMsg('emily', markdown(t));
+  rolarSePerto();
+}
+
+/* ── Indicador de "digitando" ─────────────────────────────────── */
+function digitando(ligado) {
+  const existente = $('#digitando');
+  if (!ligado) { existente?.remove(); return; }
+  if (existente || ESTADO.tela !== 'chat') return;
+  const alvo = $('#fluxo-in');
+  if (!alvo) return;
+  const el = document.createElement('article');
+  el.id = 'digitando';
+  el.className = 'msg de-emily';
+  el.innerHTML = `<header class="msg-autor"><span>Emily</span></header>
+    <div class="digitando"><i></i><i></i><i></i></div>`;
+  alvo.appendChild(el);
+  rolarSePerto();
+}
+
+/* ── Painel de progresso ──────────────────────────────────────────
+   Enquanto ela trabalha, mostra os passos (ferramentas) e os comentários
+   de processo ("peraí, deixa eu ver"). Quando ela termina e responde, o
+   painel ENCOLHE num cabeçalho clicável — some da vista, e volta se o Vitor
+   clicar. É o "esconder o que ela fez" que ele pediu. */
+
+function _criarProgresso() {
+  if (ESTADO.tela !== 'chat') irPara('chat');
+  const alvo = $('#fluxo-in');
+  if (!alvo) return null;
+  const p = document.createElement('div');
+  p.className = 'progresso aberto trabalhando';
+  p.innerHTML = `
+    <button class="progresso-topo" type="button">
+      <span class="girando"></span>
+      <span class="progresso-rot">Trabalhando…</span>
+      <svg class="progresso-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div class="progresso-passos"></div>`;
+  // O cabeçalho sempre alterna aberto/fechado (útil durante e depois).
+  p.querySelector('.progresso-topo').onclick = () => p.classList.toggle('aberto');
+  alvo.appendChild(p);
+  ESTADO.progresso = p;
+  ESTADO.falasProcesso = [];   // novo turno, novo processo
+  return p;
+}
+
+function _colapsarProgresso(p) {
+  const n = p.querySelectorAll('.passo').length;
+  const c = p.querySelectorAll('.passo.fala').length;
+  const ferramentas = n - c;
+  const partes = [];
+  if (ferramentas) partes.push(`${ferramentas} ação${ferramentas > 1 ? 'ões' : ''}`);
+  if (c) partes.push(`${c} nota${c > 1 ? 's' : ''}`);
+  const rot = p.querySelector('.progresso-rot');
+  if (rot) rot.textContent = partes.length ? `O que eu fiz · ${partes.join(', ')}` : 'O que eu fiz';
+  p.querySelector('.girando')?.remove();
+  p.classList.remove('trabalhando', 'aberto');   // recolhido por padrão
+}
+
+function progresso(fase, dados = {}) {
+  if (fase === 'fim') {
+    if (ESTADO.progresso) { _colapsarProgresso(ESTADO.progresso); ESTADO.progresso = null; }
+    return;
+  }
+  if (!ESTADO.progresso || !ESTADO.progresso.isConnected) {
+    if (!_criarProgresso()) return;
+  }
+  const passos = ESTADO.progresso.querySelector('.progresso-passos');
+
+  if (fase === 'ferramenta') {
+    const el = document.createElement('div');
+    el.className = 'passo';
+    el.dataset.nome = dados.nome || '';
+    const args = dados.args && Object.keys(dados.args).length
+      ? ` <span style="color:var(--txt-3)">${esc(JSON.stringify(dados.args).slice(0, 90))}</span>` : '';
+    el.innerHTML = svg(ICO.raio, 'passo-ico') +
+      `<div class="passo-txt"><b>${esc(dados.nome || '?')}</b>${args}</div>`;
+    passos.appendChild(el);
+  } else if (fase === 'resultado') {
+    const alvos = $$('.passo', passos).filter(p => p.dataset.nome === (dados.nome || '') && !p.classList.contains('fala'));
+    const el = alvos[alvos.length - 1];
+    if (el) {
+      const ok = !/falhou|não existe|inválid|faltou/i.test(dados.resultado || '');
+      el.classList.add(ok ? 'ok' : 'falhou');
+      el.querySelector('.passo-ico')?.remove();
+      el.insertAdjacentHTML('afterbegin', svg(ok ? ICO.check : ICO.x, 'passo-ico'));
+      const res = String(dados.resultado || '').slice(0, 220);
+      if (res) el.querySelector('.passo-txt').insertAdjacentHTML('beforeend',
+        `<div class="passo-res">${esc(res)}</div>`);
+    }
+  } else if (fase === 'fala' && dados.texto) {
+    // Comentário de processo: entra no painel como nota, e é registrado pra
+    // ser tirado da resposta final. NÃO vai pra bolha.
+    const txt = String(dados.texto).trim();
+    if (txt) {
+      ESTADO.falasProcesso.push(txt);
+      const el = document.createElement('div');
+      el.className = 'passo fala';
+      el.innerHTML = svg(ICO.chat, 'passo-ico') +
+        `<div class="passo-txt"><span class="passo-nota">${esc(txt)}</span></div>`;
+      passos.appendChild(el);
+      _renderBolha();   // se o comentário já tinha entrado na bolha, limpa
+    }
+  }
+  rolarSePerto();
+}
+
+/* ── Imagem no chat ─────────────────────────────────────────── */
+function imagemNoChat(url, autor = 'user') {
+  novaMsg(autor, `<div class="img-card"><img src="${url}" alt=""></div>`);
+}
+
+function ofertaSalvar(caminho, url) {
+  const el = novaMsg('emily', `<div class="img-card"><img src="${url}" alt="">
+    <div class="img-acoes">
+      <button class="btn-linha primario" data-salvar>Salvar imagem</button>
+      <button class="btn-linha" data-descartar>Descartar</button>
+    </div></div>`);
+  if (!el) return;
+  el.querySelector('[data-salvar]').onclick = async e => {
+    const r = await tenta('salvar_imagem', caminho);
+    e.target.closest('.img-acoes').innerHTML =
+      `<span style="font-size:12.5px;color:var(--ok)">${r ? 'Salvo em ' + esc(r) : 'Não salvei'}</span>`;
+  };
+  el.querySelector('[data-descartar]').onclick = () =>
+    el.querySelector('.img-acoes').remove();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   STATUS
+   ════════════════════════════════════════════════════════════════ */
+
+const ROTULO = {
+  aguardando: 'Aguardando', ouvindo: 'Ouvindo', gravando: 'Gravando',
+  pensando: 'Pensando', falando: 'Falando', ocupada: 'Trabalhando',
+  monitorando: 'Olhando a tela', erro: 'Deu problema',
+};
+
+function aplicarStatus(estado, texto = '') {
+  const box = $('#status');
+  const e = String(estado || 'aguardando').toLowerCase();
+  box.dataset.e = e;
+  // O texto do status é o que o Python manda; sem ele, o rótulo do estado.
+  $('.status-txt', box).textContent = (e === 'falando' ? ROTULO.falando : (texto || ROTULO[e] || e));
+
+  if (e === 'falando') {
+    digitando(false);
+    if (texto) emilyEscreve(texto);
+  } else {
+    emilyFecha();
+    digitando(e === 'pensando' || e === 'ocupada');
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   SIDEBAR: lista, busca, renomear, apagar
+   ════════════════════════════════════════════════════════════════ */
+
+function quando(ts) {
+  const d = (Date.now() / 1000) - (ts || 0);
+  if (d < 86400) return 'Hoje';
+  if (d < 172800) return 'Ontem';
+  if (d < 604800) return 'Últimos 7 dias';
+  if (d < 2592000) return 'Últimos 30 dias';
+  return 'Mais antigas';
+}
+
+async function recarregarConversas() {
+  ESTADO.conversas = await tenta('listar_conversas') || [];
+  desenharConversas();
+}
+
+function desenharConversas() {
+  const alvo = $('#conversas');
+  alvo.innerHTML = '';
+
+  const f = ESTADO.filtro.toLowerCase();
+  const lista = f
+    ? ESTADO.conversas.filter(c => (c.titulo || '').toLowerCase().includes(f))
+    : ESTADO.conversas;
+
+  if (!lista.length) {
+    alvo.innerHTML = `<p class="vazio-lista">${f
+      ? 'Nada com esse nome.'
+      : 'Nenhuma conversa ainda.<br>Manda a primeira mensagem.'}</p>`;
+    return;
+  }
+
+  let grupoAtual = null;
+  lista.forEach((c, i) => {
+    const g = f ? null : quando(c.mexida);
+    if (g && g !== grupoAtual) {
+      grupoAtual = g;
+      const r = document.createElement('div');
+      r.className = 'grupo-rot';
+      r.textContent = g;
+      alvo.appendChild(r);
+    }
+    alvo.appendChild(linhaConversa(c, i));
+  });
+}
+
+function linhaConversa(c, i) {
+  const el = document.createElement('div');
+  el.className = 'conv' + (c.id === ESTADO.atual ? ' ativa' : '');
+  el.style.animationDelay = `${Math.min(i, 14) * 18}ms`;
+  el.innerHTML =
+    `<span class="conv-titulo">${esc(c.titulo || 'Conversa nova')}</span>
+     <span class="conv-acoes">
+       <button class="icone-btn mini" data-ren title="Renomear">${svg(ICO.lapis)}</button>
+       <button class="icone-btn mini" data-del title="Apagar">${svg(ICO.lixo)}</button>
+     </span>`;
+
+  const titulo = $('.conv-titulo', el);
+  el.onclick = e => { if (!e.target.closest('.conv-acoes')) abrirConversa(c.id); };
+
+  /* Renomear é edição no lugar, não caixa de diálogo: renomear é ação
+     leve e abrir modal pra isso é mais cliques do que a coisa vale.
+     conversas.renomear() já existia no Python e nunca tinha sido ligada. */
+  $('[data-ren]', el).onclick = () => {
+    el.classList.add('editando');
+    titulo.contentEditable = 'true';
+    titulo.focus();
+    document.getSelection().selectAllChildren(titulo);
+
+    const fim = async salvar => {
+      titulo.contentEditable = 'false';
+      el.classList.remove('editando');
+      const novo = titulo.textContent.trim();
+      if (salvar && novo && novo !== c.titulo) {
+        await tenta('renomear_conversa', c.id, novo);
+        c.titulo = novo;
+        toast('Renomeada');
+      }
+      titulo.textContent = c.titulo || 'Conversa nova';
+    };
+    titulo.onkeydown = ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); fim(true); }
+      if (ev.key === 'Escape') { ev.preventDefault(); fim(false); }
+    };
+    titulo.onblur = () => fim(true);
+  };
+
+  $('[data-del]', el).onclick = async () => {
+    const r = await modal({
+      titulo: 'Apagar esta conversa?',
+      texto: `"${c.titulo || 'Conversa nova'}" sai da lista e não volta.`,
+      ok: 'Apagar', perigo: true,
+    });
+    if (!r) return;
+    el.style.transition = 'opacity 160ms, transform 160ms';
+    el.style.opacity = '0'; el.style.transform = 'translateX(-14px)';
+    await tenta('apagar_conversa', c.id);
+    setTimeout(async () => {
+      if (ESTADO.atual === c.id) { ESTADO.atual = null; irPara('inicio'); }
+      await recarregarConversas();
+    }, 170);
+  };
+
+  return el;
+}
+
+async function abrirConversa(cid) {
+  if (ESTADO.atual === cid && ESTADO.tela === 'chat') return;
+  const msgs = await tenta('abrir_conversa', cid) || [];
+  ESTADO.atual = cid;
+  emilyFecha();
+  ESTADO.progresso = null;
+  irPara('chat', { forcar: true });
+
+  const alvo = $('#fluxo-in');
+  if (alvo) {
+    alvo.innerHTML = '';
+    msgs.forEach(m => {
+      const autor = (m.papel === 'assistant' || m.papel === 'emily') ? 'emily' : 'user';
+      const el = novaMsg(autor, markdown(m.texto || ''));
+      // Histórico não entra animado uma por uma: com 40 mensagens isso
+      // vira uma cascata de dois segundos antes de dar pra ler.
+      if (el) el.style.animation = 'none';
+    });
+    rolarFim();
+  }
+  desenharConversas();
+}
+
+async function novaConversa() {
+  const cid = await tenta('nova_conversa');
+  ESTADO.atual = cid || null;
+  emilyFecha();
+  irPara('inicio', { forcar: true });
+  await recarregarConversas();
+  $('#entrada')?.focus();
+}
+
+/* ════════════════════════════════════════════════════════════════
+   COMPOSER
+   ════════════════════════════════════════════════════════════════ */
+
+function ajustarEntrada() {
+  const t = $('#entrada');
+  if (!t) return;
+  t.style.height = 'auto';
+  t.style.height = Math.min(t.scrollHeight, 200) + 'px';
+  $('#btn-enviar').disabled = !t.value.trim() && !ESTADO.anexos.length;
+}
+
+function desenharAnexos() {
+  const box = $('#anexos');
+  box.innerHTML = '';
+  box.hidden = !ESTADO.anexos.length;
+  ESTADO.anexos.forEach((a, i) => {
+    const el = document.createElement('div');
+    el.className = 'anexo';
+    el.innerHTML = (a.previa
+      ? `<img src="${a.previa}" alt="">`
+      : svg(ICO.pasta, 'anexo-ico')) +
+      `<span class="anexo-nome">${esc(a.nome)}</span>
+       <button class="icone-btn mini">${svg(ICO.x)}</button>`;
+    el.querySelector('button').onclick = () => {
+      ESTADO.anexos.splice(i, 1); desenharAnexos(); ajustarEntrada();
+    };
+    box.appendChild(el);
+  });
+}
+
+async function enviar() {
+  const t = $('#entrada');
+  const texto = t.value.trim();
+  if (!texto && !ESTADO.anexos.length) return;
+
+  for (const a of ESTADO.anexos) {
+    imagemNoChat(a.previa || a.url, 'user');
+    await tenta('enviar_arquivo', a.caminho);
+  }
+  ESTADO.anexos = []; desenharAnexos();
+
+  if (texto) {
+    ESTADO.ultimoPedido = texto;
+    novaMsg('user', markdown(texto));
+    t.value = ''; ajustarEntrada();
+    digitando(true);
+    await tenta('enviar', texto);
+    // O título vem do Python (LLM) e leva um instante; recarrega depois.
+    setTimeout(recarregarConversas, 1400);
+  } else {
+    t.value = ''; ajustarEntrada();
+  }
+}
+
+/* ════════════════════════════════════════════════════════════════
+   PONTE: o que o Python chama
+   ════════════════════════════════════════════════════════════════ */
+
+window.Emily = {
+  on(evento, dados) {
+    try {
+      const d = dados || {};
+      switch (evento) {
+        case 'status':    aplicarStatus(d.estado, d.texto); break;
+        case 'msg':       novaMsg(d.autor === 'emily' ? 'emily' : 'user', markdown(d.texto)); break;
+        case 'resposta':  emilyRespostaFinal(d.texto); break;
+        case 'imagem':    imagemNoChat(d.url, d.autor || 'user'); break;
+        case 'salvar':    ofertaSalvar(d.caminho, d.url); break;
+        case 'progresso': progresso(d.fase, d.dados || {}); break;
+        case 'conversas': recarregarConversas(); break;
+        case 'avatar':    _avatarEmily = d.url || ''; break;
+        case 'toast':     toast(d.texto, d.tipo); break;
+        default: console.warn('[emily] evento desconhecido:', evento);
+      }
+    } catch (e) { console.error('[emily] on(' + evento + ')', e); }
+  },
+};
+
+/* ════════════════════════════════════════════════════════════════
+   CONFIGURAÇÕES — uma coluna, largura de leitura
+   ════════════════════════════════════════════════════════════════ */
+
+function telaConfig() {
+  const sec = document.createElement('section');
+  sec.className = 'tela config';
+  sec.innerHTML = `
+    <div class="config-in">
+      <div class="config-topo">
+        <button class="btn-voltar" id="cfg-voltar">${svg(ICO.volta)}<span>Voltar</span></button>
+        <h1>Configurações</h1>
+      </div>
+      <div id="cfg-corpo"></div>
+    </div>`;
+  setTimeout(() => {
+    $('#cfg-voltar').onclick = () => irPara(ESTADO.atual ? 'chat' : 'inicio');
+    montarConfig();
+  }, 0);
+  return sec;
+}
+
+function secao(titulo, corpoHtml, nota = '', extra = '') {
+  return `<section class="secao">
+    <div class="secao-cab"><h2>${esc(titulo)}</h2>${extra}</div>
+    ${nota ? `<p class="secao-nota">${esc(nota)}</p>` : ''}
+    ${corpoHtml}
+  </section>`;
+}
+
+/* ── Tela de perfil (nome, foto, personalidade) ──────────────────
+   Reusa a moldura da tela de configurações (config-in / config-topo). */
+
+function telaPerfil() {
+  const sec = document.createElement('section');
+  sec.className = 'tela config';
+  sec.innerHTML = `
+    <div class="config-in">
+      <div class="config-topo">
+        <button class="btn-voltar" id="perf-voltar">${svg(ICO.volta)}<span>Voltar</span></button>
+        <h1>Seu perfil</h1>
+      </div>
+      <div id="perf-corpo"></div>
+    </div>`;
+  setTimeout(() => {
+    $('#perf-voltar').onclick = () => irPara(ESTADO.atual ? 'chat' : 'inicio');
+    montarPerfil();
+  }, 0);
+  return sec;
+}
+
+async function montarPerfil() {
+  const corpo = $('#perf-corpo');
+  if (!corpo) return;
+  const p = await tenta('estado_perfil') || {};
+  const inicial = ((p.nome || 'V')[0] || 'V').toUpperCase();
+
+  corpo.innerHTML =
+    secao('Identidade', `
+      <div class="perf-foto">
+        <div class="perf-av" id="perf-av">${p.avatar ? `<img src="${p.avatar}" alt="">` : esc(inicial)}</div>
+        <div class="perf-foto-txt">
+          <button class="btn-linha" id="perf-trocar-foto">Trocar foto</button>
+          <small>A mesma foto aparece no canto e nas respostas dela.</small>
+        </div>
+      </div>
+      <label class="campo"><span>Seu nome</span>
+        <input id="perf-nome" value="${esc(p.nome || '')}" placeholder="Como a Emily te chama" spellcheck="false">
+      </label>`) +
+    secao('Personalidade da Emily', `
+      <label class="campo"><span>Instruções extras</span>
+        <textarea id="perf-pers" rows="5" placeholder="Ex: fala mais curto, me chama de chefe, segura os palavrões quando eu tô no trabalho..." spellcheck="false">${esc(p.personalidade_extra || '')}</textarea>
+      </label>`,
+      'Isso entra por cima do jeitão dela, sem substituir a base tsundere.') +
+    `<div class="perf-salvar"><button class="btn-linha destaque" id="perf-salvar">Salvar</button></div>`;
+
+  $('#perf-trocar-foto').onclick = async () => {
+    const uri = await tenta('escolher_avatar');
+    if (!uri) { toast('Não troquei a foto', 'erro'); return; }
+    $('#perf-av').innerHTML = `<img src="${uri}" alt="">`;
+    _avatarEmily = uri;
+    const pav = $('#perfil-av'); if (pav) pav.innerHTML = `<img src="${uri}" alt="">`;
+    const h = $('#hero-img'); if (h) h.src = uri;
+    toast('Foto atualizada');
+  };
+  $('#perf-salvar').onclick = async () => {
+    const nome = $('#perf-nome').value.trim();
+    const pers = $('#perf-pers').value;
+    const ok = await tenta('definir_perfil', nome, pers);
+    if (!ok) { toast('Não consegui salvar', 'erro'); return; }
+    if (nome) {
+      const pn = $('#perfil-nome'); if (pn) pn.textContent = nome;
+    }
+    toast('Perfil salvo');
+  };
+}
+
+async function montarConfig() {
+  const corpo = $('#cfg-corpo');
+  if (!corpo) return;
+
+  /* Tudo que a tela mostra vem numa tacada só. Não há mais a seção "Modos"
+     (que puxava listar_modos, lento por importar o catálogo inteiro): o único
+     controle de Discord agora é "Acompanhar o Discord", na Automação. */
+  const [apps, autom, fatos, sis] = await Promise.all([
+    tenta('listar_apps'), tenta('estado_automacao'),
+    tenta('listar_memoria'), tenta('sistema'),
+  ]);
+
+  const htmlApps = (apps || []).map(a => `
+    <button class="app" data-app="${esc(a.nome)}" ${a.existe ? '' : 'style="opacity:.45"'}
+            title="${a.existe ? esc(a.nome) : esc(a.nome) + ' — não encontrei o executável'}">
+      <span class="app-ico" style="background:${esc(a.cor || '#333')};color:${esc(a.tinta || '#fff')}">
+        ${esc(a.letra || (a.nome || '?')[0])}
+      </span><span>${esc(a.nome)}</span></button>`).join('');
+
+  const linhaChave = (id, ico, tit, sub, ligado) => `
+    <div class="item">
+      ${svg(ico, 'item-ico')}
+      <div class="item-txt"><strong>${esc(tit)}</strong><small>${esc(sub)}</small></div>
+      <button class="chave" role="switch" data-chave="${id}" aria-checked="${!!ligado}"></button>
+    </div>`;
+
+  const linhaAcao = (id, ico, tit, sub) => `
+    <div class="item clicavel" data-acao="${id}">
+      ${svg(ico, 'item-ico')}
+      <div class="item-txt"><strong>${esc(tit)}</strong><small>${esc(sub)}</small></div>
+      ${svg(ICO.seta, 'item-seta')}
+    </div>`;
+
+  const a = autom || {};
+  corpo.innerHTML =
+    secao('Abrir rápido', `<div class="apps">${htmlApps || '<p class="secao-nota">Nenhum app encontrado.</p>'}</div>`) +
+    secao('Automação',
+      `<div class="lista">
+        ${linhaAcao('organizar', ICO.pasta, 'Organizar downloads',
+          'Separa os arquivos da pasta por tipo, agora')}
+        ${linhaChave('monitor_downloads', ICO.disco, 'Vigiar downloads',
+          'Avisa e oferece extrair quando um download termina', a.monitor_downloads)}
+        ${linhaChave('monitor_discord', ICO.chat, 'Acompanhar o Discord',
+          'Escuta e responde no servidor sem você pedir', a.monitor_discord)}
+        ${linhaChave('mudo', ICO.info, 'Voz muda',
+          'Ela continua respondendo por texto, sem falar', a.mudo)}
+      </div>`) +
+    secao('Memória',
+      `<div id="cfg-mem"></div>`,
+      'O que ela lembra de você entre as conversas.') +
+    secao('Este computador', medidores(sis || {}));
+
+  ligarConfig();
+  desenharFatos(fatos || []);
+}
+
+/* ── Memória, paginada ─────────────────────────────────────────────
+   Eram 140 fatos numa lista só — um scroll interminável. Agora vão de
+   POR_PAGINA em POR_PAGINA, cada um compacto (duas linhas, expande no
+   clique), com um contador e setas. */
+
+const FATOS_POR_PAGINA = 8;
+
+function desenharFatos(lista) {
+  if (lista !== undefined) { ESTADO.fatos = lista; ESTADO.fatoPag = 0; }
+  const box = $('#cfg-mem');
+  if (!box) return;
+
+  const fatos = ESTADO.fatos || [];
+  const paginas = Math.max(1, Math.ceil(fatos.length / FATOS_POR_PAGINA));
+  ESTADO.fatoPag = Math.min(Math.max(0, ESTADO.fatoPag || 0), paginas - 1);
+  const ini = ESTADO.fatoPag * FATOS_POR_PAGINA;
+  const pagina = fatos.slice(ini, ini + FATOS_POR_PAGINA);
+
+  const linhas = pagina.map(f => `
+    <div class="fato">
+      ${svg(ICO.cerebro, 'item-ico')}
+      <span class="fato-txt" title="clique pra ler inteiro">${esc(f)}</span>
+      <button class="icone-btn mini fato-x" data-fato="${encodeURIComponent(f)}">${svg(ICO.x)}</button>
+    </div>`).join('') ||
+    `<div class="fato"><span class="fato-txt" style="color:var(--txt-3)">Nada guardado ainda.</span></div>`;
+
+  const controles = paginas > 1 ? `
+    <div class="paginacao">
+      <button class="pg-btn" id="pg-ant" ${ESTADO.fatoPag === 0 ? 'disabled' : ''}>${svg(ICO.volta)}</button>
+      <span class="pg-cont">${ESTADO.fatoPag + 1} / ${paginas} · ${fatos.length} fatos</span>
+      <button class="pg-btn" id="pg-prox" ${ESTADO.fatoPag >= paginas - 1 ? 'disabled' : ''}>${svg(ICO.seta)}</button>
+    </div>` : (fatos.length
+      ? `<p class="secao-nota" style="text-align:center;margin-top:var(--r2)">${fatos.length} fato${fatos.length > 1 ? 's' : ''}</p>`
+      : '');
+
+  box.innerHTML = `
+    <div class="lista fatos">${linhas}
+      <div class="add-fato">
+        ${svg(ICO.raio, 'item-ico')}
+        <input id="cfg-novo-fato" placeholder="Ensinar um fato novo sobre você" spellcheck="false">
+        <button class="btn-linha" id="cfg-add-fato">Guardar</button>
+      </div>
+    </div>${controles}`;
+
+  ligarFatos();
+}
+
+function ligarFatos() {
+  const box = $('#cfg-mem');
+  if (!box) return;
+
+  // Clicar no texto expande/recolhe o fato longo.
+  $$('.fato-txt', box).forEach(t => t.onclick = () => t.classList.toggle('aberto'));
+
+  $$('[data-fato]', box).forEach(b => b.onclick = async () => {
+    const fato = decodeURIComponent(b.dataset.fato);
+    const linha = b.closest('.fato');
+    linha.classList.add('saindo');
+    await tenta('del_fato', fato);
+    ESTADO.fatos = (ESTADO.fatos || []).filter(f => f !== fato);
+    setTimeout(() => desenharFatos(), 200);   // sem argumento = mantém a página
+  });
+
+  const addFato = async () => {
+    const inp = $('#cfg-novo-fato', box);
+    const txt = inp.value.trim();
+    if (!txt) return;
+    await tenta('add_fato', txt);
+    ESTADO.fatos = [txt, ...(ESTADO.fatos || [])];
+    ESTADO.fatoPag = 0;
+    toast('Guardado na memória');
+    desenharFatos();
+  };
+  const addBtn = $('#cfg-add-fato', box);
+  const addInp = $('#cfg-novo-fato', box);
+  if (addBtn) addBtn.onclick = addFato;
+  if (addInp) addInp.onkeydown = e => { if (e.key === 'Enter') addFato(); };
+
+  const ant = $('#pg-ant', box), prox = $('#pg-prox', box);
+  if (ant) ant.onclick = () => { ESTADO.fatoPag--; desenharFatos(); };
+  if (prox) prox.onclick = () => { ESTADO.fatoPag++; desenharFatos(); };
+}
+
+function medidores(s) {
+  const barra = v => {
+    const cls = v > 88 ? 'critico' : v > 68 ? 'alto' : '';
+    return `<div class="barra-med"><i class="${cls}" style="width:${Math.max(2, v)}%"></i></div>`;
+  };
+  const cpu = Math.round(s.cpu || 0), ram = Math.round(s.ram || 0);
+  return `<div class="medidores">
+    <div class="medidor"><div class="medidor-rot">Processador</div>
+      <div class="medidor-val" id="med-cpu">${cpu}%</div>${barra(cpu)}</div>
+    <div class="medidor"><div class="medidor-rot">Memória</div>
+      <div class="medidor-val" id="med-ram">${ram}%</div>${barra(ram)}</div>
+    <div class="medidor"><div class="medidor-rot">Agora</div>
+      <div class="medidor-val" id="med-hora">${esc(s.hora || '--:--')}</div>
+      <div style="font-size:11.5px;color:var(--txt-3)">${esc(s.data || '')}</div></div>
+  </div>`;
+}
+
+function ligarConfig() {
+  $$('[data-app]').forEach(b => b.onclick = async () => {
+    await tenta('abrir_app', b.dataset.app);
+    toast(`Abrindo ${b.dataset.app}`);
+  });
+
+  $$('[data-acao="organizar"]').forEach(el => el.onclick = async () => {
+    toast('Organizando os downloads…');
+    const r = await tenta('organizar_downloads');
+    if (r) toast(String(r).slice(0, 70));
+  });
+
+  $$('.chave').forEach(ch => ch.onclick = async () => {
+    const ligado = ch.getAttribute('aria-checked') !== 'true';
+    ch.setAttribute('aria-checked', String(ligado));   // otimista: o toggle responde na hora
+    const ok = await tenta('set_toggle', ch.dataset.chave, ligado);
+    // Reverte se o backend recusou (retorno false) OU se a chamada caiu (null).
+    // Antes só revertia em null, então uma falha silenciosa (false) deixava o
+    // toggle mentindo que estava ligado.
+    if (!ok) {
+      ch.setAttribute('aria-checked', String(!ligado));
+      toast('Não consegui mudar isso agora', 'erro');
+    }
+  });
+  // Os fatos da memória têm ligação própria (ligarFatos), porque são
+  // paginados e redesenhados sem refazer a tela inteira.
+}
+
+/* ════════════════════════════════════════════════════════════════
+   POPOVER — menu flutuante ancorado (menu do +, seletor de modelo/raciocínio)
+   Abre acima da âncora (o composer vive no rodapé), fecha no clique fora ou Esc.
+   ════════════════════════════════════════════════════════════════ */
+
+let _popAberto = null;
+
+function fecharPop() {
+  if (_popAberto) { _popAberto.remove(); _popAberto = null; }
+  document.removeEventListener('click', _popForaClick, true);
+  document.removeEventListener('keydown', _popEsc, true);
+}
+function _popForaClick(e) {
+  if (_popAberto && !_popAberto.contains(e.target) && !_popAberto._ancora.contains(e.target))
+    fecharPop();
+}
+function _popEsc(e) { if (e.key === 'Escape') fecharPop(); }
+
+function abrirPop(ancora, itens) {
+  const jaAberto = _popAberto && _popAberto._ancora === ancora;
+  fecharPop();
+  if (jaAberto) return;   // segundo clique na mesma âncora fecha
+
+  const pop = document.createElement('div');
+  pop.className = 'popover';
+  pop._ancora = ancora;
+  itens.forEach(it => {
+    const b = document.createElement('button');
+    b.className = 'popover-item' + (it.ativo ? ' ativo' : '');
+    b.innerHTML =
+      (it.icone ? svg(it.icone, 'pi-ico') : '') +
+      `<span class="pi-txt"><strong>${esc(it.rotulo)}</strong>${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span>` +
+      (it.selecionavel ? svg(ICO.check, 'pi-check') : '');
+    b.onclick = (e) => { e.stopPropagation(); fecharPop(); it.acao && it.acao(); };
+    pop.appendChild(b);
+  });
+  document.body.appendChild(pop);
+
+  const r = ancora.getBoundingClientRect();
+  const pr = pop.getBoundingClientRect();
+  let left = Math.max(8, Math.min(r.left, window.innerWidth - pr.width - 8));
+  let top = r.top - pr.height - 8;
+  if (top < 8) top = r.bottom + 8;   // sem espaço acima, abre pra baixo
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
+  _popAberto = pop;
+  setTimeout(() => {
+    document.addEventListener('click', _popForaClick, true);
+    document.addEventListener('keydown', _popEsc, true);
+  }, 0);
+}
+
+/* ── Seletores de modelo e raciocínio do composer ─────────────── */
+
+let _modeloAtual = '', _racioAtual = '', _modelosDisp = [], _niveisDisp = [];
+
+async function carregarSeletores() {
+  const est = await tenta('estado_modelo');
+  if (!est) return;
+  _modelosDisp = est.modelos || [];
+  _niveisDisp = est.niveis || [];
+  _modeloAtual = est.modelo || (_modelosDisp[0] && _modelosDisp[0].id) || '';
+  _racioAtual = est.raciocinio || 'baixo';
+  pintarSeletores();
+}
+function pintarSeletores() {
+  const m = _modelosDisp.find(x => x.id === _modeloAtual);
+  const n = _niveisDisp.find(x => x.id === _racioAtual);
+  const em = $('#sel-modelo-nome'); if (em) em.textContent = m ? m.nome : 'Modelo';
+  const en = $('#sel-racio-nome'); if (en) en.textContent = n ? n.nome : 'Raciocínio';
+}
+function menuModelo() {
+  abrirPop($('#sel-modelo'), _modelosDisp.map(m => ({
+    icone: ICO.cerebro, rotulo: m.nome, sub: m.sobre, selecionavel: true,
+    ativo: m.id === _modeloAtual,
+    acao: async () => {
+      const ok = await tenta('definir_modelo', m.id);
+      if (ok) { _modeloAtual = m.id; pintarSeletores(); toast(`Modelo: ${m.nome}`); }
+      else toast('Não consegui trocar o modelo', 'erro');
+    },
+  })));
+}
+function menuRaciocinio() {
+  abrirPop($('#sel-racio'), _niveisDisp.map(n => ({
+    icone: ICO.raio, rotulo: n.nome, selecionavel: true,
+    ativo: n.id === _racioAtual,
+    acao: async () => {
+      const ok = await tenta('definir_raciocinio', n.id);
+      if (ok) { _racioAtual = n.id; pintarSeletores(); toast(`Raciocínio: ${n.nome}`); }
+      else toast('Não consegui mudar o raciocínio', 'erro');
+    },
+  })));
+}
+function menuAdd() {
+  const prefill = txt => { const t = $('#entrada'); if (!t) return; t.value = txt; ajustarEntrada(); t.focus(); };
+  const mandar  = txt => { const t = $('#entrada'); if (!t) return; t.value = txt; ajustarEntrada(); enviar(); };
+  abrirPop($('#btn-add'), [
+    { icone: ICO.clipe, rotulo: 'Anexar arquivo', sub: 'Imagem ou documento do PC', acao: async () => {
+        const arqs = await tenta('escolher_arquivos') || [];
+        arqs.forEach(a => ESTADO.anexos.push(a)); desenharAnexos(); ajustarEntrada();
+    }},
+    { icone: ICO.disco, rotulo: 'Analisar o disco', sub: 'Ver o que tá enchendo o espaço', acao: () => mandar('analisa meu disco C e me diz o que tá ocupando espaço') },
+    { icone: ICO.pasta, rotulo: 'Organizar downloads', sub: 'Separa a pasta por tipo, agora', acao: async () => {
+        toast('Organizando os downloads…'); const r = await tenta('organizar_downloads'); if (r) toast(String(r).slice(0, 70));
+    }},
+    { icone: ICO.lupa, rotulo: 'Buscar no PC', sub: 'Achar uma pasta ou arquivo', acao: () => prefill('procura no meu PC ') },
+    { icone: ICO.musica, rotulo: 'Tocar música', sub: 'No player padrão', acao: () => prefill('toca ') },
+    { icone: ICO.globo, rotulo: 'Pesquisar na web', sub: 'Buscar na internet', acao: () => prefill('pesquisa na internet sobre ') },
+  ]);
+}
+
+/* ════════════════════════════════════════════════════════════════
+   LIGAÇÕES GERAIS
+   ════════════════════════════════════════════════════════════════ */
+
+function ligarTudo() {
+  // Mover, redimensionar, minimizar/maximizar/fechar são da moldura NATIVA
+  // do Windows agora — não há mais botões de janela pra ligar aqui.
+  $('#btn-sidebar').onclick = () => document.body.classList.toggle('sem-lateral');
+  ligarResizeLateral();
+  $('#btn-novo').onclick   = novaConversa;
+  $('#btn-config').onclick = () => irPara(ESTADO.tela === 'config' ? 'inicio' : 'config');
+
+  const busca = $('#busca');
+  busca.oninput = () => {
+    ESTADO.filtro = busca.value.trim();
+    $('#busca-limpar').hidden = !ESTADO.filtro;
+    desenharConversas();
+  };
+  $('#busca-limpar').onclick = () => {
+    busca.value = ''; ESTADO.filtro = '';
+    $('#busca-limpar').hidden = true; desenharConversas(); busca.focus();
+  };
+
+  const t = $('#entrada');
+  t.oninput = ajustarEntrada;
+  t.onkeydown = e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviar(); }
+  };
+  $('#btn-enviar').onclick = enviar;
+  $('#btn-mic').onclick    = () => tenta('ptt');
+  $('#btn-tela').onclick   = () => { tenta('capturar_tela'); toast('Olhando a tela'); };
+  $('#btn-add').onclick    = (e) => { e.stopPropagation(); menuAdd(); };
+  $('#sel-modelo').onclick = (e) => { e.stopPropagation(); menuModelo(); };
+  $('#sel-racio').onclick  = (e) => { e.stopPropagation(); menuRaciocinio(); };
+  const perf = $('#perfil');
+  if (perf) perf.onclick = () => irPara(ESTADO.tela === 'perfil' ? (ESTADO.atual ? 'chat' : 'inicio') : 'perfil');
+}
+
+/* ── Redimensionar a barra lateral ────────────────────────────────
+   Arrastar a alça muda --lateral-w; o chat reflui sozinho (coluna de leitura
+   centrada com largura máxima). Abaixo de um mínimo, recolhe inteira. A
+   largura fica salva no localStorage e volta na próxima abertura. */
+
+const LAT_MIN = 190, LAT_MAX = 460, LAT_COLAPSA = 150;
+
+function aplicarLarguraLateral(px) {
+  document.documentElement.style.setProperty('--lateral-w', px + 'px');
+}
+
+function ligarResizeLateral() {
+  // Restaura a largura salva.
+  try {
+    const salvo = localStorage.getItem('emily_lateral');
+    if (salvo === 'colapsada') document.body.classList.add('sem-lateral');
+    else if (salvo) aplicarLarguraLateral(Math.min(LAT_MAX, Math.max(LAT_MIN, parseInt(salvo, 10))));
+  } catch (_) { /* localStorage pode faltar; segue no default */ }
+
+  const alca = $('#lateral-resize');
+  if (!alca) return;
+
+  const arrastar = e => {
+    e.preventDefault();
+    document.body.classList.add('redimensionando');
+    // Se estava recolhida, arrastar a traz de volta.
+    document.body.classList.remove('sem-lateral');
+
+    const mover = ev => {
+      const x = (ev.touches ? ev.touches[0].clientX : ev.clientX);
+      if (x < LAT_COLAPSA) {                 // puxou pra bem perto da borda: recolhe
+        document.body.classList.add('sem-lateral');
+        return;
+      }
+      document.body.classList.remove('sem-lateral');
+      aplicarLarguraLateral(Math.min(LAT_MAX, Math.max(LAT_MIN, x)));
+    };
+    const soltar = () => {
+      document.body.classList.remove('redimensionando');
+      window.removeEventListener('mousemove', mover);
+      window.removeEventListener('mouseup', soltar);
+      window.removeEventListener('touchmove', mover);
+      window.removeEventListener('touchend', soltar);
+      try {
+        if (document.body.classList.contains('sem-lateral'))
+          localStorage.setItem('emily_lateral', 'colapsada');
+        else
+          localStorage.setItem('emily_lateral',
+            String(parseInt(getComputedStyle(document.documentElement).getPropertyValue('--lateral-w'), 10)));
+      } catch (_) { /* sem localStorage, tudo bem */ }
+    };
+    window.addEventListener('mousemove', mover);
+    window.addEventListener('mouseup', soltar);
+    window.addEventListener('touchmove', mover, { passive: false });
+    window.addEventListener('touchend', soltar);
+  };
+
+  alca.addEventListener('mousedown', arrastar);
+  alca.addEventListener('touchstart', arrastar, { passive: false });
+  // Duplo-clique na alça: recolhe/reabre.
+  alca.addEventListener('dblclick', () => {
+    document.body.classList.toggle('sem-lateral');
+    try {
+      localStorage.setItem('emily_lateral',
+        document.body.classList.contains('sem-lateral') ? 'colapsada'
+          : String(parseInt(getComputedStyle(document.documentElement).getPropertyValue('--lateral-w'), 10)));
+    } catch (_) {}
+  });
+}
+
+/* Copiar bloco de código: delegação, porque os blocos nascem depois. */
+document.addEventListener('click', async e => {
+  const b = e.target.closest('.btn-copiar-cod');
+  if (!b) return;
+  await tenta('copiar', decodeURIComponent(b.dataset.cod));
+  const antes = b.innerHTML;
+  b.innerHTML = svg(ICO.check) + 'copiado';
+  setTimeout(() => { b.innerHTML = antes; }, 1500);
+});
+
+/* Colar imagem: Ctrl+V com bitmap no clipboard. O Python salva o
+   arquivo temporário, porque quem sabe mexer em disco é ele. */
+document.addEventListener('paste', async e => {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+  if (!item) return;
+  e.preventDefault();
+  const arquivo = item.getAsFile();
+  if (!arquivo) return;
+  const b64 = await new Promise(r => {
+    const fr = new FileReader();
+    fr.onload = () => r(String(fr.result).split(',')[1]);
+    fr.readAsDataURL(arquivo);
+  });
+  const salvo = await tenta('salvar_colado', b64);
+  if (salvo) { ESTADO.anexos.push(salvo); desenharAnexos(); ajustarEntrada(); }
+});
+
+/* Arrastar arquivo pra qualquer lugar da janela. */
+['dragover', 'drop'].forEach(ev => document.addEventListener(ev, e => e.preventDefault()));
+document.addEventListener('drop', async e => {
+  const nomes = [...(e.dataTransfer?.files || [])].map(f => f.name);
+  if (!nomes.length) return;
+  // O WebView não entrega o caminho real do arquivo; pede pro Python
+  // resolver pelo nome nas pastas mais prováveis.
+  const arqs = await tenta('resolver_arrastados', nomes) || [];
+  arqs.forEach(a => ESTADO.anexos.push(a));
+  if (arqs.length) { desenharAnexos(); ajustarEntrada(); }
+  else toast('Não achei esse arquivo; usa o clipe pra anexar', 'erro');
+});
+
+/* Atalhos. Nenhum deles existia na interface antiga. */
+document.addEventListener('keydown', e => {
+  const digitando = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName)
+    || document.activeElement?.isContentEditable;
+
+  if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); novaConversa(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 'b') { e.preventDefault(); $('#btn-sidebar').click(); return; }
+  if (e.ctrlKey && e.key.toLowerCase() === 'k') { e.preventDefault(); $('#busca').focus(); return; }
+  if (e.ctrlKey && e.key === ',') { e.preventDefault(); irPara('config'); return; }
+  if (e.key === 'Escape' && !digitando) {
+    if (ESTADO.tela === 'config') irPara(ESTADO.atual ? 'chat' : 'inicio');
+    return;
+  }
+  // Digitar em qualquer lugar cai na caixa de texto.
+  if (!digitando && !e.ctrlKey && !e.altKey && e.key.length === 1) {
+    const t = $('#entrada');
+    if (t) { t.focus(); }
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════
+   PARTIDA
+   ════════════════════════════════════════════════════════════════ */
+
+async function iniciar() {
+  ligarTudo();
+  irPara('inicio', { forcar: true });
+  document.body.classList.remove('carregando');
+
+  const perfil = await tenta('perfil') || {};
+  $('#perfil-nome').textContent = perfil.nome || 'Vitor';
+  $('#perfil-sub').textContent = perfil.sub || 'IA pessoal';
+  if (perfil.avatar) {
+    _avatarEmily = perfil.avatar;
+    $('#perfil-av').innerHTML = `<img src="${perfil.avatar}" alt="">`;
+    const h = $('#hero-img'); if (h) h.src = perfil.avatar;
+  } else {
+    $('#perfil-av').textContent = (perfil.nome || 'V')[0].toUpperCase();
+  }
+
+  await recarregarConversas();
+  carregarSeletores();
+  $('#entrada')?.focus();
+
+  // Relógio e medidores da tela de configurações, só quando ela está aberta.
+  setInterval(async () => {
+    if (ESTADO.tela !== 'config') return;
+    const s = await tenta('sistema');
+    if (!s) return;
+    const cpu = $('#med-cpu'), ram = $('#med-ram'), hora = $('#med-hora');
+    if (cpu) cpu.textContent = Math.round(s.cpu || 0) + '%';
+    if (ram) ram.textContent = Math.round(s.ram || 0) + '%';
+    if (hora) hora.textContent = s.hora || '--:--';
+    const barras = $$('.barra-med i');
+    if (barras[0]) barras[0].style.width = Math.max(2, s.cpu || 0) + '%';
+    if (barras[1]) barras[1].style.width = Math.max(2, s.ram || 0) + '%';
+  }, 3000);
+}
+
+if (document.readyState !== 'loading') iniciar();
+else document.addEventListener('DOMContentLoaded', iniciar);
+
+
+
+
+
+
+
+
+
+
+
+/* ════════════════════════════════════════════════════════════════
+   MUSIC PLAYER
+   Áudio via iframe embedado do YouTube (API IFrame oficial). O Python
+   só fornece playlist e busca; o estado de reprodução vive aqui.
+   ════════════════════════════════════════════════════════════════ */
+
+const Player = {
+  playlist: [],
+  indice: -1,
+  tocando: false,
+  loop: true,
+  shuffle: false,
+  player: null,       // objeto YT.Player
+  pronto: false,
+  _historico: [],
+
+  async carregarPlaylist() {
+    this.playlist = (await tenta('playlist')) || [];
+  },
+
+  _carregarIframe() {
+    if (this.pronto || this._carregando) return;
+    this._carregando = true;
+    const tag = document.createElement('script');
+    tag.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(tag);
+    window.onYouTubeIframeAPIReady = () => {
+      this.player = new YT.Player('yt-host', {
+        height: '180', width: '320',
+        playerVars: { autoplay: 1, controls: 0 },
+        events: {
+          onReady: () => { this.pronto = true; this._carregando = false; },
+          onStateChange: (e) => this._estado(e.data),
+          onError: () => this.proxima(true),
+        },
+      });
+    };
+  },
+
+  _estado(estado) {
+    // 1 = tocando, 2 = pausado, 0 = terminou
+    if (estado === 0) { this.proxima(); return; }
+    this.tocando = estado === 1;
+    this._pintaControles();
+  },
+
+  tocar(indice) {
+    if (!this.playlist.length) return;
+    if (indice == null) {
+      indice = this.shuffle ? Math.floor(Math.random() * this.playlist.length) : 0;
+    }
+    indice = ((indice % this.playlist.length) + this.playlist.length) % this.playlist.length;
+    if (this.indice >= 0 && this.indice !== indice && this.tocando) {
+      this._historico.push(this.indice);
+    }
+    this.indice = indice;
+    const m = this.playlist[this.indice];
+    this._carregarIframe();
+    const iniciar = () => {
+      this.player.loadVideoById(m.video_id);
+      this.tocando = true;
+      this._pintaBarra();
+      this._pintaControles();
+      this._pintaModal();
+    };
+    this.pronto ? iniciar() : this._filaInicio = iniciar;
+  },
+
+  proxima(pulouPorErro = false) {
+    if (!this.playlist.length) return;
+    let i;
+    if (this.shuffle) {
+      i = Math.floor(Math.random() * this.playlist.length);
+      if (this.playlist.length > 1 && i === this.indice) i = (i + 1) % this.playlist.length;
+    } else {
+      i = this.indice + 1;
+      if (i >= this.playlist.length) {
+        if (!this.loop && !pulouPorErro) { this.pausar(); return; }
+        i = 0;
+      }
+    }
+    this.tocar(i);
+  },
+
+  anterior() {
+    if (this._historico.length) return this.tocar(this._historico.pop());
+    this.tocar((this.indice - 1 + this.playlist.length) % this.playlist.length);
+  },
+
+  playPause() {
+    if (!this.player || !this.pronto || this.indice < 0) return;
+    this.tocando ? this.player.pauseVideo() : this.player.playVideo();
+  },
+
+  pausar() {
+    try { this.player && this.player.pauseVideo(); } catch {}
+    this.tocando = false;
+    this._pintaControles();
+  },
+
+  alternarLoop() { this.loop = !this.loop; this._pintaControles(); },
+  alternarShuffle() { this.shuffle = !this.shuffle; this._pintaControles(); },
+
+  fechar() {
+    try { this.player && this.player.stopVideo(); } catch {}
+    $('#player-barra').hidden = true;
+    document.body.classList.remove('com-player');
+  },
+
+  _atual(m) {
+    return m || this.playlist[this.indice] || null;
+  },
+
+  _pintaBarra() {
+    const m = this.playlist[this.indice];
+    if (!m) return;
+    $('#player-thumb').src = m.thumb;
+    $('#player-titulo').textContent = m.titulo;
+    $('#player-sub').textContent = `Música ${this.indice + 1} de ${this.playlist.length}`;
+    $('#player-barra').hidden = false;
+    document.body.classList.add('com-player');
+  },
+
+  _pintaControles() {
+    $('#player-ico-play').hidden = this.tocando;
+    $('#player-ico-pause').hidden = !this.tocando;
+    $('#player-loop').classList.toggle('ativa', this.loop);
+    $('#player-shuffle').classList.toggle('ativa', this.shuffle);
+  },
+
+  _pintaModal() {
+    if ($('#modal-player').hidden) return;
+    desenharPlaylist();
+  },
+};
+
+let _filaInicio = null;
+Object.defineProperty(Player, '_filaInicio', {
+  set(fn) { if (fn) this.__fila = fn; },
+  get() {
+    const f = this.__fila; this.__fila = null;
+    if (f && this.pronto) setTimeout(f, 0);
+    return f;
+  },
+});
+
+function desenharPlaylist() {
+  const lista = $('#pl-lista');
+  if (!lista) return;
+  lista.innerHTML = '';
+  if (!Player.playlist.length) {
+    lista.innerHTML = '<p class="modal-player-erro">Playlist vazia — busca uma música aí em cima.</p>';
+    return;
+  }
+  Player.playlist.forEach((m, i) => {
+    const div = document.createElement('div');
+    div.className = 'pl-item' + (i === Player.indice ? ' tocando' : '');
+    div.innerHTML =
+      `<img src="${esc(m.thumb)}" alt="">` +
+      `<div class="pl-item-txt"><strong>${esc(m.titulo)}</strong>` +
+      `<small>${i + 1}</small></div>`;
+    div.onclick = () => { Player.tocar(i); };
+    const del = document.createElement('button');
+    del.className = 'icone-btn mini pl-item-del';
+    del.title = 'Remover da playlist';
+    del.innerHTML = '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>';
+    del.onclick = async (ev) => {
+      ev.stopPropagation();
+      await tenta('playlist_remover', m.video_id);
+      await Player.carregarPlaylist();
+      desenharPlaylist();
+    };
+    div.appendChild(del);
+    lista.appendChild(div);
+  });
+}
+
+function ligarPlayer() {
+  $('#btn-music').onclick = async () => {
+    await Player.carregarPlaylist();
+    $('#modal-player').hidden = false;
+    desenharPlaylist();
+    $('#pl-query').focus();
+  };
+
+  $('#modal-player-fechar').onclick = () => { $('#modal-player').hidden = true; };
+  $('#modal-player').onclick = (e) => {
+    if (e.target.id === 'modal-player') $('#modal-player').hidden = true;
+  };
+
+  $('#pl-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $('#pl-query').value.trim();
+    if (!q) return;
+    const erro = $('#pl-erro');
+    erro.hidden = true;
+    const r = await tenta('playlist_buscar_e_add', q);
+    if (r && r.erro) { erro.textContent = r.erro; erro.hidden = false; return; }
+    $('#pl-query').value = '';
+    await Player.carregarPlaylist();
+    desenharPlaylist();
+  };
+
+  $('#player-play').onclick = () => Player.playPause();
+  $('#player-next').onclick = () => Player.proxima();
+  $('#player-prev').onclick = () => Player.anterior();
+  $('#player-loop').onclick = () => Player.alternarLoop();
+  $('#player-shuffle').onclick = () => Player.alternarShuffle();
+  $('#player-fechar').onclick = () => Player.fechar();
+
+  // Clique na thumb abre o modal da playlist.
+  $('#player-thumb').onclick = async () => {
+    await Player.carregarPlaylist();
+    $('#modal-player').hidden = false;
+    desenharPlaylist();
+  };
+}
+
+// Liga junto com os outros botões no boot.
+const _iniciarBase = typeof iniciar === 'function' ? iniciar : null;
+document.addEventListener('DOMContentLoaded', () => {
+  // ligarPlayer roda depois do boot principal; pequeno atraso garante DOM pronto.
+  setTimeout(ligarPlayer, 50);
+});
+</script></body>
+</html>

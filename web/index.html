@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emily</title>
+<link rel="stylesheet" href="estilo.css?v=20261008-openai-icon">
+<link rel="stylesheet" href="cloud.css">
+<link rel="stylesheet" href="editor.css?v=20261007-editor-clipboard-fix">
+<script src="editor-core.js?v=20261007" defer></script>
+<script src="editor-controls.js?v=20261007-editor-clipboard-fix" defer></script>
+<script src="editor.js?v=20261007-editor-clipboard-fix" defer></script>
+<link rel="stylesheet" href="navegador-interno.css">
+<script src="navegador-interno.js" defer></script>
+<script src="progressive-reply.js?v=20261009" defer></script>
+<script src="app.js?v=20261007-editor-clipboard-fix" defer></script>
+<link rel="stylesheet" href="emily-music.css">
+<script src="music-offline.js" defer></script>
+<script src="emily-music.js" defer></script>
+<link rel="stylesheet" href="xadrez.css">
+<script src="vendor/chess.js" defer></script>
+<script src="xadrez-audio.js" defer></script>
+<script src="xadrez.js" defer></script>
+<script src="cloud.js" defer></script>
+<link rel="stylesheet" href="dark-controls.css?v=20261007-editor-clipboard-fix"><script src="dark-controls.js?v=20261007-editor-clipboard-fix" defer></script></head>
+<body class="carregando">
+
+<!-- ══ TOOLBAR ══════════════════════════════════════════════════
+     A janela agora usa a MOLDURA NATIVA do Windows (mover, redimensionar,
+     min/max/fechar vêm do sistema). Isto aqui é só uma faixa de app com o
+     botão da barra lateral e o indicador de estado. -->
+<header class="barra" id="barra">
+  <div class="barra-esq">
+    <button class="icone-btn" id="btn-inicio" title="Tela inicial (Ctrl+Shift+H)">
+      <svg viewBox="0 0 24 24"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9v11h14V9"/><path d="M9.5 20v-6h5v6"/></svg>
+    </button>
+    <button class="icone-btn" id="btn-sidebar" title="Recolher a barra lateral (Ctrl+B)">
+      <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+    </button>
+  </div>
+  <div class="barra-arrasta"></div>
+  <div class="barra-dir">
+    <button class="navegador-toggle" id="btn-xadrez" type="button" aria-expanded="false" aria-controls="xadrez-painel" title="Jogar xadrez com a Emily"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 21h12l-1-4H8zM9 17l1-4-3-1 1-6 5-3 4 2 1 6-4 1-1 5M11 7h1"/></svg><span>Xadrez</span></button>
+    <button class="navegador-toggle" id="btn-navegador-interno" type="button"
+            title="Mostrar navegador ao lado do chat" aria-label="Mostrar navegador ao lado do chat"
+            aria-expanded="false" aria-controls="navegador-painel">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M13 9v11"/></svg>
+      <span>Navegador</span>
+    </button>
+    <button id="btn-editor" type="button" aria-pressed="false" title="Editar a interface (Ctrl+Shift+E)"><span aria-hidden="true">✎</span><span>Editor</span></button>
+    <div class="status" id="status">
+      <span class="status-ponto"></span>
+      <span class="status-txt">Aguardando</span>
+    </div>
+  </div>
+</header>
+
+<div class="editor-toolbar" id="editor-toolbar" role="region" aria-label="Modo editor"></div>
+<div class="corpo" id="corpo">
+  <!-- ══ SIDEBAR ════════════════════════════════════════════════ -->
+  <aside class="lateral" id="lateral">
+    <div class="cfg-side" id="cfg-side" aria-label="Navegação das configurações">
+      <div class="cfg-side-topo">
+        <button class="cfg-side-voltar" id="cfg-side-voltar" type="button" aria-label="Voltar ao chat"></button>
+        <strong>Configurações</strong>
+      </div>
+      <label class="cfg-side-busca">
+        <span class="cfg-side-busca-ico" aria-hidden="true"></span>
+        <input id="cfg-busca" type="search" placeholder="Buscar ajustes" aria-label="Buscar ajustes" autocomplete="off">
+      </label>
+      <nav class="cfg-nav" id="cfg-nav" aria-label="Seções de configurações"></nav>
+      <p class="cfg-nav-vazio" id="cfg-nav-vazio" hidden>Nenhum ajuste encontrado.</p>
+    </div>
+    <button class="btn-music" id="btn-music" title="Emily Music">
+      <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      <span>Emily Music</span>
+    </button>
+    <button class="btn-cloud" id="btn-cloud" title="Arquivo da Emily">
+      <svg viewBox="0 0 24 24"><path d="M7.5 18.5h10a4 4 0 00.7-7.94A6.5 6.5 0 005.7 8.7 4.8 4.8 0 007.5 18.5z"/><path d="M12 11v6M9.5 13.5L12 11l2.5 2.5"/></svg>
+      <span>Arquivo da Emily</span>
+      <i class="cloud-dot" aria-hidden="true"></i>
+    </button>
+    <button class="btn-novo" id="btn-novo">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+      <span>Nova conversa</span>
+      <kbd>Ctrl N</kbd>
+    </button>
+
+    <button class="btn-code" id="btn-code">
+      <svg viewBox="0 0 24 24"><path d="M4 17l6-5-6-5"/><path d="M12 19h8"/></svg>
+      <span>Emily Code</span>
+      <kbd>Ctrl ⇧ K</kbd>
+    </button>
+    <div class="busca">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
+      <input type="text" id="busca" placeholder="Buscar conversa" spellcheck="false">
+      <button class="icone-btn mini" id="busca-limpar" hidden>
+        <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+
+    <nav class="conversas" id="conversas"></nav>
+
+    <footer class="lateral-pe">
+      <button class="linha-pe" id="btn-config">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M21.423 10.164A9.6 9.6 0 0 1 21.423 13.836L18.762 13.81A7 7 0 0 1 18.061 15.502L19.961 17.365A9.6 9.6 0 0 1 17.365 19.961L15.502 18.061A7 7 0 0 1 13.81 18.762L13.836 21.423A9.6 9.6 0 0 1 10.164 21.423L10.19 18.762A7 7 0 0 1 8.498 18.061L6.635 19.961A9.6 9.6 0 0 1 4.039 17.365L5.939 15.502A7 7 0 0 1 5.238 13.81L2.577 13.836A9.6 9.6 0 0 1 2.577 10.164L5.238 10.19A7 7 0 0 1 5.939 8.498L4.039 6.635A9.6 9.6 0 0 1 6.635 4.039L8.498 5.939A7 7 0 0 1 10.19 5.238L10.164 2.577A9.6 9.6 0 0 1 13.836 2.577L13.81 5.238A7 7 0 0 1 15.502 5.939L17.365 4.039A9.6 9.6 0 0 1 19.961 6.635L18.061 8.498A7 7 0 0 1 18.762 10.19Z"/></svg>
+        <span>Configurações</span>
+      </button>
+      <div class="perfil" id="perfil">
+        <div class="perfil-av" id="perfil-av">V</div>
+        <div class="perfil-txt">
+          <strong id="perfil-nome">Vitor</strong>
+        </div>
+      </div>
+    </footer>
+  </aside>
+
+  <!-- Alça pra arrastar e redimensionar a barra lateral. -->
+  <div class="lateral-resize" id="lateral-resize" title="Arraste pra ajustar · duplo-clique pra recolher"></div>
+
+  <!-- ══ PALCO ══════════════════════════════════════════════════ -->
+  <main class="palco" id="palco"></main>
+  <section id="xadrez-painel" class="xadrez-painel" aria-label="Xadrez com a Emily" hidden></section>
+  <div class="navegador-divisor" id="navegador-divisor" role="separator"
+       aria-label="Ajustar largura do navegador" aria-orientation="vertical" hidden></div>
+  <aside class="navegador-painel" id="navegador-painel" aria-label="Navegador da Emily" hidden></aside>
+</div>
+
+<div class="toasts" id="toasts"></div>
+<div class="atualizacao-fundo" id="atualizacao-fundo" role="status" aria-live="polite" hidden>
+  <div class="atualizacao-cartao">
+    <div class="atualizacao-simbolo" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.8 9a7 7 0 0 1 12.4-2L20 12M4 12l1.8 5a7 7 0 0 0 12.4-2"/></svg>
+    </div>
+    <div class="atualizacao-progresso"><span></span></div>
+    <strong id="atualizacao-titulo">Atualizando a Emily</strong>
+    <p id="atualizacao-texto">Validando as mudanças antes de reiniciar…</p>
+    <button class="atualizacao-fechar" id="atualizacao-fechar" type="button" hidden>Continuar usando a Emily</button>
+  </div>
+</div>
+<div class="modal-fundo" id="modal-fundo" hidden></div>
+<div class="logs-fundo" id="logs-fundo" hidden></div>
+
+<!-- Agente visual: popover global aberto pelo monitor do composer. A tarefa
+     continua em segundo plano mesmo quando estes controles ficam ocultos. -->
+<aside class="agente-ui-painel" id="agente-ui-painel" hidden
+       data-estado="parado" data-ativo="false" aria-label="Agente visual">
+  <button class="agente-ui-topo" id="agente-ui-toggle" type="button"
+          title="Fechar controles do agente visual">
+    <span class="agente-ui-sinal" aria-hidden="true"></span>
+    <span class="agente-ui-titulos">
+      <strong>Agente visual</strong>
+      <small id="agente-ui-resumo">Pronto para controlar a tela</small>
+    </span>
+    <span class="agente-ui-passo" id="agente-ui-passo"></span>
+    <svg class="agente-ui-chevron" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+  </button>
+  <div class="agente-ui-corpo">
+    <form class="agente-ui-iniciar" id="agente-ui-form-iniciar">
+      <input id="agente-ui-objetivo-input" type="text" maxlength="600"
+             placeholder="O que a Emily deve fazer na tela?" autocomplete="off">
+      <button class="agente-ui-btn primario" id="agente-ui-iniciar" type="submit">Iniciar</button>
+    </form>
+
+    <div class="agente-ui-execucao" id="agente-ui-execucao" hidden>
+      <p class="agente-ui-objetivo" id="agente-ui-objetivo"></p>
+      <div class="agente-ui-meta">
+        <span id="agente-ui-estado">Parado</span>
+        <span id="agente-ui-backend">Desktop</span>
+      </div>
+      <p class="agente-ui-aviso" id="agente-ui-aviso" hidden></p>
+      <div class="agente-ui-acoes">
+        <button class="agente-ui-btn" id="agente-ui-pausar" type="button">Pausar</button>
+        <button class="agente-ui-btn" id="agente-ui-retomar" type="button" hidden>Continuar</button>
+        <button class="agente-ui-btn perigo" id="agente-ui-cancelar" type="button">Parar</button>
+      </div>
+      <form class="agente-ui-mensagem" id="agente-ui-form-mensagem">
+        <input id="agente-ui-mensagem-input" type="text" maxlength="400"
+               placeholder="Corrigir ou orientar o próximo passo…" autocomplete="off">
+        <button class="agente-ui-enviar" type="submit" title="Enviar instrução ao vivo"
+                aria-label="Enviar instrução ao vivo">
+          <svg viewBox="0 0 24 24"><path d="M4 12l16-8-6 16-2.5-6.5L4 12z"/><path d="M11.5 13.5L20 4"/></svg>
+        </button>
+      </form>
+    </div>
+  </div>
+</aside>
+
+<!-- ══ MUSIC PLAYER ════════════════════════════════════════════
+     O iframe do YouTube fica OCULTO e é quem toca o áudio (API JS oficial).
+     A barra fixa no rodapé mostra thumb, título e os controles. -->
+<div id="yt-host" aria-hidden="true"></div>
+
+<div class="player-barra" id="player-barra" role="region" aria-label="Reprodutor de música" hidden>
+  <img class="player-ambiente" id="player-ambiente" alt="" aria-hidden="true">
+  <div class="player-seek-row">
+    <span class="player-time" id="player-time-cur">0:00</span>
+    <input type="range" class="player-seek" id="player-seek" min="0" max="100" value="0" step="0.1"
+           title="Arrastar pra buscar" aria-label="Posição da música">
+    <span class="player-time" id="player-time-dur">0:00</span>
+  </div>
+  <div class="player-barra-inner">
+    <button class="player-faixa" id="player-faixa" type="button" title="Abrir fila de reprodução">
+      <span class="player-capa">
+        <img class="player-thumb" id="player-thumb" alt="">
+        <span class="player-eq" aria-hidden="true"><i></i><i></i><i></i></span>
+      </span>
+      <span class="player-info">
+        <strong class="player-titulo" id="player-titulo">—</strong>
+        <small class="player-sub" id="player-sub" aria-live="polite">Emily Music</small>
+      </span>
+    </button>
+
+    <!-- Sequência linear centralizada: shuffle · prev · PLAY · next · loop.
+         Ícones em STROKE (linha leve), mesmo traço do botão Emily Music. -->
+    <div class="player-centro" id="player-centro">
+      <button class="pbtn pbtn-mini" id="player-shuffle" title="Aleatório" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path d="M16 3H21V8"/><path d="M4 20L21 3"/><path d="M21 16V21H16"/><path d="M15 15L21 21"/><path d="M4 4L9 9"/></svg>
+      </button>
+      <button class="pbtn" id="player-prev" title="Anterior">
+        <svg viewBox="0 0 24 24"><path d="M19 20L9 12L19 4V20Z"/><path d="M5 19V5"/></svg>
+      </button>
+      <button class="pbtn pbtn-play pausado" id="player-play" title="Tocar/Pausar" aria-label="Tocar">
+        <svg viewBox="0 0 24 24" class="ico-play"><path d="M8 5.5V18.5L19 12L8 5.5Z"/></svg>
+        <svg viewBox="0 0 24 24" class="ico-pause"><path d="M8 5V19M16 5V19"/></svg>
+      </button>
+      <button class="pbtn" id="player-next" title="Próxima">
+        <svg viewBox="0 0 24 24"><path d="M5 4L15 12L5 20V4Z"/><path d="M19 5V19"/></svg>
+      </button>
+      <button class="pbtn pbtn-mini" id="player-loop" title="Repetir playlist" aria-pressed="false">
+        <svg viewBox="0 0 24 24"><path d="M17 2L21 6L17 10"/><path d="M3 11V10C3 7.8 4.8 6 7 6H21"/><path d="M7 22L3 18L7 14"/><path d="M21 13V14C21 16.2 19.2 18 17 18H3"/></svg>
+        <span class="loop-badge" id="loop-badge" hidden>1</span>
+      </button>
+    </div>
+
+    <!-- Volume + janela: UM bloco só na zona direita, espelhando a info -->
+    <div class="player-dir">
+      <div class="player-vol" title="Volume">
+        <button class="pbtn pbtn-mini" id="player-mute" title="Silenciar">
+          <svg viewBox="0 0 24 24" id="vol-ico-alto"><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7"/><path d="M18.5 5.5a9 9 0 010 13"/></svg>
+          <svg viewBox="0 0 24 24" id="vol-ico-mudo" hidden><path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M22 9l-6 6M16 9l6 6"/></svg>
+        </button>
+        <div class="player-vol-slider-wrap">
+          <input type="range" class="player-vol-slider" id="player-vol" min="0" max="100" value="100"
+                 aria-label="Volume">
+          <span class="player-vol-pct" id="player-vol-pct">100%</span>
+        </div>
+      </div>
+      <div class="player-janela">
+        <button class="pbtn pbtn-mini" id="player-minimizar" title="Minimizar barra (a música continua)">
+          <svg viewBox="0 0 16 16"><path d="M2 8a.75.75 0 0 1 .75-.75h10.5a.75.75 0 0 1 0 1.5H2.75A.75.75 0 0 1 2 8z"/></svg>
+        </button>
+        <button class="pbtn pbtn-mini" id="player-fechar" title="Fechar player">
+          <svg viewBox="0 0 16 16"><path d="M2.47 2.47a.75.75 0 0 1 1.06 0L8 6.94l4.47-4.47a.75.75 0 1 1 1.06 1.06L9.06 8l4.47 4.47a.75.75 0 1 1-1.06 1.06L8 9.06l-4.47 4.47a.75.75 0 0 1-1.06-1.06L6.94 8 2.47 3.53a.75.75 0 0 1 0-1.06z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Emily Music: biblioteca independente da fila em reprodução. -->
+<div class="modal-player" id="modal-player" hidden>
+  <section class="modal-player-caixa emusic" role="dialog" aria-modal="true" aria-labelledby="modal-player-titulo">
+    <header class="emusic-top">
+      <div class="emusic-brand"><span class="emusic-logo" aria-hidden="true">♫</span><div><small>SEU SOM, SEU ESPAÇO</small><h2 id="modal-player-titulo">Emily Music</h2></div></div>
+      <form class="pl-busca-form" id="pl-form"><input type="search" id="pl-query" placeholder="O que você quer ouvir? Música ou link do YouTube" aria-label="Buscar música no YouTube" autocomplete="off"><button type="submit" class="pl-buscar" aria-label="Buscar"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16 16l5 5"/></svg></button></form>
+      <button class="icone-btn" id="modal-player-fechar" aria-label="Voltar ao chat" title="Voltar ao chat"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </header>
+    <div class="emusic-layout">
+      <aside class="pl-sidebar" id="pl-sidebar">
+        <nav class="emusic-tabs" aria-label="Emily Music">
+          <button data-music-tab="inicio" class="ativo">Início</button><button data-music-tab="biblioteca">Biblioteca</button><button data-music-tab="favoritas">Curtidas</button><button data-music-tab="fila">Fila</button><button data-music-tab="letras">Letras</button>
+        </nav>
+        <div class="pl-sidebar-topo"><span class="pl-sidebar-tit">Suas playlists</span><button class="icone-btn mini" id="pl-nova" title="Criar playlist" aria-label="Criar playlist"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
+        <input id="music-filter-playlists" type="search" placeholder="Filtrar biblioteca" aria-label="Filtrar playlists">
+        <nav class="pl-sidebar-lista" id="pl-sidebar-lista" aria-label="Playlists"></nav>
+        <small class="emusic-source">Seu acervo • YouTube</small>
+      </aside>
+      <main class="emusic-content">
+        <div class="emusic-viewbar"><span id="music-breadcrumb">Início</span><div><button class="btn-linha" id="pl-tocar-tudo">Tocar playlist</button><button class="btn-linha" id="pl-filtro-fav" aria-pressed="false">Só curtidas</button></div></div>
+        <p class="modal-player-erro" id="pl-erro" role="status" hidden></p>
+        <section class="pl-preview" id="pl-preview" hidden></section>
+        <section id="music-home"></section>
+        <section id="music-library" hidden><div class="pl-info" id="pl-info"></div><div class="music-track-tools"><input id="music-filter-tracks" type="search" placeholder="Encontrar nesta playlist" aria-label="Filtrar faixas"><select id="music-sort" aria-label="Ordenar faixas"><option value="ordem">Ordem da playlist</option><option value="titulo">Título A–Z</option><option value="recentes">Adicionadas recentemente</option></select></div><nav class="modal-player-lista" id="pl-lista" aria-label="Músicas"></nav></section>
+        <section id="music-queue" hidden></section>
+        <section id="music-lyrics" hidden><div class="music-lyrics-head"><small>ACOMPANHE A MÚSICA</small><h2>Letras</h2><p>Escolha a gravação para acompanhar a letra certa.</p></div><form id="music-lyrics-form"><input id="music-lyrics-query" placeholder="Música e artista" aria-label="Buscar letra"><button class="btn-linha">Buscar letra</button></form><div id="music-lyrics-results" aria-live="polite"></div><div id="music-lyrics-text"></div><small class="music-credit">Letras fornecidas pelo LRCLIB. Nem todas as músicas têm letra ou sincronização.</small></section>
+      </main>
+      <aside class="emusic-now" id="music-now"></aside>
+    </div>
+    <footer id="music-dock"></footer>
+  </section>
+</div>
+
+<!-- O composer é UM só e é MOVIDO entre a tela inicial e o chat, em vez de
+     existir duas vezes. Assim o que estava digitado não se perde na transição. -->
+<div class="composer" id="composer">
+  <div class="anexos" id="anexos" hidden></div>
+  <div class="composer-caixa" id="composer-caixa">
+    <textarea id="entrada" rows="1" placeholder="Fala com a Emily..." spellcheck="false"></textarea>
+    <div class="composer-barra">
+      <div class="composer-barra-esq">
+        <button class="icone-btn" id="btn-add" title="Atalhos e anexos">
+          <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <button class="pilula" id="sel-modelo" title="Trocar o modelo da Emily">
+          <span id="sel-modelo-nome">Modelo</span>
+          <svg class="pilula-seta" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button class="pilula sutil" id="sel-racio" title="Nível de raciocínio">
+          <span class="pilula-racio-icone" id="sel-racio-icone" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 2l2.5 7.5L22 12l-7.5 2.5L12 22l-2.5-7.5L2 12l7.5-2.5L12 2z"/></svg></span>
+          <span id="sel-racio-nome">Raciocínio</span>
+          <svg class="pilula-seta" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <button id="btn-uso-contexto" type="button" title="Uso do contexto" aria-label="Uso do contexto: aguardando medição" aria-expanded="false" aria-controls="painel-uso-contexto"><svg viewBox="0 0 40 40" aria-hidden="true"><circle class="contexto-trilha" cx="20" cy="20" r="16"/><circle class="contexto-progresso" cx="20" cy="20" r="16"/></svg></button>
+        <button class="icone-btn" id="btn-remoto" title="Modo remoto: comandos executam no celular">
+          <svg viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg>
+        </button>
+      </div>
+      <div class="composer-acoes">
+        <button class="icone-btn" id="btn-voz-texto" type="button" aria-pressed="false"
+                title="Narrar respostas das mensagens digitadas">
+          <svg viewBox="0 0 24 24"><path d="M10 5L6.5 8H3v8h3.5L10 19V5z"/><path d="M13.5 9a4 4 0 010 6M16.5 6a8 8 0 010 12"/><path d="M19 2v3M17.5 3.5h3"/></svg>
+        </button>
+        <button class="icone-btn" id="btn-github" title="GitHub: ver meus repositórios">
+          <svg viewBox="0 0 24 24" class="ico-github"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+        </button>
+        <button class="icone-btn" id="btn-tela" title="Abrir agente visual"
+                aria-controls="agente-ui-painel" aria-expanded="false">
+          <svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="13" rx="2"/><path d="M8 20h8"/></svg>
+        </button>
+        <button class="icone-btn" id="btn-mic" title="Falar (push-to-talk)">
+          <svg viewBox="0 0 24 24"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0013 0M12 17.5V21"/></svg>
+        </button>
+        <button class="btn-enviar" id="btn-enviar" title="Enviar (Enter)" disabled>
+          <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+  <p class="composer-dica">Enter envia · Shift+Enter quebra linha · Ctrl+V cola texto, imagens e arquivos</p>
+</div>
+
+<template id="tpl-inicio">
+  <section class="tela inicio">
+    <div class="inicio-ambiente" aria-hidden="true">
+      <span class="ambiente-mancha a"></span>
+      <span class="ambiente-mancha b"></span>
+    </div>
+    <div class="hero">
+      <div class="hero-av">
+        <span class="hero-anel" aria-hidden="true"></span>
+        <img id="hero-img" alt="">
+        <span class="hero-ponto" title="Emily está online" aria-hidden="true"></span>
+      </div>
+      <p class="hero-hora" id="hero-hora" aria-hidden="true"></p>
+      <h1 class="hero-oi">Bom dia, <span id="hero-nome">Vitor</span>.</h1>
+      <p class="hero-sub" id="hero-sub">No que a gente mexe agora?</p>
+    </div>
+    <div class="composer-vaga" id="composer-vaga-inicio"></div>
+    <div class="sugestoes" id="sugestoes"></div>
+    <button class="inicio-logs" id="btn-logs" type="button" title="Ver logs do terminal em tempo real">
+      <span class="inicio-logs-ico">
+        <svg viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></svg>
+      </span>
+      <span class="inicio-logs-txt">
+        <strong>Logs ao vivo</strong>
+        <small id="inicio-logs-status">Terminal e serviços da Emily</small>
+      </span>
+      <span class="inicio-logs-pulso" aria-hidden="true"><i></i><i></i><i></i></span>
+      <svg class="inicio-logs-seta" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+    </button>
+  </section>
+</template>
+
+<template id="tpl-modal-playlist">
+	  <div class="pl-modal-overlay" id="pl-modal-overlay" hidden>
+	    <div class="pl-modal" id="pl-modal">
+	      <div class="pl-modal-header">
+	        <h3 id="pl-modal-titulo">Nova playlist</h3>
+	        <button class="icone-btn mini pl-modal-fechar" title="Cancelar">
+	          <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg>
+	        </button>
+	      </div>
+	      <div class="pl-modal-corpo">
+	        <div class="pl-modal-foto" id="pl-modal-foto">
+	          <div class="pl-modal-foto-img" id="pl-modal-foto-img">
+	            <svg viewBox="0 0 24 24"><path d="M21 19V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2z"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+	          </div>
+	          <input type="file" id="pl-modal-foto-input" accept="image/png,image/jpeg" hidden>
+	        </div>
+	        <div class="pl-modal-campos">
+	          <label class="pl-modal-label">Nome</label>
+	          <input type="text" class="pl-modal-nome" id="pl-modal-nome" placeholder="Ex: Favoritas" spellcheck="false" maxlength="30">
+	          <div class="pl-modal-botoes">
+	            <button class="btn-secundario" id="pl-modal-cancelar">Cancelar</button>
+	            <button class="btn-primario" id="pl-modal-confirmar">Criar</button>
+	          </div>
+	        </div>
+	      </div>
+	    </div>
+	  </div>
+	</template>
+
+	<template id="tpl-chat">
+  <section class="tela chat">
+    <div class="fluxo" id="fluxo"><div class="fluxo-in" id="fluxo-in"></div></div>
+    <button class="ir-fim" id="ir-fim" hidden>
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12l7 7 7-7"/></svg>
+    </button>
+    <div class="composer-vaga" id="composer-vaga-chat"></div>
+  </section>
+</template>
+
+<template id="tpl-code">
+  <section class="tela code">
+    <div class="code-ambiente" aria-hidden="true">
+      <span class="code-grade"></span>
+      <span class="code-orbe code-orbe-a"></span>
+      <span class="code-orbe code-orbe-b"></span>
+      <span class="code-scanline"></span>
+    </div>
+    <header class="code-workspace-topo">
+      <div class="code-marca">
+        <span class="code-marca-sinal" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="code-marca-txt"><small>EMILY SYSTEMS</small><strong>Code Workspace</strong></span>
+      </div>
+      <div class="code-contexto">
+        <span class="code-contexto-item" id="code-projeto-chip" title="Projeto desta conversa">
+          <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          <span>Sem projeto</span>
+        </span>
+        <span class="code-contexto-item code-contexto-estado" id="code-run-state">
+          <i></i><span>Pronta</span>
+        </span>
+      </div>
+    </header>
+    <div class="code-term" id="code-term">
+      <div class="code-saida" id="code-saida"></div>
+    </div>
+    <div class="code-input" id="code-input">
+      <span class="code-input-sinal" aria-hidden="true">›_</span>
+      <span class="code-prompt" id="code-prompt">emily://workspace</span>
+      <input type="text" class="code-campo" id="code-campo" aria-label="Comando para o Emily Code"
+             placeholder="Descreva o que quer construir ou corrigir..." spellcheck="false" autocomplete="off" autofocus>
+      <span class="code-cursor" id="code-cursor">&#x2588;</span>
+      <span class="code-input-atalho">Enter ↵</span>
+    </div>
+    <div class="code-status-bar" id="code-status-bar">
+      <span class="code-status-item" id="cs-arquivos"></span>
+      <span class="code-status-item" id="cs-erros"></span>
+      <span class="code-status-item" id="cs-tempo"></span>
+    </div>
+  </section>
+</template>
+
+<!-- estilo.css e app.js entram pelo bootstrap com cache-busting no <head>. -->
+<section id="painel-uso-contexto" class="uso-contexto-painel" role="dialog" aria-label="Uso do contexto" hidden></section>
+</body>
+</html>

@@ -63,10 +63,11 @@ def geometria_atual() -> dict:
     with mss.mss() as sct:
         return dict(sct.monitors[indice])
 
-# Dimensões da imagem enviada para o modelo
+# Limites da imagem enviada para o modelo. A altura não é mais forçada para 720:
+# monitores 5:4 preservam sua proporção e podem chegar a 1280x1024.
 GRADE_W = 1280
-GRADE_H = 720
-# Divisões da grade sobre a imagem (10x10 = células de 128x72)
+GRADE_H = 1024
+# Divisões normalizadas da grade.
 GRADE_COLS = 10
 GRADE_LINHAS = 10
 
@@ -83,44 +84,42 @@ def _desenhar_grade(imagem: Image.Image) -> Image.Image:
     largura_celula = w / GRADE_COLS
     altura_celula = h / GRADE_LINHAS
 
-    # Negrito de propósito: foi a fonte usada na medição de acerto da grade.
+    # O rótulo fica no canto superior esquerdo da célula. Antes ele ficava no
+    # centro, dentro de uma caixa preta opaca, e cobria justamente textos e
+    # botões que o modelo precisava reconhecer.
     try:
-        fonte = ImageFont.truetype("arialbd.ttf", 16)
+        fonte = ImageFont.truetype("arialbd.ttf", 14)
     except Exception:
         try:
-            fonte = ImageFont.truetype("arial.ttf", 16)
+            fonte = ImageFont.truetype("arial.ttf", 14)
         except Exception:
             try:
-                fonte = ImageFont.truetype("segoeuib.ttf", 16)
+                fonte = ImageFont.truetype("segoeuib.ttf", 14)
             except Exception:
                 fonte = ImageFont.load_default()
 
-    # Linhas da grade. Espessura 2 e alfa 170 em vez de 1 e 90: o rótulo
-    # precisa sobreviver ao reescalonamento que o encoder de visão do
-    # modelo faz na imagem antes de olhar pra ela.
+    # Linhas discretas: suficientes para referência sem dominar a interface.
     for i in range(1, GRADE_COLS):
         x = int(i * largura_celula)
-        draw.line([(x, 0), (x, h)], fill=(255, 0, 0, 170), width=2)
+        draw.line([(x, 0), (x, h)], fill=(255, 70, 70, 115), width=1)
     for i in range(1, GRADE_LINHAS):
         y = int(i * altura_celula)
-        draw.line([(0, y), (w, y)], fill=(255, 0, 0, 170), width=2)
+        draw.line([(0, y), (w, y)], fill=(255, 70, 70, 115), width=1)
 
-    # Rótulos das células. Amarelo sobre caixa preta quase opaca: foi essa
-    # combinação que mediu 12/12 de acerto de localização no teste, contra
-    # o branco em alfa 140 que estava aqui antes.
+    # Rótulos compactos nos cantos, nunca no centro clicável da célula.
     letras = "ABCDEFGHIJ"
     for lin in range(GRADE_LINHAS):
         for col in range(GRADE_COLS):
-            cx = int(col * largura_celula + largura_celula / 2)
-            cy = int(lin * altura_celula + altura_celula / 2)
+            cx = int(col * largura_celula + 4)
+            cy = int(lin * altura_celula + 3)
             texto = f"{letras[col]}{lin}"
             bbox = draw.textbbox((0, 0), texto, font=fonte)
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
             draw.rectangle(
-                [(cx - tw // 2 - 5, cy - th // 2 - 5), (cx + tw // 2 + 5, cy + th // 2 + 5)],
-                fill=(0, 0, 0, 215)
+                [(cx, cy), (cx + tw + 6, cy + th + 4)],
+                fill=(0, 0, 0, 170)
             )
-            draw.text((cx - tw // 2, cy - th // 2), texto, font=fonte, fill=(255, 255, 0, 255))
+            draw.text((cx + 3, cy + 2), texto, font=fonte, fill=(255, 255, 80, 255))
 
     return img
 
@@ -128,7 +127,7 @@ def _desenhar_grade(imagem: Image.Image) -> Image.Image:
 def celula_para_centro(celula: str) -> tuple[int, int]:
     """
     Converte identificador de célula (ex: "B3") em coordenadas centrais (x, y)
-    na escala da imagem 1280x720.
+    na escala normalizada histórica 1280x720.
     """
     # Os modelos costumam devolver a célula com sujeira em volta: aspas,
     # ponto final ("H8."), crase, espaço. Medido de verdade: o
@@ -150,8 +149,8 @@ def celula_para_centro(celula: str) -> tuple[int, int]:
     if not (0 <= lin < GRADE_LINHAS and 0 <= col < GRADE_COLS):
         return 0, 0
 
-    largura_celula = GRADE_W / GRADE_COLS
-    altura_celula = GRADE_H / GRADE_LINHAS
+    largura_celula = 1280 / GRADE_COLS
+    altura_celula = 720 / GRADE_LINHAS
     x = int(col * largura_celula + largura_celula / 2)
     y = int(lin * altura_celula + altura_celula / 2)
     return x, y
@@ -159,27 +158,31 @@ def celula_para_centro(celula: str) -> tuple[int, int]:
 
 def capturar_tela_com_grade():
     """
-    Captura a tela atual, redimensiona e desenha a grade de precisão.
-
-    Aqui o resize continua sendo o esticamento direto pra GRADE_W x GRADE_H, de
-    propósito: o agente_ui converte célula da grade em coordenada real usando a
-    proporção entre a imagem e o monitor. Um esticamento uniforme por eixo é
-    invertível e o clique cai no lugar certo; encaixar com barras preras
-    quebraria essa conta.
+    Captura a tela atual preservando a proporção e desenha a grade de precisão.
     """
     try:
         with mss.mss() as sct:
             monitor = geometria_atual()
             screenshot = sct.grab(monitor)
             img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
-            img = img.resize((GRADE_W, GRADE_H))
-            img = _desenhar_grade(img)
-            buffer = BytesIO()
-            img.save(buffer, format="JPEG", quality=85)
-            buffer.seek(0)
-            return base64.b64encode(buffer.read()).decode("utf-8")
+            from desktop_backend import _imagem_para_grade_base64
+            return _imagem_para_grade_base64(img)
     except Exception as e:
         print(f"[VISAO] Erro ao capturar tela com grade: {e}")
+        return None
+
+
+def capturar_tela_para_verificacao(x: int, y: int):
+    """Captura geral + zoom com marcador para confirmar uma ação apontada."""
+    try:
+        with mss.mss() as sct:
+            monitor = geometria_atual()
+            screenshot = sct.grab(monitor)
+            img = Image.frombytes("RGB", screenshot.size, screenshot.bgra, "raw", "BGRX")
+            from desktop_backend import _imagens_para_verificacao_base64
+            return _imagens_para_verificacao_base64(img, int(x), int(y), monitor)
+    except Exception as e:
+        print(f"[VISAO] Erro ao capturar verificação do alvo: {e}")
         return None
 
 
@@ -231,7 +234,7 @@ def _reduzir_sem_distorcer(img: Image.Image, largura=1280, altura=720) -> Image.
     return img
 
 
-def capturar_tela():
+def _capturar_tela_mss():
     try:
         with mss.mss() as sct:
             monitor = geometria_atual()
@@ -249,6 +252,26 @@ def capturar_tela():
         else:
             print(f"[VISAO] Erro ao capturar tela: {e}")
         return None
+
+
+def capturar_tela():
+    """Captura limpa usando o mecanismo compatível com a sessão gráfica.
+
+    No KDE Wayland o mss enumera os monitores corretamente, mas devolve todos os
+    pixels pretos. O agente visual já evita isso usando Spectacle; a leitura
+    pontual da Luna precisa usar a mesma fonte, só que sem grade.
+    """
+    try:
+        from desktop_backend import BackendKDEWayland, selecionar_backend_desktop
+
+        backend = selecionar_backend_desktop()
+        if isinstance(backend, BackendKDEWayland):
+            return backend.capturar_tela()
+    except Exception as e:
+        print(f"[VISAO] Erro ao capturar tela via backend Wayland: {e}")
+        return None
+
+    return _capturar_tela_mss()
 
 def listar_monitores() -> list[dict]:
     """Monitores disponíveis, numerados na ordem humana (1 = primário)."""

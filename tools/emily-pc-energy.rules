@@ -1,0 +1,14 @@
+// Energia remota da Emily: somente o usuário local configurado, sem ignorar inibidores.
+polkit.addRule(function(action, subject) {
+    var allowed = [
+        'org.freedesktop.login1.suspend',
+        'org.freedesktop.login1.suspend-multiple-sessions',
+        'org.freedesktop.login1.power-off',
+        'org.freedesktop.login1.power-off-multiple-sessions',
+        'org.freedesktop.login1.reboot',
+        'org.freedesktop.login1.reboot-multiple-sessions'
+    ];
+    if (subject.user === 'Hiucksam' && allowed.indexOf(action.id) !== -1) {
+        return polkit.Result.YES;
+    }
+});

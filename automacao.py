@@ -275,12 +275,17 @@ def _llm_cache_set(mensagem: str, resultado: dict) -> None:
         print(f"[DEBUG automacao] Erro ao salvar LLM cache: {e}")
 
 def _descobrir_pasta_especial(shell_name: str) -> Optional[Path]:
-    """
-    Lê o registro do Windows pra pegar o caminho real de pastas especiais.
-    Funciona mesmo quando o OneDrive redirecionou a pasta pra outro lugar.
-    """
+    """Descobre pastas pessoais reais via registro (Windows) ou XDG (Linux)."""
     if os.name != "nt":
-        return None
+        from platform_compat import get_special_folders
+        chave = {
+            "Desktop": "desktop", "Personal": "documents",
+            "{374DE290-123F-4565-9164-39C4925E467B}": "downloads",
+            "My Pictures": "pictures", "My Music": "music",
+            "My Video": "videos",
+        }.get(shell_name)
+        caminho = get_special_folders().get(chave) if chave else None
+        return caminho if caminho and caminho.is_dir() else None
     try:
         import winreg
         chave = winreg.OpenKey(
@@ -628,6 +633,42 @@ DRIVE_MAP: Dict[str, Path] = {
 
 # Drives que a Emily não pode mexer
 DRIVES_BLOQUEADOS = {"g", "g:"}
+# No Linux não existem "letras de unidade": os drives são pontos de montagem.
+# Descobre os reais (discos do /proc/mounts) e junta no DRIVE_MAP — no
+# Windows nada muda, no Linux a busca de arquivos varre o disco de verdade
+# em vez de C:/D:/ que não existem.
+if os.name == "posix":
+    def _montagens_linux() -> Dict[str, Path]:
+        mapa: Dict[str, Path] = {}
+        vistos = set()
+        tipos_reais = {"ext4", "ext3", "ext2", "xfs", "btrfs", "f2fs",
+                       "ntfs", "ntfs-3g", "vfat", "exfat", "zfs"}
+        ignorar = ("/boot", "/sys", "/proc", "/dev", "/run",
+                   "/var/lib/docker", "/snap")
+        try:
+            with open("/proc/mounts", encoding="utf-8") as montagens:
+                for linha in montagens:
+                    partes = linha.split()
+                    if len(partes) < 3:
+                        continue
+                    ponto, tipo = partes[1], partes[2]
+                    if tipo not in tipos_reais or ponto in vistos:
+                        continue
+                    if any(ponto.startswith(p) for p in ignorar):
+                        continue
+                    vistos.add(ponto)
+                    mapa[ponto] = Path(ponto)
+                    apelido = ponto.rstrip("/").split("/")[-1].lower()
+                    if apelido and apelido not in mapa:
+                        mapa[apelido] = Path(ponto)
+        except OSError:
+            pass
+        mapa.setdefault("/", Path("/"))
+        mapa.setdefault("raiz", Path("/"))
+        return mapa
+
+    # SUBSTITUI o mapa do Windows: C:/D:/E:/H: não existem aqui.
+    DRIVE_MAP = _montagens_linux()
 
 KEYWORDS_ABRIR = (
     "abrir", "abre", "abra", "iniciar", "inicia", "inicie",
@@ -1018,6 +1059,12 @@ def parar_monitor_downloads() -> str:
         return "Ok, parei de monitorar os downloads!"
     except Exception as e:
         return f"Erro ao parar: {e}"
+
+
+def monitor_ativo() -> bool:
+    """True se o monitor de downloads está rodando agora. Pra interface saber
+    em que estado desenhar o toggle."""
+    return bool(_download_observer and _download_observer.is_alive())
 
 # Ações que usuários externos do Discord não podem executar
 ACOES_BLOQUEADAS_EXTERNOS = {
@@ -2193,7 +2240,13 @@ def _executar_start(path_ou_comando: str) -> bool:
         if os.name == "nt":
             subprocess.Popen(["cmd", "/c", "start", "", path_ou_comando], shell=False)
             return True
-        subprocess.Popen([path_ou_comando])
+        # Linux: pasta ou arquivo abre no programa padrão (xdg-open), igual
+        # o start do Windows abre no Explorer. Só executável roda direto.
+        alvo = os.path.expanduser(str(path_ou_comando))
+        if os.path.isdir(alvo) or os.path.isfile(alvo):
+            subprocess.Popen(["xdg-open", alvo])
+            return True
+        subprocess.Popen([path_ou_comando], start_new_session=True)
         return True
     except Exception:
         return False
@@ -2371,7 +2424,83 @@ def _encontrar_hwnds_de_app(nome_app: str) -> list:
         return []
 
 
+def _abrir_app_linux(nome_app: str) -> bool:
+    """
+    Camadas de abertura do Linux. Roda ANTES das camadas do Windows.
+    True = abriu; False = tentou e não conseguiu.
+    """
+    nome_normalizado = _normalizar(nome_app)
+    app = APP_ALIASES.get(nome_normalizado, "") or nome_app.strip().lower()
+
+    # Pastas especiais do dia a dia
+    pastas_especiais = {
+        "downloads": Path.home() / "Downloads",
+        "desktop": Path.home() / "Desktop",
+        "documentos": Path.home() / "Documents",
+        "imagens": Path.home() / "Pictures",
+        "músicas": Path.home() / "Music",
+        "musicas": Path.home() / "Music",
+        "vídeos": Path.home() / "Videos",
+        "videos": Path.home() / "Videos",
+    }
+    pasta = pastas_especiais.get(nome_normalizado)
+    if pasta and pasta.is_dir():
+        try:
+            subprocess.Popen(["xdg-open", str(pasta)])
+            return True
+        except Exception:
+            pass
+
+    # Mesmo resolvedor usado pelo agente visual: cobre navegador padrão,
+    # aplicativos Flatpak e atalhos .desktop exportados pelo sistema.
+    try:
+        from desktop_backend import _abrir_app_portatil
+        if _abrir_app_portatil(app):
+            return True
+    except Exception:
+        pass
+
+    # Executável no PATH: só relata sucesso se o processo não falhar logo.
+    import shutil as _shutil_linux
+    from desktop_backend import _iniciar_app
+    if _shutil_linux.which(app) and _iniciar_app((app,)):
+        return True
+
+    # Arquivos .desktop do sistema (Chrome, Nautilus, Steam...)
+    for pasta_desktop in (Path.home() / ".local/share/applications",
+                          Path("/usr/share/applications"),
+                          Path("/usr/local/share/applications")):
+        try:
+            if not pasta_desktop.is_dir():
+                continue
+            for arq in pasta_desktop.glob("*.desktop"):
+                nome_arq = arq.stem.lower()
+                if nome_normalizado in nome_arq or nome_arq in nome_normalizado:
+                    try:
+                        if _iniciar_app(("gtk-launch", arq.stem)):
+                            return True
+                    except OSError:
+                        continue
+        except Exception:
+            continue
+
+    # Flatpak e Snap
+    for argv in (["flatpak", "run", app], ["snap", "run", app]):
+        if _shutil_linux.which(argv[0]):
+            try:
+                if _iniciar_app(argv):
+                    return True
+            except Exception:
+                pass
+
+    return False
+
+
 def _abrir_app(nome_app: str) -> bool:
+    # ── Linux: camadas próprias, rodando ANTES das camadas do Windows ──
+    if os.name == "posix":
+        return _abrir_app_linux(nome_app)
+
     # Verifica cache primeiro
     cached = _cache_get(f"app:{nome_app}")
     if cached:
@@ -2494,6 +2623,30 @@ def _fechar_app(nome_app: str) -> bool:
 
     if not app:
         return False
+
+    # Linux: mata por nome SEM risco de se matar — pkill -f casa com a
+    # linha de comando INTEIRA dos processos, então um nome que apareça no
+    # cmdline da própria Emily (ou do pai) daria suicídio de processo.
+    if os.name == "posix":
+        import signal as _signal
+        protegidos = {os.getpid(), os.getppid()}
+        try:
+            exato = subprocess.run(["pgrep", "-x", app], capture_output=True, text=True)
+            alvos = [int(p) for p in exato.stdout.split() if p.isdigit()]
+            if not alvos:
+                padrao = subprocess.run(["pgrep", "-f", app], capture_output=True, text=True)
+                alvos = [int(p) for p in padrao.stdout.split() if p.isdigit()]
+            alvos = [p for p in alvos if p not in protegidos]
+            if not alvos:
+                return False
+            for pid in alvos:
+                try:
+                    os.kill(pid, _signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            return True
+        except Exception:
+            return False
 
     if app == "browser":
         processos = ["brave.exe", "chrome.exe", "msedge.exe", "firefox.exe"]
@@ -3850,8 +4003,10 @@ Exemplos:
                 {"role": "user", "content": mensagem}
             ],
             max_tokens=256,
-            # Saída é JSON estruturado, não conversa: rota determinística.
-            rota="comando",
+            # Saída é JSON estruturado, não conversa: rota GMI determinística.
+            # O Qwen (OpenRouter) gasta o max_tokens em raciocínio e devolve
+            # JSON vazio; o MiniMax não tem esse problema.
+            rota="comando_interpreta",
         )
 
         if not texto.strip():
@@ -4646,12 +4801,20 @@ def _resolver_destino_criar(pasta_hint: str, drive_hint: str = "") -> Optional[P
         if pasta:
             return pasta
 
-    return None
+    if pasta_hint or drive_hint:
+        return None
+
+    # Sem local informado: usa a area de trabalho configurada; se ela
+    # estiver desativada no desktop Linux, usa a home do usuario.
+    desktop = next((p for p in PASTA_MAP.get("desktop", []) if p.is_dir()), None)
+    return desktop or HOME
 
 def _criar_pasta_fn(nome: str, pasta_hint: str, drive_hint: str = "") -> str:
     """Cria uma nova pasta no local indicado."""
     if not nome or not nome.strip():
         return "Me diz o nome da pasta que quer criar, Vitor!"
+    if nome.strip() in (".", "..") or "/" in nome or "\\" in nome:
+        return "Use só o nome da pasta, sem caminho ou barras."
 
     destino_base = _resolver_destino_criar(pasta_hint, drive_hint)
     if not destino_base:
@@ -4665,15 +4828,18 @@ def _criar_pasta_fn(nome: str, pasta_hint: str, drive_hint: str = "") -> str:
     try:
         nova_pasta.mkdir(parents=True, exist_ok=False)
         _registrar_undo({"tipo": "criar", "caminho": str(nova_pasta)})
-        return f"Pasta '{nome}' criada em {destino_base.name}!"
+        return f"Pasta criada: {nova_pasta}"
     except Exception as e:
         return f"Não consegui criar a pasta. Erro: {e}"
 
 
-def _criar_arquivo_txt_fn(nome: str, pasta_hint: str, drive_hint: str = "") -> str:
-    """Cria um arquivo .txt vazio no local indicado."""
+def _criar_arquivo_txt_fn(nome: str, pasta_hint: str, drive_hint: str = "",
+                          conteudo: str = "") -> str:
+    """Cria um arquivo .txt com o conteudo pedido no local indicado."""
     if not nome or not nome.strip():
         return "Me diz o nome do arquivo que quer criar, Vitor!"
+    if nome.strip() in (".", "..") or "/" in nome or "\\" in nome:
+        return "Use só o nome do arquivo, sem caminho ou barras."
 
     destino_base = _resolver_destino_criar(pasta_hint, drive_hint)
     if not destino_base:
@@ -4689,11 +4855,19 @@ def _criar_arquivo_txt_fn(nome: str, pasta_hint: str, drive_hint: str = "") -> s
     if novo_arquivo.exists():
         return f"Já existe um arquivo chamado '{nome_limpo}' lá, Vitor!"
 
+    criado = False
     try:
-        novo_arquivo.write_text("", encoding="utf-8")
+        with novo_arquivo.open("x", encoding="utf-8") as arquivo:
+            criado = True
+            arquivo.write(conteudo or "")
         _registrar_undo({"tipo": "criar", "caminho": str(novo_arquivo)})
-        return f"Arquivo '{nome_limpo}' criado em {destino_base.name}!"
+        return f"Arquivo criado: {novo_arquivo}"
     except Exception as e:
+        if criado:
+            try:
+                novo_arquivo.unlink()
+            except OSError:
+                pass
         return f"Não consegui criar o arquivo. Erro: {e}"
     
 def _copiar_arquivos_da_pasta_fn(
@@ -4932,10 +5106,12 @@ def _baixar_mp3_com_ytdlp(url: str) -> Optional[str]:
 
     def _rodar():
         try:
+            iniciado_em = time.time()
             resultado = subprocess.run(
                 [
                     ytdlp_exe,
                     "--no-playlist",
+                    "--print", "after_move:filepath",
                     "-x",                          # extrai áudio
                     "--audio-format", "mp3",       # converte pra MP3
                     "--audio-quality", "0",        # melhor qualidade (0 = melhor, 9 = pior)
@@ -4952,6 +5128,14 @@ def _baixar_mp3_com_ytdlp(url: str) -> Optional[str]:
             )
             if resultado.returncode == 0:
                 print("[YTDLP-MP3] Download de áudio concluído!")
+                from emily_cloud.integration import arquivo_final_ytdlp, agendar_download
+                arquivo_final = arquivo_final_ytdlp(
+                    resultado.stdout, pasta_musicas, iniciado_em, (".mp3",))
+                if arquivo_final:
+                    agendar_download(
+                        str(arquivo_final), url, origem="ytdlp_legado_audio")
+                else:
+                    print("[EMILY-CLOUD] não encontrei o MP3 final para guardar.")
             else:
                 print(f"[YTDLP-MP3] Erro: {resultado.stderr[:300]}")
         except subprocess.TimeoutExpired:
@@ -5002,10 +5186,12 @@ def _baixar_com_ytdlp(url: str) -> Optional[str]:
 
     def _rodar():
         try:
+            iniciado_em = time.time()
             resultado = subprocess.run(
                 [
                     ytdlp_exe,
                     "--no-playlist",           # não baixa playlist inteira
+                    "--print", "after_move:filepath",
                     "-f", "bestvideo+bestaudio/best",  # melhor qualidade disponível
                     "--merge-output-format", "mp4",    # sempre sai como .mp4
                     "-o", str(pasta_downloads / "%(title)s.%(ext)s"),
@@ -5019,6 +5205,15 @@ def _baixar_com_ytdlp(url: str) -> Optional[str]:
             )
             if resultado.returncode == 0:
                 print(f"[YTDLP] Download concluído!")
+                from emily_cloud.integration import arquivo_final_ytdlp, agendar_download
+                arquivo_final = arquivo_final_ytdlp(
+                    resultado.stdout, pasta_downloads, iniciado_em,
+                    (".mp4", ".mkv", ".webm", ".mov"))
+                if arquivo_final:
+                    agendar_download(
+                        str(arquivo_final), url, origem="ytdlp_legado_video")
+                else:
+                    print("[EMILY-CLOUD] não encontrei o vídeo final para guardar.")
             else:
                 print(f"[YTDLP] Erro: {resultado.stderr[:300]}")
         except subprocess.TimeoutExpired:
@@ -5678,11 +5873,12 @@ def _executar_acao_por_dict(resultado: dict, callback_falar=None) -> Optional[st
 
     if acao == "criar_pasta":
         r = _criar_pasta_fn(resultado.get("nome",""), resultado.get("pasta",""), resultado.get("drive",""))
-        return r if any(f in r for f in ("Não achei","Não consegui","Já existe","Me diz")) else resposta_emily
+        return r
 
     if acao == "criar_arquivo_txt":
-        r = _criar_arquivo_txt_fn(resultado.get("nome",""), resultado.get("pasta",""), resultado.get("drive",""))
-        return r if any(f in r for f in ("Não achei","Não consegui","Já existe","Me diz")) else resposta_emily
+        r = _criar_arquivo_txt_fn(resultado.get("nome",""), resultado.get("pasta",""),
+                                  resultado.get("drive",""), resultado.get("conteudo", ""))
+        return r
 
     if acao == "mover_selecionados":
         destino_texto = resultado.get("destino", "")

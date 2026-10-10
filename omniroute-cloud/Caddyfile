@@ -1,0 +1,40 @@
+{$DOMAIN} {
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options nosniff
+    }
+    handle_path /bridge/* {
+        request_body {
+            max_size 24MB
+        }
+        reverse_proxy unix//run/emily-relay/http.sock {
+            flush_interval -1
+        }
+    }
+    handle /healthz {
+        reverse_proxy omniroute:20128
+    }
+    @models {
+        path /v1/models
+        method GET
+    }
+    handle @models {
+        reverse_proxy omniroute:20128
+    }
+    @chat {
+        path /v1/chat/completions /v1/responses /v1/messages
+        method POST
+    }
+    handle @chat {
+        request_body {
+            max_size 4MB
+        }
+        reverse_proxy omniroute:20128 {
+            flush_interval -1
+        }
+    }
+    # Dashboard, credenciais, arquivos e administração nunca são públicos.
+    handle {
+        respond "Not found" 404
+    }
+}

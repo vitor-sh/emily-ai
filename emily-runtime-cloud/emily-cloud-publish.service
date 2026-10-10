@@ -1,0 +1,17 @@
+[Unit]
+Description=Publicação automática do código da Emily na Oracle
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 "/home/Hiucksam/My Projects/Projeto Emily/minha-ia/emily-runtime-cloud/publicar.py" --watch
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,20 @@
+[Unit]
+Description=Túnel Ngrok permanente do gateway da Emily
+After=network-online.target emily-gateway.service
+Wants=network-online.target
+Requires=emily-gateway.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+ExecStart=/var/lib/snapd/snap/bin/ngrok http 5000 --url https://default.internal --log stdout --log-format logfmt --log-level info
+# O Cloud Endpoint público encaminha tráfego para este endpoint interno.
+# Recupera falhas transitórias, mas evita um loop agressivo quando o domínio está
+# ocupado por um Cloud Endpoint ou há erro permanente de configuração da conta.
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

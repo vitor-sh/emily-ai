@@ -1,0 +1,118 @@
+{
+  "width": 240,
+  "height": 260,
+  "states": {
+    "idle": {
+      "frames": [
+        "frames/idle/01.png",
+        "frames/idle/02.png",
+        "frames/idle/03.png",
+        "frames/idle/04.png",
+        "frames/idle/05.png",
+        "frames/idle/06.png"
+      ],
+      "duration_ms": 220
+    },
+    "listening": {
+      "frames": [
+        "frames/listening/01.png",
+        "frames/listening/02.png",
+        "frames/listening/03.png",
+        "frames/listening/04.png"
+      ],
+      "duration_ms": 235
+    },
+    "speaking": {
+      "frames": [
+        "frames/speaking/01.png",
+        "frames/speaking/02.png",
+        "frames/speaking/03.png",
+        "frames/speaking/04.png"
+      ],
+      "duration_ms": 195
+    },
+    "thinking": {
+      "frames": [
+        "frames/thinking/01.png",
+        "frames/thinking/02.png",
+        "frames/thinking/03.png",
+        "frames/thinking/04.png"
+      ],
+      "duration_ms": 260
+    },
+    "working": {
+      "frames": [
+        "frames/working/01.png",
+        "frames/working/02.png",
+        "frames/working/03.png",
+        "frames/working/04.png"
+      ],
+      "duration_ms": 235
+    },
+    "idle_playful": {
+      "frames": [
+        "frames/idle_playful/01.png",
+        "frames/idle_playful/02.png",
+        "frames/idle_playful/03.png",
+        "frames/idle_playful/04.png"
+      ],
+      "duration_ms": 270
+    },
+    "idle_stretch": {
+      "frames": [
+        "frames/idle_stretch/01.png",
+        "frames/idle_stretch/02.png",
+        "frames/idle_stretch/03.png",
+        "frames/idle_stretch/04.png"
+      ],
+      "duration_ms": 280
+    },
+    "idle_sit": {
+      "frames": [
+        "frames/idle_sit/01.png",
+        "frames/idle_sit/02.png",
+        "frames/idle_sit/03.png",
+        "frames/idle_sit/04.png",
+        "frames/idle_sit/05.png",
+        "frames/idle_sit/06.png",
+        "frames/idle_sit/07.png",
+        "frames/idle_sit/08.png",
+        "frames/idle_sit/09.png"
+      ],
+      "duration_ms": 310,
+      "loop_segment": [
+        3,
+        6,
+        2
+      ]
+    },
+    "idle_ram": {
+      "frames": [
+        "frames/idle_ram/01.png",
+        "frames/idle_ram/02.png",
+        "frames/idle_ram/03.png",
+        "frames/idle_ram/04.png",
+        "frames/idle_ram/05.png",
+        "frames/idle_ram/06.png",
+        "frames/idle_ram/07.png",
+        "frames/idle_ram/08.png",
+        "frames/idle_ram/09.png"
+      ],
+      "duration_ms": 285
+    },
+    "idle_star": {
+      "frames": [
+        "frames/idle_star/01.png",
+        "frames/idle_star/02.png",
+        "frames/idle_star/03.png",
+        "frames/idle_star/04.png",
+        "frames/idle_star/05.png",
+        "frames/idle_star/06.png",
+        "frames/idle_star/07.png",
+        "frames/idle_star/08.png",
+        "frames/idle_star/09.png"
+      ],
+      "duration_ms": 255
+    }
+  }
+}

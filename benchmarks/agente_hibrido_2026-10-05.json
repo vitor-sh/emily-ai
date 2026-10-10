@@ -1,0 +1,13 @@
+{
+  "estado": "concluido",
+  "passo": 3,
+  "mensagem": "ZIP extraído na pasta temporária. Verifiquei pelo terminal que mod-teste/mod/manifest.txt contém exatamente MOD TESTE OK.",
+  "erro": "",
+  "historico": [
+    "FERRAMENTA extrair_arquivo: Feito.",
+    "Passo 1: OK — Extrair o ZIP na pasta temporária indicada",
+    "FERRAMENTA executar_terminal: mod-teste/mod/manifest.txt: conteúdo=b'MOD TESTE OK'; exatamente MOD TESTE OK=True",
+    "Passo 2: OK — Conferir o conteúdo exato do manifest.txt extraído, sem alterar arquivos",
+    "RESULTADO CONFIRMADO POR FERRAMENTA: A ferramenta de extração retornou «Feito»; o terminal verificou mod-teste/mod/manifest.txt com conteúdo b'MOD TESTE OK' e confirmou a igualdade exata."
+  ]
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Gateway permanente da Emily (LLM, Cloud e controle estruturado do PC)
+Documentation=https://github.com/diegosouzapw/OmniRoute
+After=network-online.target graphical-session.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 "/home/Hiucksam/My Projects/Projeto Emily/minha-ia/emily-gateway-service/emily_gateway.py"
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

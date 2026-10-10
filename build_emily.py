@@ -80,25 +80,28 @@ possiveis_dados = [
     ("memoria.json",     "."),
     # Cache de comandos (gerado em uso, mas inclui se já existir)
     ("emily_cache.json", "."),
+    # Modelos pequenos de pré-processamento de áudio (RNNoise + Silero VAD)
+    ("assets",            "assets"),
 
-    # ── Gateway do Kiro ────────────────────────────────────────────
-    # Desde a migração, o LLM da Emily é um SUBPROCESSO: o gateway.py sobe
-    # `python main.py` dentro de kiro_gateway/. Isso significa que o
-    # código-fonte do gateway precisa existir no disco ao lado do exe —
-    # não serve estar embutido no bytecode do PyInstaller, porque quem vai
-    # executá-lo é outro interpretador.
-    #
-    # Incluído por partes em vez da pasta inteira: os testes, a
-    # documentação traduzida e os logs de debug do gateway somam bastante
-    # peso e nada disso é necessário para servir requisição.
-    ("kiro_gateway/kiro",             "kiro_gateway/kiro"),
-    ("kiro_gateway/main.py",          "kiro_gateway"),
-    ("kiro_gateway/requirements.txt", "kiro_gateway"),
-    # O .env do gateway carrega a senha do proxy e o PROFILE_ARN. Vai junto
-    # pelo mesmo motivo que o .env da Emily já ia: sem ele o subprocesso não
-    # sobe. Ver o aviso sobre isso no README — exe com segredo dentro não
-    # deve ser compartilhado.
-    ("kiro_gateway/.env",             "kiro_gateway"),
+    # ── A INTERFACE ────────────────────────────────────────────────
+    # A tela é HTML/CSS/JS lido do disco em tempo de execução, então tem
+    # que existir como ARQUIVO ao lado do exe — não serve estar embutido
+    # no bytecode. É o mesmo motivo do static/ do servidor do celular.
+    ("web/index.html", "web"),
+    ("web/estilo.css", "web"),
+    ("web/app.js",     "web"),
+    ("web/editor.js", "web"),
+    ("web/editor-core.js", "web"),
+    ("web/editor.css", "web"),
+    ("web/editor-layout.json", "web"),
+    ("web/editor-panel.html", "web"),
+    ("web/editor-panel.js", "web"),
+    ("web/editor-controls.js", "web"),
+    ("web/dark-controls.js", "web"),
+    ("web/dark-controls.css", "web"),
+    ("web/cloud.css",  "web"),
+    ("web/cloud.js",   "web"),
+
 ]
 
 for origem, destino in possiveis_dados:
@@ -120,29 +123,64 @@ hidden_imports = [
 
     # ── Módulos internos da Emily (todos precisam ser declarados) ──
     "automacao",
-    "gerador_imagem",
     "interface",
     "intencoes",
     "memoria",
     "modelo",
+    "personalidade_emily",
+    "modo_demo",
+    "classificacao_ferramentas",
     "notificacoes",
     "pesquisa",
     "servidor",
     "visao",
     "voz",
+    "audio_preprocessing",
     "discord_bot",
     "agente_ui",
     "agente_jogo",
+    "hollow_knight_emily",
+    "hollow_knight_emily.python",
+    "hollow_knight_emily.python.hollow_knight_audio",
+    "hollow_knight_emily.python.hollow_knight_cerebro",
+    "hollow_knight_emily.python.hollow_knight_memoria",
+    "hollow_knight_emily.python.hollow_knight_modelos",
+    "hollow_knight_emily.python.hollow_knight_permanente",
+    "hollow_knight_emily.python.hollow_knight_politica",
+    "hollow_knight_emily.python.hollow_knight_protocolo",
+    "hollow_knight_emily.python.hollow_knight_ponte",
+    "memoria_unificada",
+    "emily_cloud",
+    "emily_cloud.core",
+    "emily_cloud.service",
+    "emily_cloud.integration",
+    "emily_cloud.routes",
+    "emily_cloud.archives",
+    "emily_cloud.location",
+    "emily_cloud.storage",
+    "ferramentas_cloud",
     # llm e ferramentas: o PyInstaller acha os dois pela cadeia de imports do
     # modelo.py, mas declarar é barato e eles são o coração do projeto.
     "llm",
     "ferramentas",
+    "laco_ferramentas",
     "navegador",
-    # gateway: importado de forma LAZY, dentro de função, no llm.py e no
-    # modelo.py — justamente para o módulo continuar carregável sem ele. O
-    # PyInstaller não enxerga import dentro de função, então sem esta linha o
-    # exe subiria sem o ciclo de vida do gateway e a Emily ficaria muda.
-    "gateway",
+    # A interface web e a antiga. As duas entram: o EMILY_UI=qt precisa
+    # que a antiga exista no exe, e o import dela no main.py é condicional
+    # (o PyInstaller não enxerga import dentro de if).
+    "interface_web",
+    "editor_interface",
+    "editor_assistant",
+    "editor_assets",
+    "publicar_windows_codigo",
+    "windows_update",
+    "interface",
+    # O pywebview escolhe o backend em tempo de execução, por import
+    # dinâmico. Sem declarar, o exe sobe sem a WebView2 e a janela não abre.
+    "webview",
+    "webview.platforms.edgechromium",
+    "clr_loader",
+    "pythonnet",
 
     # ── PyQt6 (interface gráfica principal) ──
     "PyQt6",
@@ -335,6 +373,10 @@ collect_all = [
     "selenium",
     "webdriver_manager",
     "aiohttp",
+    # Memória vetorial: importada sob demanda e com extensões/dados próprios.
+    "chromadb",
+    "onnxruntime",
+    "tokenizers",
 ]
 
 # ─────────────────────────────────────────────────────────────────

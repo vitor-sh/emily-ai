@@ -1,943 +1,1416 @@
-"""
-agente_ui.py
-Agente de UI: controla o mouse e teclado via visão computacional.
+"""Agente visual contínuo, seguro, testável e multiplataforma da Emily.
 
-Como funciona:
-1. Recebe um objetivo em linguagem natural ("clica no botão Confirmar")
-2. Captura a tela atual
-3. Manda a tela + objetivo pro GPT-5.4 Pro via Azure AI Foundry (visão)
-4. O modelo diz o que fazer: onde clicar, o que digitar, etc.
-5. Executa a ação com pyautogui
-6. Captura a tela de novo pra ver o resultado
-7. Repete até terminar ou dar erro
+O estado mutável vive em :class:`SessaoAgenteUI`. As funções no fim do arquivo
+preservam o contrato legado usado por ``main.py``, ``automacao.py`` e
+``ferramentas.py``.
 """
 
 from __future__ import annotations
+
 import json
-import re
+import os
+import queue
 import threading
 import time
-from typing import Optional
+import unicodedata
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Optional
+from cursor_agente import CursorAgente
 
-try:
-    import pyautogui
-    pyautogui.FAILSAFE = True   # move o mouse pro canto superior esquerdo pra parar na marra
-    pyautogui.PAUSE = 0.4       # pausa automática entre ações (evita erros por ir rápido demais)
-    _PYAUTOGUI_OK = True
-except ImportError:
-    _PYAUTOGUI_OK = False
-    print("[AGENTE_UI] pyautogui não encontrado. Instala com: pip install pyautogui")
-
-import visao  # pra capturar a tela
+from desktop_backend import (
+    BackendDesktop,
+    ErroBackendDesktop,
+    navegador_padrao_linux,
+    selecionar_backend_desktop,
+)
 
 
-# ─────────────────────────────────────────────
-# ESTADO GLOBAL DO AGENTE
-# ─────────────────────────────────────────────
-
-_agente_rodando  = threading.Event()   # set = agente ativo agora
-_agente_pausado  = threading.Event()   # set = pode rodar | clear = pausado
-_agente_parar    = threading.Event()   # set = sinal pra parar tudo
-_agente_thread: Optional[threading.Thread] = None
-_agente_objetivo = ""                  # o que o agente está fazendo
-
-_callback_falar  = None  # será registrado pelo main.py
-
-# Fila de mensagens ao vivo do usuário (enviadas enquanto o agente está rodando)
-import queue as _queue_module
-_fila_mensagens_ao_vivo: _queue_module.Queue = _queue_module.Queue()
-
-# Dimensões da imagem que o modelo recebe
 IMG_W = 1280
 IMG_H = 720
+MAX_PASSOS = max(1, int(os.getenv("EMILY_AGENTE_UI_MAX_PASSOS", "100")))
+MAX_PASSOS_SEM_DECISAO = max(1, int(os.getenv("EMILY_AGENTE_UI_MAX_SEM_DECISAO", "3")))
+TIMEOUT_SESSAO = max(5.0, float(os.getenv("EMILY_AGENTE_UI_TIMEOUT", "900")))
+TIMEOUT_SEM_PROGRESSO = max(5.0, float(os.getenv("EMILY_AGENTE_UI_TIMEOUT_PROGRESSO", "180")))
+INTERVALO_PASSOS = max(0.0, float(os.getenv("EMILY_AGENTE_UI_INTERVALO", "1.5")))
+TIMEOUT_CONFIRMACAO_DESTRUTIVA = max(
+    5.0, float(os.getenv("EMILY_AGENTE_UI_TIMEOUT_CONFIRMACAO", "120"))
+)
+MAX_HISTORICO = 12
+MAX_CONTEXTOS = 5
+MAX_TROCAS_JANELA = max(1, int(os.getenv("EMILY_AGENTE_UI_MAX_TROCAS_JANELA", "2")))
 
-# Limite de segurança: se passar disso algo deu errado
-MAX_PASSOS = 50
-
-# Passos seguidos sem decisão válida antes de desistir. Cada passo já tenta o
-# modelo 3 vezes, então 3 aqui significa 9 tentativas — o bastante pra saber
-# que o modelo não vai colaborar com essa tarefa.
-MAX_PASSOS_SEM_DECISAO = 3
-
-# Histórico de telas/contexto recente para o agente não "esquecer" onde estava
-_contexto_telas: list[str] = []
-_MAX_CONTEXTOS = 5
-
-
-def definir_callback_falar(callback):
-    """
-    Registra a função que a Emily vai usar pra falar os resultados.
-    Chamado no main.py na inicialização.
-    """
-    global _callback_falar
-    _callback_falar = callback
+ESTADOS_FINAIS = {"concluido", "erro", "cancelado", "limite", "watchdog"}
 
 
-# ─────────────────────────────────────────────
-# CONVERSÃO DE COORDENADAS
-# ─────────────────────────────────────────────
+@dataclass
+class EstadoAgenteUI:
+    estado: str = "parado"
+    objetivo: str = ""
+    action_id: str = ""  # vazio: tarefa iniciada no desktop
+    passo: int = 0
+    max_passos: int = MAX_PASSOS
+    mensagem: str = ""
+    ultima_acao: str = ""
+    erro: str = ""
+    iniciado_em: Optional[float] = None
+    atualizado_em: float = field(default_factory=time.time)
+    finalizado_em: Optional[float] = None
+    backend: dict[str, Any] = field(default_factory=dict)
+    historico: list[str] = field(default_factory=list)
+    tempos: dict[str, dict[str, float]] = field(default_factory=dict)
 
-def _escalar_coordenadas(x: int, y: int) -> tuple[int, int]:
-    """
-    O modelo analisa a imagem em 1280x720 e retorna coordenadas nessa escala.
-    O pyautogui precisa das coordenadas reais do monitor (ex: 1920x1080).
-    Essa função faz essa conversão.
+    @property
+    def ativo(self) -> bool:
+        return self.estado not in ({"parado"} | ESTADOS_FINAIS)
 
-    Exemplo com monitor de 1920x1080:
-    x_real = x_imagem * (1920 / 1280) = x * 1.5
-    y_real = y_imagem * (1080 / 720)  = y * 1.5
-    """
+    def como_dict(self) -> dict[str, Any]:
+        dados = asdict(self)
+        dados["ativo"] = self.ativo
+        return dados
+
+
+DecisorUI = Callable[[Any, str, list[str], list[str], str], Optional[dict]]
+VerificadorResultadoUI = Callable[[Any, str, list[str], Optional[Any]], Optional[dict]]
+OuvinteEstado = Callable[[dict[str, Any]], None]
+
+
+def _decisor_padrao(
+    imagem: Any,
+    objetivo: str,
+    historico: list[str],
+    contexto_telas: list[str],
+    contexto_fixo: str,
+    catalogo_ferramentas: Optional[list] = None,
+    resultados_ferramentas: Optional[list] = None,
+) -> Optional[dict]:
+    import modelo
+    return modelo.decidir_proxima_acao_ui(
+        imagem, objetivo, historico, contexto_telas,
+        contexto_fixo=contexto_fixo,
+        catalogo_ferramentas=catalogo_ferramentas,
+        resultados_ferramentas=resultados_ferramentas,
+    )
+
+
+def _verificador_resultado_padrao(
+    imagem_atual: Any, objetivo: str, historico: list[str], imagem_anterior: Optional[Any],
+) -> Optional[dict]:
+    import modelo
+    return modelo.verificar_resultado_ui(imagem_atual, objetivo, historico, imagem_anterior)
+
+
+def _contexto_fixo_padrao() -> str:
+    partes = []
     try:
-        # geometria_atual traduz o número humano do monitor pro índice do mss.
-        # Indexar sct.monitors[visao.monitor_atual] direto — como era antes —
-        # apontava pro monitor errado, porque o mss não enumera o primário
-        # como 1. O clique ia pra outra tela.
-        monitor      = visao.geometria_atual()
-        largura_real = monitor["width"]
-        altura_real  = monitor["height"]
-        offset_x     = monitor["left"]   # deslocamento horizontal (pra multi-monitor)
-        offset_y     = monitor["top"]    # deslocamento vertical
-
-        x_real = int(x * largura_real / IMG_W) + offset_x
-        y_real = int(y * altura_real  / IMG_H) + offset_y
-
-        print(f"[AGENTE_UI] Coord: imagem({x},{y}) → tela({x_real},{y_real})")
-        return x_real, y_real
-
-    except Exception as e:
-        print(f"[AGENTE_UI] Erro ao escalar coordenadas: {e}")
-        return x, y  # fallback: usa as coordenadas sem escalar
-
-
-# ─────────────────────────────────────────────
-# ATIVAR JANELA POR NOME/TÍTULO
-# ─────────────────────────────────────────────
-
-def _tentar_ativar_janela(nome: str) -> bool:
-    """
-    Tenta trazer uma janela para frente pelo nome/título do app.
-    Retorna True se conseguiu.
-    """
-    if not nome:
-        return False
-
+        import modelo
+        personalidade = (modelo.EMILY_PERSONALIDADE or "").strip()
+        if personalidade:
+            partes.append(
+                "[IDENTIDADE E PERSONALIDADE DA EMILY — use apenas nas mensagens finais]\n"
+                + personalidade
+            )
+    except Exception:
+        pass
     try:
-        nome_lower = nome.lower()
-
-        # pyautogui.getWindowsWithTitle é alias de pygetwindow
-        janelas = pyautogui.getAllWindows()
-        candidatas = []
-        for w in janelas:
-            if not w.title:
-                continue
-            titulo = w.title.lower()
-            # Pontuação: título começa com o nome é melhor
-            if nome_lower in titulo or titulo.startswith(nome_lower):
-                candidatas.append(w)
-
-        if not candidatas:
-            # tenta palavras-chave parciais
-            palavras = [p for p in nome_lower.split() if len(p) > 2]
-            for w in janelas:
-                if not w.title:
-                    continue
-                titulo = w.title.lower()
-                if any(p in titulo for p in palavras):
-                    candidatas.append(w)
-
-        if not candidatas:
-            return False
-
-        # Escolhe a janela visível de maior área (mais provável de ser a principal)
-        def area(w):
-            try:
-                return w.width * w.height
-            except Exception:
-                return 0
-
-        janela = max(candidatas, key=area)
-        try:
-            if janela.isMinimized:
-                janela.restore()
-            janela.activate()
-            print(f"[AGENTE_UI] ✓ Ativou janela por nome: '{janela.title}'")
-            return True
-        except Exception as e:
-            print(f"[AGENTE_UI] Erro ao ativar janela '{janela.title}': {e}")
-            return False
-
-    except Exception as e:
-        print(f"[AGENTE_UI] Erro ao buscar janela por nome '{nome}': {e}")
-        return False
+        import memoria
+        memoria_txt = (memoria.formatar_para_prompt() or "").strip()
+        if memoria_txt:
+            partes.append("[CONTEXTO DO USUÁRIO]\n" + memoria_txt)
+    except Exception:
+        pass
+    return "\n\n".join(partes)
 
 
-def _tentar_abrir_app(nome: str) -> bool:
-    """
-    Tenta abrir um app pelo nome através do menu Iniciar/Run.
-    Retorna True se abriu.
-    """
-    if not nome:
-        return False
+class SessaoAgenteUI:
+    """Uma execução do agente com estado, sincronização e dependências próprias."""
 
-    nome_limpo = nome.lower().strip()
-    # Mapeamento de apps comuns para nomes de execução seguros
-    apps_comuns = {
-        "steam": "steam",
-        "chrome": "chrome",
-        "edge": "msedge",
-        "firefox": "firefox",
-        "navegador": "chrome",
-        "bloco de notas": "notepad",
-        "notepad": "notepad",
-        "calculadora": "calc",
-        "calculador": "calc",
-        "explorer": "explorer",
-        "arquivos": "explorer",
-        "vscode": "code",
-        "code": "code",
-        "visual studio code": "code",
-        "discord": "discord",
-        "spotify": "spotify",
-        "epic": "com.epicgames.launcher",
-    }
+    def __init__(
+        self,
+        backend: Optional[BackendDesktop] = None,
+        decisor: Optional[DecisorUI] = None,
+        callback_falar: Optional[Callable[[str], None]] = None,
+        callback_estado: Optional[OuvinteEstado] = None,
+        max_passos: int = MAX_PASSOS,
+        timeout_total: float = TIMEOUT_SESSAO,
+        timeout_sem_progresso: float = TIMEOUT_SEM_PROGRESSO,
+        intervalo_passos: float = INTERVALO_PASSOS,
+        relogio: Callable[[], float] = time.monotonic,
+        verificar_cliques: Optional[bool] = None,
+        verificar_resultado: Optional[bool] = None,
+        verificador_resultado: Optional[VerificadorResultadoUI] = None,
+        timeout_confirmacao_destrutiva: float = TIMEOUT_CONFIRMACAO_DESTRUTIVA,
+        renovar_limites: Optional[bool] = None,
+    ) -> None:
+        self.backend = backend or selecionar_backend_desktop()
+        self._cursor = CursorAgente(type(self.backend).__name__ == "BackendKDEWayland")
+        self.decisor = decisor or _decisor_padrao
+        self.renovar_limites = (decisor is None and os.getenv("EMILY_AGENTE_UI_RENOVAR_LIMITES", "1") != "0") if renovar_limites is None else renovar_limites
+        self.callback_falar = callback_falar
+        self.max_passos = max(1, int(max_passos))
+        self.timeout_total = max(0.01, float(timeout_total))
+        self.timeout_sem_progresso = max(0.01, float(timeout_sem_progresso))
+        self.intervalo_passos = max(0.0, float(intervalo_passos))
+        self._relogio = relogio
+        if verificar_cliques is None:
+            verificar_cliques = os.getenv("EMILY_AGENTE_UI_VERIFICAR_CLIQUES", "1").strip() != "0"
+        self.verificar_cliques = bool(verificar_cliques)
+        # Testes/integrações com decisor injetado escolhem explicitamente a
+        # auditoria; a sessão real sempre a usa.
+        self.verificar_resultado = (decisor is None) if verificar_resultado is None else bool(verificar_resultado)
+        self.verificador_resultado = verificador_resultado or _verificador_resultado_padrao
+        self.timeout_confirmacao_destrutiva = max(0.01, float(timeout_confirmacao_destrutiva))
 
-    executavel = apps_comuns.get(nome_limpo)
+        self._lock = threading.RLock()
+        self._cancelar = threading.Event()
+        self._executar = threading.Event()
+        self._executar.set()
+        self._finalizou = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._mensagens: queue.Queue[str] = queue.Queue()
+        self._confirmacao_destrutiva_evento = threading.Event()
+        self._confirmacao_destrutiva_resposta: Optional[bool] = None
+        self._confirmacao_destrutiva_descricao = ""
+        self._pergunta_evento = threading.Event()
+        self._pergunta_descricao = ""
+        self._pergunta_resposta = ""
+        self._dominios_ferramentas: set[str] = set()
+        self._resultados_ferramentas: deque[str] = deque(maxlen=6)
+        self._espera_inicio = 0.0
+        self._espera_nivel = 0
+        self._orcamento_tempo = self.timeout_total
+        self._progresso_tempo = 0
+        self._progresso_passos = 0
+        self._falhas_operacionais = 0
+        self._aguarda_progresso_visual = False
+        self._destrutivas_negadas: set[str] = set()
+        self._ouvintes: list[OuvinteEstado] = []
+        if callback_estado:
+            self._ouvintes.append(callback_estado)
 
-    if not executavel:
-        # Tenta correspondência parcial
-        for chave, exe in apps_comuns.items():
-            if chave in nome_limpo or nome_limpo in chave:
-                executavel = exe
-                break
+        self._historico: deque[str] = deque(maxlen=MAX_HISTORICO)
+        self._contexto_telas: deque[str] = deque(maxlen=MAX_CONTEXTOS)
+        self._assinatura_anterior = ""
+        self._ultimo_tipo_assinatura = ""
+        self._repeticoes = 0
+        self._trocas_janela = 0
+        self._apps_lancados: set[str] = set()
+        self._foco_pendente = False
+        self._inicio_mono = 0.0
+        self._ultimo_progresso = 0.0
+        self._contexto_fixo = ""
+        self._imagem_antes_ultima_acao: Optional[Any] = None
+        self._verificacoes_finais_recusadas = 0
+        self.estado = EstadoAgenteUI(max_passos=self.max_passos)
 
-    if not executavel:
-        # Se não conhece, tenta abrir pelo menu iniciar digitando o nome original
-        executavel = nome_limpo
+    # ── observabilidade ──────────────────────────────────────────
 
-    try:
-        import os
-        import subprocess
-        # Abre sem travar a thread
-        subprocess.Popen(f'start "" "{executavel}"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print(f"[AGENTE_UI] ✓ Iniciou app pelo nome: '{executavel}'")
-        return True
-    except Exception as e:
-        print(f"[AGENTE_UI] Erro ao iniciar app '{executavel}': {e}")
-        return False
+    def adicionar_ouvinte(self, callback: OuvinteEstado) -> None:
+        if not callback:
+            return
+        with self._lock:
+            if callback not in self._ouvintes:
+                self._ouvintes.append(callback)
 
+    def remover_ouvinte(self, callback: OuvinteEstado) -> None:
+        with self._lock:
+            if callback in self._ouvintes:
+                self._ouvintes.remove(callback)
 
-# ─────────────────────────────────────────────
-# EXECUTAR UMA AÇÃO DE UI
-# ─────────────────────────────────────────────
-
-def _obter_coordenadas(acao_dict: dict) -> tuple[Optional[int], Optional[int]]:
-    """
-    Extrai coordenadas x, y da ação, na escala da imagem 1280x720.
-
-    Aceita duas formas, nessa ordem de prioridade:
-
-    1. "celula" — identificador da grade desenhada na print, tipo "B3".
-       É a forma preferida. Apontar uma célula rotulada é muito mais fácil
-       para um modelo de visão do que estimar x=647, y=382 no olho, e o
-       erro fica limitado ao tamanho da célula em vez de ser ilimitado.
-    2. "x" e "y" — coordenada crua. Fica como fallback porque o modelo
-       às vezes responde assim mesmo e porque ações antigas usam isso.
-
-    Retorna (None, None) se não vier nenhuma das duas.
-    """
-    celula = acao_dict.get("celula")
-    if celula:
-        x, y = visao.celula_para_centro(str(celula))
-        # celula_para_centro devolve (0, 0) para célula inválida. A célula
-        # A0 legítima cai em (64, 36), então (0, 0) só acontece em erro.
-        if (x, y) != (0, 0):
-            return x, y
-        print(f"[AGENTE_UI] Célula inválida do modelo: {celula!r}")
-
-    if "x" in acao_dict and "y" in acao_dict:
-        try:
-            return int(acao_dict["x"]), int(acao_dict["y"])
-        except (TypeError, ValueError):
-            print(f"[AGENTE_UI] Coordenadas inválidas: "
-                  f"x={acao_dict.get('x')!r} y={acao_dict.get('y')!r}")
-
-    return None, None
-
-
-def _executar_acao(acao_dict: dict) -> bool:
-    """
-    Recebe o dicionário de decisão do modelo e executa a ação.
-    Retorna True se deu certo, False se falhou.
-    """
-    if not _PYAUTOGUI_OK:
-        print("[AGENTE_UI] pyautogui não disponível!")
-        return False
-
-    tipo      = acao_dict.get("acao", "")
-    x, y      = _obter_coordenadas(acao_dict)
-    texto     = acao_dict.get("texto", "")
-    descricao = acao_dict.get("descricao", "")
-
-    # Valida coordenadas antes de executar qualquer ação com mouse
-    if x is None or y is None:
-        # Ações que precisam de coordenadas
-        if tipo in ("clicar", "clicar_celula", "clicar_tarefa", "clicar_direito", "duplo_clique", "mover_mouse"):
-            print(f"[AGENTE_UI] Coordenadas ausentes/inválidas para ação '{tipo}'")
-            return False
-
-    try:
-        # ── Clique esquerdo / célula da grade / barra de tarefas ──
-        if tipo in ("clicar", "clicar_celula"):
-            rx, ry = _escalar_coordenadas(x, y)
-            pyautogui.moveTo(rx, ry, duration=0.3)
-            time.sleep(0.1)
-            pyautogui.click()
-            print(f"[AGENTE_UI] ✓ Clicou em ({rx},{ry}) — {descricao}")
-            return True
-
-        # ── Barra de tarefas: ativar janela → abrir app → clicar coordenada ──
-        elif tipo == "clicar_tarefa":
-            nome_app = texto or descricao
-            sucesso = _tentar_ativar_janela(nome_app)
-            if not sucesso:
-                sucesso = _tentar_abrir_app(nome_app)
-            if not sucesso and x is not None and y is not None:
-                rx, ry = _escalar_coordenadas(x, y)
-                pyautogui.moveTo(rx, ry, duration=0.3)
-                time.sleep(0.1)
-                pyautogui.click()
-                print(f"[AGENTE_UI] ✓ Clicou na barra de tarefas em ({rx},{ry}) — {descricao}")
-                sucesso = True
-            if sucesso:
-                print(f"[AGENTE_UI] ✓ Alternou/abriu app — {descricao}")
-                return True
-            print(f"[AGENTE_UI] Não conseguiu alternar/abrir app — {descricao}")
-            return False
-
-        # ── Ativar janela pelo nome/título ──
-        elif tipo == "ativar_janela":
-            nome_app = texto or descricao
-            if _tentar_ativar_janela(nome_app):
-                print(f"[AGENTE_UI] ✓ Ativou janela — {nome_app}")
-                return True
-
-            # Janela não encontrada → tenta abrir o app diretamente como fallback
-            print(f"[AGENTE_UI] Janela não encontrada, tentando abrir app: {nome_app}")
-            aberto = _tentar_abrir_app(nome_app)
-            if aberto:
-                print(f"[AGENTE_UI] ✓ Abriu app como fallback — {nome_app}")
-                time.sleep(2.0)  # aguarda o app iniciar
-                return True
-
-            # Último recurso: tenta pelo menu Iniciar
-            print(f"[AGENTE_UI] Tentando menu Iniciar como último recurso — {nome_app}")
-            try:
-                pyautogui.hotkey("win")
-                time.sleep(0.6)
-                pyautogui.typewrite(nome_app, interval=0.05)
-                time.sleep(1.0)
-                pyautogui.press("enter")
-                time.sleep(1.5)
-                print(f"[AGENTE_UI] ✓ Abriu via menu Iniciar — {nome_app}")
-                return True
-            except Exception as e:
-                print(f"[AGENTE_UI] Falha total ao abrir '{nome_app}': {e}")
-                # Retorna True mesmo assim — o modelo vai ver a tela e tentar outra abordagem
-                return True
-
-        # ── Clique direito ──
-        elif tipo == "clicar_direito":
-            rx, ry = _escalar_coordenadas(x, y)
-            pyautogui.moveTo(rx, ry, duration=0.3)
-            pyautogui.rightClick()
-            print(f"[AGENTE_UI] ✓ Clique direito em ({rx},{ry}) — {descricao}")
-            return True
-
-        # ── Duplo clique ──
-        elif tipo == "duplo_clique":
-            rx, ry = _escalar_coordenadas(x, y)
-            pyautogui.moveTo(rx, ry, duration=0.3)
-            pyautogui.doubleClick()
-            print(f"[AGENTE_UI] ✓ Duplo clique em ({rx},{ry}) — {descricao}")
-            return True
-
-        # ── Digitar texto simples (sem acentos) ──
-        elif tipo == "digitar":
-            if x is not None and y is not None:  # clica no campo antes de digitar, se tiver coordenadas
-                rx, ry = _escalar_coordenadas(x, y)
-                pyautogui.click(rx, ry)
-                time.sleep(0.3)
-            pyautogui.typewrite(texto, interval=0.06)
-            print(f"[AGENTE_UI] ✓ Digitou: '{texto}'")
-            return True
-
-        # ── Digitar texto com acentos (ã, é, ç, etc) — usa clipboard ──
-        elif tipo == "digitar_unicode":
-            try:
-                import pyperclip
-                if x is not None and y is not None:
-                    rx, ry = _escalar_coordenadas(x, y)
-                    pyautogui.click(rx, ry)
-                    time.sleep(0.3)
-                pyperclip.copy(texto)
-                pyautogui.hotkey("ctrl", "v")
-                print(f"[AGENTE_UI] ✓ Colou (unicode): '{texto}'")
-                return True
-            except ImportError:
-                print("[AGENTE_UI] pyperclip não instalado — pip install pyperclip")
-                # Tenta typewrite mesmo assim como fallback
-                if x is not None and y is not None:
-                    rx, ry = _escalar_coordenadas(x, y)
-                    pyautogui.click(rx, ry)
-                    time.sleep(0.3)
-                pyautogui.typewrite(texto, interval=0.06)
-                return True
-
-        # ── Pressionar uma tecla (enter, tab, esc, backspace, etc) ──
-        elif tipo == "pressionar":
-            tecla = texto.lower().strip()
-            # Suporte a pressionar múltiplas vezes (ex: "backspace" com "vezes": 5)
-            vezes = int(acao_dict.get("vezes", 1))
-            for _ in range(vezes):
-                pyautogui.press(tecla)
-                time.sleep(0.05)
-            if vezes > 1:
-                print(f"[AGENTE_UI] ✓ Pressionou: '{tecla}' x{vezes}")
-            else:
-                print(f"[AGENTE_UI] ✓ Pressionou: '{tecla}'")
-            return True
-
-        # ── Apagar tudo no campo atual (Ctrl+A + Delete) ──
-        elif tipo == "apagar_tudo":
-            pyautogui.hotkey("ctrl", "a")
-            time.sleep(0.1)
-            pyautogui.press("backspace")
-            print(f"[AGENTE_UI] ✓ Apagou todo o texto do campo — {descricao}")
-            return True
-
-        # ── Atalho de teclado (ctrl+c, alt+f4, etc) ──
-        elif tipo == "atalho":
-            teclas = [t.strip() for t in texto.split("+")]
-            pyautogui.hotkey(*teclas)
-            print(f"[AGENTE_UI] ✓ Atalho: {texto}")
-            return True
-
-        # ── Rolar a página ──
-        elif tipo == "rolar":
-            direcao = acao_dict.get("direcao", "baixo")
-            # Cada "click" do pyautogui.scroll vale ~40-60px.
-            # Para rolar ~meia tela (~350-400px) precisamos de ~8-10 clicks.
-            # Fazemos 3 passagens de 5 clicks com pequena pausa pra garantir que a
-            # página registra o scroll (alguns apps precisam de múltiplos eventos).
-            sinal = -1 if direcao in ("baixo", "down") else 1
-            PASSAGENS   = 3   # quantas vezes chamamos scroll()
-            CLICKS_CADA = 5   # clicks por passagem → total = 15 clicks ≈ 600-750px
-
-            def _fazer_scroll(sx, sy=None):
-                for _ in range(PASSAGENS):
-                    if sy is not None:
-                        pyautogui.scroll(sinal * CLICKS_CADA, x=sx, y=sy)
-                    else:
-                        pyautogui.scroll(sinal * CLICKS_CADA, x=sx)
-                    time.sleep(0.05)
-
-            if x is not None and y is not None:
-                rx, ry = _escalar_coordenadas(x, y)
-                pyautogui.click(rx, ry)
-                time.sleep(0.2)
-                _fazer_scroll(rx, ry)
-            else:
-                # Sem coordenadas: usa o centro da tela
+    def retrato(self) -> dict[str, Any]:
+        with self._lock:
+            if not self.estado.backend:
                 try:
-                    monitor = visao.geometria_atual()
-                    cx = monitor["left"] + monitor["width"]  // 2
-                    cy = monitor["top"]  + monitor["height"] // 2
-                    pyautogui.click(cx, cy)
-                    time.sleep(0.2)
-                    _fazer_scroll(cx, cy)
-                except Exception:
-                    pyautogui.scroll(sinal * CLICKS_CADA * PASSAGENS)
+                    self.estado.backend = self.backend.capacidades().como_dict()
+                except Exception as exc:  # noqa: BLE001
+                    self.estado.backend = {
+                        "nome": type(self.backend).__name__,
+                        "captura": False,
+                        "entrada": False,
+                        "janelas": False,
+                        "motivo_indisponivel": str(exc),
+                    }
+            self.estado.historico = list(self._historico)
+            dados = self.estado.como_dict()
+            dados["tipo_pergunta"] = "duvida" if self._pergunta_descricao else "confirmacao" if self._confirmacao_destrutiva_descricao else ""
+            return dados
 
-            total = CLICKS_CADA * PASSAGENS
-            print(f"[AGENTE_UI] ✓ Rolou {direcao} ({PASSAGENS}x{CLICKS_CADA} = {total} clicks)")
-            return True
+    @contextmanager
+    def _medir(self, fase: str):
+        """Tempos agregados da sessão; não guarda imagens, comandos ou prompts.
 
-        # ── Mover o mouse sem clicar (útil pra hover) ──
-        elif tipo == "mover_mouse":
-            rx, ry = _escalar_coordenadas(x, y)
-            pyautogui.moveTo(rx, ry, duration=0.4)
-            print(f"[AGENTE_UI] ✓ Mouse em ({rx},{ry})")
-            return True
+        execução inclui verificações de clique; suas fases internas são detalhadas
+        separadamente. Portanto os totais das fases não devem ser somados.
+        """
+        inicio = time.perf_counter()
+        try:
+            yield
+        finally:
+            duracao = time.perf_counter() - inicio
+            with self._lock:
+                dado = self.estado.tempos.setdefault(fase, {
+                    "chamadas": 0, "total_s": 0.0, "ultima_s": 0.0,
+                })
+                dado["chamadas"] += 1
+                dado["total_s"] += duracao
+                dado["ultima_s"] = duracao
 
-        # ── Esperar (útil quando uma página demora a carregar) ──
-        elif tipo == "esperar":
-            tempo = float(acao_dict.get("tempo", 1.5))
-            print(f"[AGENTE_UI] Aguardando {tempo:.1f}s...")
-            # Espera em pedaços pra poder checar parada/pausa enquanto aguarda
-            fim = time.time() + tempo
-            while time.time() < fim:
-                if _agente_parar.is_set():
-                    return True
-                time.sleep(0.1)
-            return True
+    def _pausa_apos_acao(self, decisao: dict, sucesso: bool) -> float:
+        # Menos espera só para entrada local simples e ferramentas concluídas.
+        # Enter/Tab/atalhos podem navegar, trocar foco ou iniciar carregamentos.
+        # Nesses casos conservamos a pausa original, inclusive após falhas.
+        if sucesso:
+            tipo = str(decisao.get("acao") or "").strip().lower()
+            if tipo in {"digitar", "digitar_unicode", "apagar_tudo"}:
+                return min(self.intervalo_passos, 0.15)
+            if tipo == "ferramenta":
+                # O catálogo já descreve o efeito, sem inferir pela frase humana.
+                # Ferramentas de leitura não abrem/trocam janelas. Comandos livres
+                # podem iniciar apps; conservar sua pausa é o lado seguro.
+                import ferramentas
+                ferramenta = ferramentas.CATALOGO.get(str(decisao.get("ferramenta") or decisao.get("nome") or ""))
+                if ferramenta and ferramenta.somente_leitura:
+                    return min(self.intervalo_passos, 0.15)
+            if tipo == "pressionar" and str(decisao.get("texto") or "").lower() in {"backspace", "delete", "left", "right", "home", "end"}:
+                return min(self.intervalo_passos, 0.15)
+            if tipo == "esperar":
+                return 0.0  # já esperou explicitamente; não duplicar a espera
+        return self.intervalo_passos
 
-        # ── Trocar de janela (Alt+Tab) ──
-        elif tipo == "trocar_janela":
-            # solta alt primeiro pra evitar colar no estado errado
-            pyautogui.keyUp("alt")
-            pyautogui.keyDown("alt")
-            pyautogui.keyDown("tab")
-            time.sleep(0.2)
-            pyautogui.keyUp("tab")
-            time.sleep(0.2)
-            pyautogui.keyUp("alt")
-            print(f"[AGENTE_UI] ✓ Trocou de janela — {descricao}")
-            return True
+    def _publicar(self) -> None:
+        retrato = self.retrato()
+        with self._lock:
+            ouvintes = list(self._ouvintes)
+        for callback in ouvintes:
+            try:
+                callback(retrato)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[AGENTE_UI] ouvinte de estado falhou: {exc}")
 
-        # ── Abrir app/pesquisar no menu iniciar ──
-        elif tipo == "abrir_app":
-            app = texto or descricao
-            app_lower = app.lower().strip()
+    def _mudar_estado(self, estado: str, mensagem: str = "", erro: str = "") -> None:
+        with self._lock:
+            self.estado.estado = estado
+            self.estado.mensagem = mensagem
+            self.estado.erro = erro
+            self.estado.atualizado_em = time.time()
+            if estado in ESTADOS_FINAIS:
+                self.estado.finalizado_em = self.estado.atualizado_em
+            if estado in ESTADOS_FINAIS or estado in {"parado", "pausado", "cancelando", "aguardando_confirmacao"}:
+                self._cursor.restaurar()
+            elif not self._cancelar.is_set() and self._executar.is_set():
+                self._cursor.ativar()
+        self._publicar()
 
-            # 1º: tenta ativar janela já aberta (mais confiável)
-            if _tentar_ativar_janela(app_lower):
-                print(f"[AGENTE_UI] ✓ App já estava aberto, ativou janela: '{app}'")
-                return True
+    def _registrar(self, texto: str, progresso: bool = False) -> None:
+        texto = str(texto).strip()
+        if not texto:
+            return
+        with self._lock:
+            self._historico.append(texto)
+            if progresso:
+                self._ultimo_progresso = self._relogio()
+                self._progresso_tempo += 1
+                self._progresso_passos += 1
 
-            # 2º: mapeamento direto pra executáveis conhecidos (evita depender do menu Iniciar)
-            executaveis_diretos = {
-                "steam": r"C:\Program Files (x86)\Steam\steam.exe",
-                "discord": r"C:\Users\conti\AppData\Local\Discord\Update.exe",
-                "spotify": r"C:\Users\conti\AppData\Roaming\Spotify\Spotify.exe",
-                "chrome": r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                "brave": r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-                "edge": r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-                "firefox": r"C:\Program Files\Mozilla Firefox\firefox.exe",
-                "explorer": "explorer.exe",
-                "arquivos": "explorer.exe",
-                "notepad": "notepad.exe",
-                "bloco de notas": "notepad.exe",
-                "calc": "calc.exe",
-                "calculadora": "calc.exe",
-                "vscode": "code",
-                "code": "code",
-            }
+    def _falar(self, texto: str) -> None:
+        if not texto:
+            return
+        if self.callback_falar:
+            try:
+                self.callback_falar(texto)
+                return
+            except Exception as exc:  # noqa: BLE001
+                print(f"[AGENTE_UI] callback de fala falhou: {exc}")
+        print(f"[AGENTE_UI] {texto}")
 
-            import subprocess
-            import os
+    # ── ciclo de vida ────────────────────────────────────────────
 
-            # Procura correspondência parcial no mapeamento
-            exe = None
-            for chave, caminho in executaveis_diretos.items():
-                if chave in app_lower or app_lower in chave:
-                    exe = caminho
+    def iniciar(self, objetivo: str, em_thread: bool = True, action_id: str = "") -> bool:
+        objetivo = (objetivo or "").strip()
+        if not objetivo:
+            raise ValueError("objetivo vazio")
+        with self._lock:
+            # Um callback pode pedir nova sessão ao receber o estado final,
+            # antes de o finally anterior restaurar o cursor/fechar o backend.
+            if self.estado.ativo or (self.estado.estado in ESTADOS_FINAIS and not self._finalizou.is_set()):
+                return False
+            capacidades = self.backend.capacidades()
+            if not capacidades.captura or not capacidades.entrada:
+                motivo = capacidades.motivo_indisponivel or "backend desktop incompleto"
+                self.estado.backend = capacidades.como_dict()
+                self._mudar_estado("erro", motivo, motivo)
+                self._finalizou.set()
+                return False
+            self._cancelar.clear()
+            self._executar.set()
+            self._finalizou.clear()
+            self._historico.clear()
+            self._contexto_telas.clear()
+            self._imagem_antes_ultima_acao = None
+            self._verificacoes_finais_recusadas = 0
+            self._confirmacao_destrutiva_evento.clear()
+            self._confirmacao_destrutiva_resposta = None
+            self._confirmacao_destrutiva_descricao = ""
+            self._pergunta_evento.clear()
+            self._pergunta_descricao = ""
+            self._pergunta_resposta = ""
+            self._dominios_ferramentas.clear()
+            self._resultados_ferramentas.clear()
+            self._espera_nivel = 0
+            self._orcamento_tempo = self.timeout_total
+            self._progresso_tempo = self._progresso_passos = 0
+            self._falhas_operacionais = 0
+            self._aguarda_progresso_visual = False
+            self._destrutivas_negadas.clear()
+            while True:
+                try:
+                    self._mensagens.get_nowait()
+                except queue.Empty:
+                    break
+            self._assinatura_anterior = ""
+            self._ultimo_tipo_assinatura = ""
+            self._repeticoes = 0
+            self._trocas_janela = 0
+            self._apps_lancados.clear()
+            self._foco_pendente = False
+            self._inicio_mono = self._relogio()
+            self._ultimo_progresso = self._inicio_mono
+            self._contexto_fixo = _contexto_fixo_padrao()
+            self.estado = EstadoAgenteUI(
+                estado="iniciando",
+                objetivo=objetivo,
+                action_id=action_id,
+                max_passos=self.max_passos,
+                iniciado_em=time.time(),
+                backend=capacidades.como_dict(),
+            )
+        self._publicar()
+        if em_thread:
+            self._thread = threading.Thread(
+                target=self.executar,
+                name="emily-agente-ui",
+                daemon=True,
+            )
+            self._thread.start()
+        else:
+            self.executar()
+        return True
+
+    def executar(self) -> dict[str, Any]:
+        try:
+            self._mudar_estado("rodando", "Analisando a tela")
+            for passo in self._passos():
+                with self._lock:
+                    self.estado.passo = passo
+                motivo_watchdog = self._motivo_watchdog()
+                if motivo_watchdog:
+                    if not self._orientar_apos_limite(motivo_watchdog):
+                        self._encerrar_watchdog(motivo_watchdog)
+                        break
+                if not self._aguardar_retomada():
+                    self._encerrar_cancelada()
+                    break
+                self._consumir_mensagens()
+
+                self._mudar_estado("capturando", f"Capturando a tela ({passo}/{self.max_passos})")
+                try:
+                    with self._medir("captura"):
+                        imagem = self.backend.capturar_tela_com_grade()
+                except Exception as exc:  # noqa: BLE001
+                    self._encerrar_erro(f"Não consegui capturar a tela: {exc}")
+                    break
+                if self._aguarda_progresso_visual:
+                    if imagem != self._imagem_antes_ultima_acao:
+                        self._registrar("PROGRESSO VISUAL: a captura mudou após a ação; conferir o conteúdo.", progresso=True)
+                    self._aguarda_progresso_visual = False
+                if self._cancelar.is_set():
+                    self._encerrar_cancelada()
+                    break
+                if not self._aguardar_retomada():
+                    self._encerrar_cancelada()
                     break
 
-            if exe:
-                try:
-                    subprocess.Popen(exe, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    print(f"[AGENTE_UI] ✓ Abriu diretamente: '{exe}'")
-                    time.sleep(1.5)
-                    return True
-                except Exception as e:
-                    print(f"[AGENTE_UI] Falha ao abrir direto '{exe}': {e}")
+                self._mudar_estado("decidindo", f"Decidindo o passo {passo}")
+                decisao = self._decidir(imagem)
+                if self._cancelar.is_set():
+                    self._encerrar_cancelada()
+                    break
+                if not self._aguardar_retomada():
+                    self._encerrar_cancelada()
+                    break
+                motivo_watchdog = self._motivo_watchdog()
+                if motivo_watchdog:
+                    if not self._orientar_apos_limite(motivo_watchdog):
+                        self._encerrar_watchdog(motivo_watchdog)
+                        break
+                    # A resposta pode mudar o objetivo: descarte a decisão antiga.
+                    continue
+                if not decisao:
+                    if self._falhas_decisao_consecutivas() >= MAX_PASSOS_SEM_DECISAO:
+                        self._encerrar_erro("O modelo não devolveu uma decisão válida.")
+                        break
+                    continue
 
-            # 3º: fallback — menu Iniciar (menos confiável)
+                tipo = str(decisao.get("acao") or "").strip().lower()
+                if tipo == "concluido":
+                    if self.verificar_resultado:
+                        with self._medir("auditoria_final"):
+                            confirmado, detalhe = self._auditar_conclusao()
+                        if not confirmado:
+                            self._verificacoes_finais_recusadas += 1
+                            self._registrar(
+                                f"AUDITORIA FINAL: resultado não comprovado — {detalhe}. "
+                                "Continue a tarefa ou informe que não foi possível confirmar."
+                            )
+                            if self._verificacoes_finais_recusadas >= 3:
+                                if self.renovar_limites and self._orientar_apos_limite(
+                                    "Não consegui comprovar a conclusão após três verificações: " + detalhe):
+                                    self._verificacoes_finais_recusadas = 0
+                                    continue
+                                self._encerrar_erro(
+                                    "Não consegui confirmar na tela que a tarefa foi concluída: "
+                                    + detalhe
+                                )
+                                break
+                            continue
+                    mensagem = str(decisao.get("mensagem") or "Pronto, terminei!")
+                    self._mudar_estado("concluido", mensagem)
+                    self._falar(mensagem)
+                    break
+                if tipo == "erro":
+                    self._encerrar_erro(str(decisao.get("mensagem") or "Não consegui continuar."))
+                    break
+
+                assinatura = self._assinatura_acao(decisao)
+                if self._eh_repeticao_bloqueada(assinatura, decisao, passo):
+                    self._falhas_operacionais += 1
+                    continue
+
+                descricao = str(decisao.get("descricao") or tipo)
+                with self._lock:
+                    self.estado.ultima_acao = descricao
+                self._mudar_estado("executando", descricao)
+                with self._medir("execucao"):
+                    sucesso, detalhe = self._executar_acao(decisao)
+                if sucesso:
+                    self._falhas_operacionais = 0
+                    acao_util = tipo not in {"esperar", "mover_mouse"}
+                    progresso = acao_util and (not self.renovar_limites or tipo == "ferramenta")
+                    self._registrar(f"Passo {passo}: OK — {descricao}", progresso=progresso)
+                    if acao_util:
+                        self._imagem_antes_ultima_acao = imagem
+                        self._aguarda_progresso_visual = self.renovar_limites and tipo != "ferramenta"
+                        self._verificacoes_finais_recusadas = 0
+                    if tipo in {"trocar_janela", "abrir_app", "clicar_tarefa", "ativar_janela"}:
+                        self._contexto_telas.append(f"Passo {passo}: {descricao}")
+                else:
+                    self._falhas_operacionais += 1
+                    mensagem_falha = detalhe or descricao
+                    self._registrar(
+                        f"Passo {passo}: FALHA em {tipo} — {mensagem_falha}. "
+                        "Tente uma abordagem diferente.",
+                    )
+                    # A falha operacional precisa aparecer no painel enquanto o
+                    # agente decide a alternativa; antes ela existia somente no
+                    # histórico enviado ao modelo e parecia que nada acontecia.
+                    with self._lock:
+                        self.estado.mensagem = f"Falha ao executar {tipo}"
+                        self.estado.erro = mensagem_falha
+                        self.estado.atualizado_em = time.time()
+                self._publicar()
+                pausa = self._pausa_apos_acao(decisao, sucesso)
+                if pausa and not self.backend.esperar(pausa, self._cancelar):
+                    self._encerrar_cancelada()
+                    break
+            else:
+                if self._cancelar.is_set():
+                    self._encerrar_cancelada()
+                else:
+                    mensagem = f"Atingi o limite de {self.estado.max_passos} passos sem concluir."
+                    self._mudar_estado("limite", mensagem, mensagem)
+                    self._falar(mensagem)
+        except Exception as exc:  # noqa: BLE001
+            self._encerrar_erro(f"Falha inesperada no agente: {type(exc).__name__}: {exc}")
+        finally:
+            self._cursor.restaurar()
             try:
-                pyautogui.hotkey("win")
-                time.sleep(0.6)
-                pyautogui.typewrite(app, interval=0.05)
-                time.sleep(1.0)
-                pyautogui.press("enter")
-                print(f"[AGENTE_UI] ✓ Abriu via menu Iniciar: '{app}'")
-                return True
-            except Exception as e:
-                print(f"[AGENTE_UI] Falha ao abrir via menu Iniciar '{app}': {e}")
+                self.backend.fechar()
+            except Exception:
+                pass
+            self._finalizou.set()
+        return self.retrato()
+
+    def pausar(self) -> bool:
+        with self._lock:
+            if not self.estado.ativo or not self._executar.is_set():
                 return False
+            self._executar.clear()
+            self._iniciar_espera()
+        self._mudar_estado("pausado", "Agente pausado")
+        return True
 
-        # ── Minimizar janela atual ──
-        elif tipo == "minimizar":
-            pyautogui.keyDown("win")
-            pyautogui.keyDown("down")
-            pyautogui.keyUp("down")
-            pyautogui.keyUp("win")
-            print("[AGENTE_UI] ✓ Minimizou janela atual")
-            return True
+    def retomar(self) -> bool:
+        with self._lock:
+            if not self.estado.ativo or self._executar.is_set():
+                return False
+            # O tempo pausado não conta como ausência de progresso.
+            self._terminar_espera()
+            self._executar.set()
+        self._mudar_estado("rodando", "Continuando")
+        return True
 
-        # ── Max/restaurar janela atual ──
-        elif tipo == "maximizar":
-            pyautogui.keyDown("win")
-            pyautogui.keyDown("up")
-            pyautogui.keyUp("up")
-            pyautogui.keyUp("win")
-            print("[AGENTE_UI] ✓ Maximizou/restaurou janela atual")
-            return True
+    def cancelar(self) -> bool:
+        with self._lock:
+            if not self.estado.ativo:
+                return False
+            self._cancelar.set()
+            self._executar.set()
+        self._mudar_estado("cancelando", "Cancelando o agente")
+        return True
 
-        else:
-            print(f"[AGENTE_UI] Tipo de ação desconhecido: '{tipo}'")
+    def aguardar(self, timeout: Optional[float] = None) -> bool:
+        return self._finalizou.wait(timeout)
+
+    def enviar_mensagem(self, mensagem: str) -> bool:
+        mensagem = (mensagem or "").strip()
+        if not mensagem or not self.retrato()["ativo"]:
             return False
+        with self._lock:
+            if self._pergunta_descricao:
+                self._pergunta_resposta = mensagem
+                self._pergunta_evento.set()
+                return True
+            confirmacao_pendente = bool(self._confirmacao_destrutiva_descricao)
+        if confirmacao_pendente:
+            resposta = self._ler_confirmacao_explicita(mensagem)
+            if resposta is None:
+                self._registrar(
+                    "CONFIRMAÇÃO DESTRUTIVA AMBÍGUA: responda exatamente 'sim, confirmo' "
+                    "ou 'não, cancelar'."
+                )
+                self._mudar_estado(
+                    "aguardando_confirmacao",
+                    "Resposta ambígua. Diga 'sim, confirmo' ou 'não, cancelar'.",
+                )
+                return True
+            with self._lock:
+                self._confirmacao_destrutiva_resposta = resposta
+                self._confirmacao_destrutiva_evento.set()
+            return True
+        self._mensagens.put(mensagem)
+        return True
 
-    except pyautogui.FailSafeException:
-        # O usuário moveu o mouse pro canto pra parar — tratamos como parada intencional
-        print("[AGENTE_UI] FAILSAFE ativado! Mouse foi pro canto superior esquerdo.")
-        _agente_parar.set()
-        return False
-    except Exception as e:
-        print(f"[AGENTE_UI] Erro ao executar '{tipo}': {e}")
-        return False
+    # ── watchdog e decisão ───────────────────────────────────────
 
+    def _aguardar_retomada(self) -> bool:
+        while not self._executar.wait(0.1):
+            if self._cancelar.is_set():
+                return False
+        return not self._cancelar.is_set()
 
-# ─────────────────────────────────────────────
-# LOOP PRINCIPAL DO AGENTE
-# ─────────────────────────────────────────────
-
-def _memoria_para_contexto() -> str:
-    """Retorna os fatos da memória do Vitor formatados para injetar no histórico do agente."""
-    try:
-        import memoria as _mem
-        texto = _mem.formatar_para_prompt()
-        return texto if texto else ""
-    except Exception:
+    def _motivo_watchdog(self) -> str:
+        if self._espera_nivel:
+            return ""
+        agora = self._relogio()
+        if agora - self._ultimo_progresso > self.timeout_sem_progresso:
+            return f"Sem progresso por mais de {self.timeout_sem_progresso:.0f}s"
+        if self._falhas_operacionais >= 5:
+            return "Cinco ações falharam consecutivamente; preciso mudar a abordagem"
+        if agora - self._inicio_mono > self._orcamento_tempo:
+            if self.renovar_limites and self._progresso_tempo > 0 and self._falhas_operacionais < 3:
+                self._orcamento_tempo = agora - self._inicio_mono + self.timeout_total
+                self._progresso_tempo = 0
+                self._registrar("TEMPO RENOVADO: houve progresso; continuando a mesma tarefa.")
+            else:
+                return f"Tempo total excedeu {self._orcamento_tempo:.0f}s sem progresso suficiente"
         return ""
 
+    def _iniciar_espera(self) -> None:
+        with self._lock:
+            if self._espera_nivel == 0:
+                self._espera_inicio = self._relogio()
+            self._espera_nivel += 1
 
-def _personalidade_emily() -> str:
-    """Retorna a personalidade principal da Emily para injetar no contexto do agente."""
-    try:
-        import modelo as _modelo
-        return _modelo.EMILY_PERSONALIDADE.strip()
-    except Exception:
-        return "Você é Emily, a assistente pessoal do Vitor."
+    def _terminar_espera(self) -> None:
+        with self._lock:
+            if self._espera_nivel <= 0:
+                return
+            self._espera_nivel -= 1
+            if self._espera_nivel == 0:
+                duracao = max(0.0, self._relogio() - self._espera_inicio)
+                self._inicio_mono += duracao
+                self._ultimo_progresso += duracao
 
+    def _passos(self):
+        passo = 0
+        while not self._cancelar.is_set():
+            if passo >= self.estado.max_passos:
+                if not self.renovar_limites:
+                    return
+                if not (self._progresso_passos > 0 and self._falhas_operacionais < 3):
+                    if not self._orientar_apos_limite("Cheguei ao checkpoint de passos sem progresso suficiente"):
+                        return
+                with self._lock:
+                    self.estado.max_passos += self.max_passos
+                    self._progresso_passos = 0
+                self._registrar("PASSOS RENOVADOS: continuando a tarefa existente, sem reiniciá-la.")
+            passo += 1
+            yield passo
 
-def _loop_agente(objetivo: str) -> None:
-    """
-    Roda em thread separada.
-    Cada volta do loop: captura tela → pede decisão → executa → repete.
-    """
-    global _agente_objetivo, _contexto_telas
+    def _orientar_apos_limite(self, motivo: str) -> bool:
+        if not self.renovar_limites or self._cancelar.is_set():
+            return False
+        ok, resposta = self._perguntar_vitor(
+            motivo + ". Quer que eu continue tentando? Pode responder sim ou orientar outra abordagem.", "problema")
+        if not ok or self._ler_confirmacao_explicita(resposta) is False:
+            return False
+        self._inicio_mono = self._ultimo_progresso = self._relogio()
+        self._orcamento_tempo = self.timeout_total
+        self._falhas_operacionais = 0
+        self._registrar("ORIENTAÇÃO NO CHECKPOINT: " + resposta)
+        self._mensagens.put(resposta)
+        return True
 
-    _agente_objetivo = objetivo
-    _contexto_telas = []     # limpa contexto de telas antigas
-    _agente_parar.clear()
-    _agente_pausado.set()    # começa sem pausa
-    historico: list[str] = []
-    _ultima_acao_desc = ""   # rastreio de repetição
-    _contagem_repeticao = 0  # quantas vezes a mesma ação foi repetida seguida
-    _loop_ativo = False      # se estamos em estado de loop detectado
+    def _encerrar_watchdog(self, motivo: str) -> None:
+        self._mudar_estado("watchdog", motivo, motivo)
+        self._falar(f"Parei por segurança: {motivo}.")
 
-    # ── Monta contexto fixo: personalidade + memória ─────────────────
-    # Passado direto pra decidir_proxima_acao_ui como contexto_fixo,
-    # sem ocupar nenhum slot do historico[] rotativo.
-    partes_fixas = []
-    personalidade = _personalidade_emily()
-    if personalidade:
-        partes_fixas.append(
-            f"[IDENTIDADE E PERSONALIDADE DA EMILY — mantenha durante toda a tarefa]\n{personalidade}"
-        )
-    ctx_mem = _memoria_para_contexto()
-    if ctx_mem:
-        partes_fixas.append(
-            f"[CONTEXTO DO USUÁRIO — use para personalizar suas ações]\n{ctx_mem}"
-        )
-    _contexto_fixo = "\n\n".join(partes_fixas)
+    def _encerrar_cancelada(self) -> None:
+        self._mudar_estado("cancelado", "Cancelado pelo usuário")
 
-    print(f"\n[AGENTE_UI] === Iniciando: '{objetivo}' ===")
+    def _encerrar_erro(self, mensagem: str) -> None:
+        self._mudar_estado("erro", mensagem, mensagem)
+        self._falar(mensagem)
 
-    # Passos seguidos em que o modelo não devolveu decisão utilizável. Sem esse
-    # freio, um modelo que recusa a tarefa ("Não posso ajudar com isso") ou
-    # responde conversando ("Olá, Vitor. Como posso ajudar?") fazia o agente
-    # varrer os 50 passos inteiros, três chamadas por passo, clicando no que
-    # aparecesse pela frente quando por acaso saía um JSON.
-    passos_sem_decisao = 0
-
-    for passo in range(1, MAX_PASSOS + 1):
-
-        # Verifica se o usuário pediu pra parar
-        if _agente_parar.is_set():
-            print("[AGENTE_UI] Parado pelo usuário")
-            _falar("Ok, parei o que eu tava fazendo na tela!")
-            break
-
-        # Verifica se está pausado — fica aqui até continuar_agente_ui() ser chamado
-        if not _agente_pausado.is_set():
-            print("[AGENTE_UI] Pausado, aguardando...")
-            _agente_pausado.wait()
-            if _agente_parar.is_set():
-                break
-
-        print(f"[AGENTE_UI] --- Passo {passo}/{MAX_PASSOS} ---")
-
-        # 0.5. Verifica se o usuário enviou uma mensagem ao vivo pra corrigir/orientar
-        while not _fila_mensagens_ao_vivo.empty():
+    def _consumir_mensagens(self) -> None:
+        while True:
             try:
-                msg_vivo = _fila_mensagens_ao_vivo.get_nowait()
-                if msg_vivo:
-                    historico.append(f"🗣️ VITOR DISSE AGORA: '{msg_vivo}' — Leve isso em consideração IMEDIATAMENTE no próximo passo. Ajuste sua estratégia conforme o que ele disse.")
-                    if len(historico) > 10:
-                        historico = historico[-10:]
-                    print(f"[AGENTE_UI] 💬 Mensagem ao vivo recebida: '{msg_vivo}'")
-            except Exception:
-                break
-
-        # 1. Captura a tela com a grade de precisão desenhada em cima.
-        # A grade 10x10 rotulada A0-J9 já existia em visao.py e nunca era
-        # usada: o agente mandava a print limpa e pedia coordenada crua.
-        # Com a grade, o modelo aponta uma célula e o erro fica limitado
-        # ao tamanho dela (128x72) em vez de ser ilimitado.
-        imagem = visao.capturar_tela_com_grade()
-        if not imagem:
-            # Se a captura falhou, pode ser UAC ou outro bloqueio de segurança.
-            # Esperamos um pouco e tentamos de novo, mas não travamos a thread.
-            if visao._tela_bloqueada_pelo_uac():
-                _falar("Vitor, apareceu uma tela de permissão. Responde ela que eu continuo depois.")
-                for _ in range(20):  # espera até ~20 segundos pela resposta do UAC
-                    time.sleep(1)
-                    if not visao._tela_bloqueada_pelo_uac():
-                        imagem = visao.capturar_tela_com_grade()
-                        if imagem:
-                            break
-                if not imagem:
-                    _falar("Ficou muito tempo naquela tela de permissão. Pede de novo quando responder.")
-                    break
-            else:
-                _falar("Não consegui capturar a tela, Vitor!")
-                break
-
-        # 2. Pede pro GPT-5.4 Pro decidir o próximo passo
-        import modelo as _modelo
-        contexto_telas = _contexto_telas[-_MAX_CONTEXTOS:]
-
-        # Tenta até 3 vezes caso o modelo retorne resposta inválida (não-JSON)
-        decisao = None
-        for _tentativa in range(3):
-            decisao = _modelo.decidir_proxima_acao_ui(imagem, objetivo, historico, contexto_telas, contexto_fixo=_contexto_fixo)
-            if decisao:
-                break
-            print(f"[AGENTE_UI] Resposta inválida do modelo (tentativa {_tentativa + 1}/3), tentando novamente...")
-            time.sleep(0.5)
-
-        if not decisao:
-            passos_sem_decisao += 1
-            print(f"[AGENTE_UI] Modelo falhou 3x seguidas "
-                  f"({passos_sem_decisao}/{MAX_PASSOS_SEM_DECISAO} passos sem decisão)")
-
-            if passos_sem_decisao >= MAX_PASSOS_SEM_DECISAO:
-                # Desistir é melhor que continuar: o agente controla o mouse de
-                # verdade, e insistir sem decisão válida só produz clique
-                # aleatório na tela do Vitor.
-                print("[AGENTE_UI] ✗ Abortando: o modelo não está conseguindo "
-                      "decidir os passos dessa tarefa.")
-                _falar("Vitor, não tô conseguindo fazer isso vendo a tela. "
-                       "Me explica de outro jeito ou pede de outra forma.")
-                break
-
-            historico.append(f"Passo {passo}: FALHA - modelo não retornou JSON válido")
-            if len(historico) > 8:
-                historico = historico[-8:]
-            time.sleep(1.0)
-            continue
-
-        passos_sem_decisao = 0
-
-        tipo_acao = decisao.get("acao", "")
-        descricao = decisao.get("descricao", "")
-
-        # 3. Verifica se terminou
-        if tipo_acao == "concluido":
-            mensagem = decisao.get("mensagem", "Pronto Vitor, terminei!")
-            print(f"[AGENTE_UI] ✓ Concluído: {mensagem}")
-            _falar(mensagem)
-            break
-
-        # 4. Verifica se o modelo encontrou um erro
-        if tipo_acao == "erro":
-            mensagem = decisao.get("mensagem", "Não consegui continuar, Vitor!")
-            print(f"[AGENTE_UI] ✗ Erro: {mensagem}")
-            _falar(mensagem)
-            break
-
-        # 4.5. ANTI-LOOP: Detecta se o modelo está repetindo a mesma ação
-        desc_normalizada = (descricao or tipo_acao).strip().lower()
-        if desc_normalizada == _ultima_acao_desc:
-            _contagem_repeticao += 1
-        else:
-            _contagem_repeticao = 1
-            _ultima_acao_desc = desc_normalizada
-            _loop_ativo = False
-
-        # Se repetiu 3x seguidas: FORÇA uma ação corretiva e pula a ação do modelo
-        if _contagem_repeticao >= 3 and not _loop_ativo:
-            _loop_ativo = True
-            print(f"[AGENTE_UI] 🔄 ANTI-LOOP: Mesma ação '{desc_normalizada}' repetida {_contagem_repeticao}x. Forçando próximo passo...")
-            
-            # Determina ação corretiva baseado no tipo de ação que está travando
-            if tipo_acao == "clicar" and decisao.get("y", 999) < 100:
-                # Travou clicando na barra de endereço → já está selecionada, digita direto
-                historico.append(f"Passo {passo}: ⚠️ ANTI-LOOP ATIVADO — Você já clicou na barra de endereço. Ela JÁ ESTÁ selecionada. O clique FUNCIONOU. Agora DIGITE a URL diretamente (use 'apagar_tudo' se precisar limpar, depois 'digitar' o endereço). NÃO clique de novo.")
-                # Executa Ctrl+A pra garantir seleção
-                pyautogui.hotkey("ctrl", "a")
-                print(f"[AGENTE_UI] 🔄 Executou Ctrl+A forçado na barra de endereço")
-            elif tipo_acao == "clicar":
-                # Travou clicando em algo genérico → assume que o clique funcionou
-                historico.append(f"Passo {passo}: ⚠️ ANTI-LOOP ATIVADO — O clique anterior JÁ FUNCIONOU. A ação foi executada com sucesso. Prossiga para o PRÓXIMO passo do objetivo. NÃO repita o clique.")
-            elif tipo_acao in ("digitar", "digitar_unicode"):
-                # Travou digitando → limpa e tenta de novo
-                historico.append(f"Passo {passo}: ⚠️ ANTI-LOOP ATIVADO — O texto pode já ter sido digitado. Olhe a tela com atenção. Se o texto está correto, pressione 'enter'. Se não está, use 'apagar_tudo' primeiro.")
-                pyautogui.hotkey("ctrl", "a")
-                print(f"[AGENTE_UI] 🔄 Executou Ctrl+A forçado pra permitir re-digitação")
-            else:
-                # Qualquer outra ação repetida → avisa o modelo que funcionou
-                historico.append(f"Passo {passo}: ⚠️ ANTI-LOOP ATIVADO — A ação '{desc_normalizada}' já foi executada com SUCESSO anteriormente. Assuma que FUNCIONOU e prossiga para o próximo passo do objetivo.")
-
-            if len(historico) > 10:
-                historico = historico[-10:]
-            time.sleep(1.0)
-            continue  # Pula a execução da ação repetida
-
-        # Se já está em loop ativo e o modelo AINDA repete (4x+), força mais agressivamente
-        if _contagem_repeticao >= 5:
-            print(f"[AGENTE_UI] 🛑 ANTI-LOOP CRÍTICO: {_contagem_repeticao}x a mesma ação. Forçando continuidade...")
-            historico = historico[-3:]  # Limpa histórico pra dar "reset" no contexto
-            historico.append(f"⚠️ RESET DE CONTEXTO: Você ficou travado repetindo a mesma ação por 5 vezes. A ação anterior JÁ FOI BEM-SUCEDIDA. OBRIGATÓRIO: faça o PRÓXIMO passo lógico do objetivo original: '{objetivo}'. Se era pra clicar em algo que já clicou, agora digite ou pressione enter. Se era pra digitar, agora pressione enter pra confirmar.")
-            _contagem_repeticao = 0
-            _loop_ativo = False
-            time.sleep(1.0)
-            continue
-
-        # 5. Registra no histórico (só os últimos 8 pra economizar tokens)
-        acao_resumida = f"Passo {passo}: {descricao or tipo_acao}"
-        historico.append(acao_resumida)
-        if len(historico) > 8:
-            historico = historico[-8:]
-
-        # 5.1. Se for ação de navegação, registra o contexto de tela para não "esquecer" onde estava
-        if tipo_acao in ("trocar_janela", "abrir_app", "clicar_tarefa", "minimizar", "maximizar"):
-            _contexto_telas.append(f"Passo {passo}: {descricao or tipo_acao}")
-            if len(_contexto_telas) > _MAX_CONTEXTOS:
-                _contexto_telas = _contexto_telas[-_MAX_CONTEXTOS:]
-
-        # 6. Executa a ação
-        sucesso = _executar_acao(decisao)
-        if not sucesso:
-            # NÃO encerra o agente — registra a falha no histórico e deixa o modelo tentar alternativa
-            print(f"[AGENTE_UI] ⚠️ Ação '{tipo_acao}' falhou. Registrando no histórico e continuando...")
-            historico.append(
-                f"Passo {passo}: FALHA na ação '{tipo_acao}' ({descricao}). "
-                f"Tente uma abordagem DIFERENTE: se não encontrou a janela, use 'abrir_app'; "
-                f"se não conseguiu abrir o app, procure na barra de tarefas (clicar_tarefa), "
-                f"na área de trabalho (minimizar todas as janelas com atalho win+d) ou no menu Iniciar. "
-                f"NUNCA desista — sempre existe uma alternativa."
+                mensagem = self._mensagens.get_nowait()
+            except queue.Empty:
+                return
+            self._registrar(
+                f"INSTRUÇÃO AO VIVO DO USUÁRIO: {mensagem}. Ajuste o próximo passo imediatamente.",
+                progresso=True,
             )
-            if len(historico) > 10:
-                historico = historico[-10:]
-            time.sleep(1.0)
-            continue  # Continua o loop — o modelo vai ver a falha e tentar diferente
 
-        # 7. Aguarda a tela atualizar antes da próxima captura
-        time.sleep(1.5)
+    @staticmethod
+    def _texto_normalizado(texto: Any) -> str:
+        texto = unicodedata.normalize("NFKD", str(texto or "").strip().lower())
+        texto = "".join(c for c in texto if not unicodedata.combining(c))
+        return " ".join("".join(c if c.isalnum() else " " for c in texto).split())
 
-    else:
-        # Chegou no limite de passos sem concluir
-        _falar(f"Atingi o limite de {MAX_PASSOS} passos sem terminar, Vitor!")
+    def _nome_app_decidido(self, nome: str) -> str:
+        """Corrige navegador presumido pelo modelo, respeitando pedido explícito."""
+        chave = self._texto_normalizado(nome)
+        nomes = {
+            "chrome": ("chrome", "google chrome"),
+            "edge": ("edge", "microsoft edge"),
+            "firefox": ("firefox",),
+            "brave": ("brave", "brave browser"),
+        }
+        familia = next((f for f, aliases in nomes.items() if chave in aliases), "")
+        if not familia:
+            return nome
+        objetivo = self._texto_normalizado(self.estado.objetivo)
+        if any(alias in objetivo.split(" ") for alias in nomes[familia]):
+            return nome
+        padrao, _ = navegador_padrao_linux()
+        return "navegador padrão" if padrao and padrao.casefold() != familia else nome
 
-    # Limpa o estado ao finalizar
-    _agente_rodando.clear()
-    _agente_objetivo = ""
-    print("[AGENTE_UI] === Agente finalizado ===\n")
+    @classmethod
+    def _ler_confirmacao_explicita(cls, mensagem: str) -> Optional[bool]:
+        """Aceita somente respostas inequívocas; texto ambíguo nunca libera a ação."""
+        texto = cls._texto_normalizado(mensagem)
+        positivas = {
+            "sim", "sim confirmo", "confirmo", "pode confirmar", "pode executar",
+            "pode prosseguir", "autorizo", "eu autorizo", "sim pode",
+        }
+        negativas = {
+            "nao", "nao cancelar", "cancelar", "cancela", "nao confirmo",
+            "nao execute", "nao pode", "pare", "parar",
+        }
+        if texto in positivas:
+            return True
+        if texto in negativas:
+            return False
+        return None
 
+    def _decidir(self, imagem: Any) -> Optional[dict]:
+        for tentativa in range(1, 4):
+            try:
+                extras = {}
+                if self.decisor is _decisor_padrao:
+                    from agente_ui_catalogo import catalogo
+                    extras["catalogo_ferramentas"] = (
+                        [] if isinstance(imagem, (list, tuple)) and len(imagem) > 1
+                        else catalogo(self._dominios_ferramentas)
+                    )
+                    extras["resultados_ferramentas"] = list(self._resultados_ferramentas)
+                fase = "modelo_verificacao" if isinstance(imagem, (list, tuple)) and len(imagem) > 1 else "modelo_decisao"
+                with self._medir(fase):
+                    decisao = self.decisor(
+                        imagem,
+                        self.estado.objetivo,
+                        (list(self._resultados_ferramentas) if not extras else []) + list(self._historico),
+                        list(self._contexto_telas),
+                        self._contexto_fixo,
+                        **extras,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                decisao = None
+                print(f"[AGENTE_UI] decisão falhou ({tentativa}/3): {exc}")
+            if isinstance(decisao, dict) and decisao.get("acao"):
+                return decisao
+            if tentativa < 3 and not self.backend.esperar(0.05, self._cancelar):
+                return None
+        self._registrar("FALHA: modelo não retornou JSON de ação válido")
+        return None
 
-def _falar(texto: str) -> None:
-    """Chama o callback de fala de forma segura."""
-    if _callback_falar:
+    def _falhas_decisao_consecutivas(self) -> int:
+        total = 0
+        for item in reversed(self._historico):
+            if item.startswith("FALHA: modelo"):
+                total += 1
+            else:
+                break
+        return total
+
+    def _auditar_conclusao(self) -> tuple[bool, str]:
+        self._mudar_estado("verificando", "Conferindo se a tarefa terminou de verdade")
         try:
-            _callback_falar(texto)
-        except Exception as e:
-            print(f"[AGENTE_UI] Erro no callback de fala: {e}")
-    else:
-        print(f"[AGENTE_UI] (sem callback de fala): {texto}")
+            imagem_atual = self.backend.capturar_tela()
+            resultado = self.verificador_resultado(
+                imagem_atual, self.estado.objetivo, list(self._resultados_ferramentas) + list(self._historico),
+                self._imagem_antes_ultima_acao,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"falha na verificação visual: {exc}"
+        if self._cancelar.is_set():
+            return False, "verificação cancelada"
+        if not isinstance(resultado, dict):
+            return False, "verificador não devolveu um resultado válido"
+        try:
+            confianca = float(resultado.get("confianca", 0))
+        except (TypeError, ValueError):
+            confianca = 0.0
+        evidencia = str(resultado.get("evidencia") or "").strip()
+        if resultado.get("concluido") is True and confianca >= 0.8 and len(evidencia) >= 12:
+            rotulo = "RESULTADO CONFIRMADO POR FERRAMENTA" if resultado.get("fonte") == "ferramenta" else "RESULTADO VISÍVEL CONFIRMADO"
+            self._registrar(f"{rotulo}: {evidencia}", progresso=True)
+            return True, evidencia
+        detalhe = str(resultado.get("proximo_passo") or evidencia or "sem evidência suficiente").strip()
+        return False, detalhe
+
+    @staticmethod
+    def _assinatura_acao(decisao: dict) -> str:
+        campos = {
+            "acao": decisao.get("acao"),
+            "celula": str(decisao.get("celula") or "").upper(),
+            "offset_x": decisao.get("offset_x"),
+            "offset_y": decisao.get("offset_y"),
+            "x": decisao.get("x"),
+            "y": decisao.get("y"),
+            "texto": decisao.get("texto"),
+            "direcao": decisao.get("direcao"),
+            "ferramenta": decisao.get("ferramenta") or decisao.get("nome"),
+            "argumentos": decisao.get("argumentos"),
+        }
+        return json.dumps(campos, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _eh_repeticao_bloqueada(self, assinatura: str, decisao: dict, passo: int) -> bool:
+        # Pausar ou posicionar o cursor não torna um terceiro clique no mesmo
+        # alvo mais confiável. Preserve a assinatura através dessas ações.
+        tipo = str(decisao.get("acao") or "").lower()
+        if (tipo in {"esperar", "mover_mouse"}
+                and self._ultimo_tipo_assinatura in {
+                    "clicar", "clicar_celula", "clicar_tarefa", "clicar_direito", "duplo_clique",
+                }):
+            return False
+        if assinatura == self._assinatura_anterior:
+            self._repeticoes += 1
+        else:
+            self._assinatura_anterior = assinatura
+            self._ultimo_tipo_assinatura = tipo
+            self._repeticoes = 1
+            return False
+        if self._repeticoes < 3:
+            return False
+        tipo = str(decisao.get("acao") or "ação")
+        self._registrar(
+            f"Passo {passo}: ⚠️ LOOP DETECTADO — ANTI-LOOP: a mesma ação estrutural "
+            f"'{tipo}' foi pedida "
+            f"{self._repeticoes} vezes. Não a execute novamente; avance ou tente outra abordagem.",
+        )
+        self._publicar()
+        return True
+
+    # ── tradução de ações ────────────────────────────────────────
+
+    @staticmethod
+    def _coordenada_grade(
+        celula: str, offset_x: Any = 50, offset_y: Any = 50,
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Converte célula + offsets em proporções normalizadas da saída (0–1)."""
+        celula = str(celula or "").strip().upper()
+        if len(celula) < 2 or celula[0] not in "ABCDEFGHIJ" or not celula[1:].isdigit():
+            return None, None
+        coluna = ord(celula[0]) - ord("A")
+        linha = int(celula[1:])
+        if not 0 <= linha <= 9:
+            return None, None
+        try:
+            proporcao_x = min(100.0, max(0.0, float(offset_x))) / 100.0
+            proporcao_y = min(100.0, max(0.0, float(offset_y))) / 100.0
+        except (TypeError, ValueError):
+            return None, None
+        return (
+            (coluna + proporcao_x) / 10.0,
+            (linha + proporcao_y) / 10.0,
+        )
+
+    def _coordenadas(self, decisao: dict) -> tuple[Optional[int], Optional[int]]:
+        proporcao_x, proporcao_y = self._coordenada_grade(
+            decisao.get("celula", ""),
+            decisao.get("offset_x", 50),
+            decisao.get("offset_y", 50),
+        )
+        geometria = self.backend.geometria()
+        esquerda = int(geometria.get("left", 0))
+        topo = int(geometria.get("top", 0))
+        largura = max(1, int(geometria["width"]))
+        altura = max(1, int(geometria["height"]))
+
+        if proporcao_x is not None and proporcao_y is not None:
+            # A grade é normalizada, portanto independe do tamanho em pixels do
+            # PNG e funciona igualmente em 16:9, 5:4 e saídas escaladas. O clamp
+            # é necessário porque J9 + offset 100 representa a borda externa.
+            # O epsilon só neutraliza resíduos binários como 0.35*1440 =
+            # 503.99999999999994; não arredonda posições genuinamente fracionárias.
+            rx = esquerda + min(largura - 1, max(0, int(proporcao_x * largura + 1e-9)))
+            ry = topo + min(altura - 1, max(0, int(proporcao_y * altura + 1e-9)))
+            return rx, ry
+
+        if "x" in decisao and "y" in decisao:
+            try:
+                x, y = int(decisao["x"]), int(decisao["y"])
+            except (TypeError, ValueError):
+                return None, None
+            # Compatibilidade com respostas legadas em coordenadas 1280x720.
+            rx = esquerda + min(largura - 1, max(0, int(x * largura / IMG_W)))
+            ry = topo + min(altura - 1, max(0, int(y * altura / IMG_H)))
+            return rx, ry
+        return None, None
+
+    @staticmethod
+    def _tem_offsets_finos(decisao: dict) -> bool:
+        """No modo verificado, centro implícito de célula não é preciso o bastante."""
+        return (
+            ("offset_x" in decisao and "offset_y" in decisao)
+            or ("x" in decisao and "y" in decisao)
+        )
+
+    @classmethod
+    def _eh_acao_destrutiva(cls, decisao: dict) -> bool:
+        """Reconhece a confirmação final destrutiva mesmo se a flag for omitida."""
+        if decisao.get("destrutiva") is True:
+            return True
+        descricao = cls._texto_normalizado(
+            " ".join(str(decisao.get(campo) or "") for campo in ("descricao", "texto"))
+        )
+        termos_finais = (
+            "confirmar desinstalacao", "desinstalar agora", "confirmar exclusao",
+            "excluir permanentemente", "apagar permanentemente", "remover definitivamente",
+            "excluir definitivamente", "apagar definitivamente", "esvaziar lixeira",
+            "formatar disco", "deletar conta", "excluir conta definitivamente",
+        )
+        return any(termo in descricao for termo in termos_finais)
+
+    def _autorizar_acao_destrutiva(self, decisao: dict) -> tuple[bool, str]:
+        if not self._eh_acao_destrutiva(decisao):
+            return True, ""
+
+        descricao = str(decisao.get("descricao") or decisao.get("texto") or "ação destrutiva").strip()
+        chave = self._texto_normalizado(descricao)
+        if chave in self._destrutivas_negadas:
+            return False, "ação destrutiva já negada pelo usuário nesta sessão"
+
+        with self._lock:
+            self._confirmacao_destrutiva_descricao = descricao
+            self._confirmacao_destrutiva_resposta = None
+            self._confirmacao_destrutiva_evento.clear()
+        pergunta = (
+            f"A ação '{descricao}' pode apagar ou remover dados. "
+            "Confirma a execução? Responda 'sim, confirmo' ou 'não, cancelar'."
+        )
+        self._registrar(f"CONFIRMAÇÃO HUMANA NECESSÁRIA: {descricao}")
+        self._mudar_estado("aguardando_confirmacao", pergunta)
+        self._falar(pergunta)
+
+        detalhe = ""
+        limite = time.monotonic() + self.timeout_confirmacao_destrutiva
+        while not self._confirmacao_destrutiva_evento.wait(0.1):
+            if self._cancelar.is_set():
+                detalhe = "cancelada enquanto aguardava confirmação humana"
+                break
+            if time.monotonic() >= limite:
+                detalhe = "confirmação humana expirou; ação destrutiva cancelada"
+                break
+        else:
+            with self._lock:
+                resposta = self._confirmacao_destrutiva_resposta
+            if resposta is True:
+                self._registrar(f"AÇÃO DESTRUTIVA AUTORIZADA explicitamente: {descricao}")
+            else:
+                detalhe = "ação destrutiva negada pelo usuário"
+                self._destrutivas_negadas.add(chave)
+
+        with self._lock:
+            self._confirmacao_destrutiva_descricao = ""
+            self._confirmacao_destrutiva_resposta = None
+            self._confirmacao_destrutiva_evento.clear()
+        if not detalhe and not self._cancelar.is_set():
+            self._mudar_estado("executando", "Executando a ação autorizada")
+        return not detalhe, detalhe
+
+    def _clicar_com_verificacao(
+        self,
+        decisao: dict,
+        x: int,
+        y: int,
+        *,
+        botao: str = "left",
+        cliques: int = 1,
+    ) -> tuple[bool, str]:
+        """Aponta, observa novamente e só então libera o clique real."""
+        destrutiva = self._eh_acao_destrutiva(decisao)
+        if (self.verificar_cliques or destrutiva) and not self._tem_offsets_finos(decisao):
+            return False, (
+                "clique recusado: faltam offset_x e offset_y para apontar o centro "
+                "exato do elemento"
+            )
+        autorizado, detalhe = self._autorizar_acao_destrutiva(decisao)
+        if not autorizado:
+            return False, detalhe
+        # O fluxo de voz pausa a sessão antes de encaminhar a resposta do usuário.
+        # Mesmo autorizada, a ação não pode se aproveitar da corrida entre
+        # enviar_mensagem() e retomar(): nenhum movimento ocorre enquanto pausada.
+        if not self._aguardar_retomada():
+            return False, "cancelada antes de executar a ação destrutiva autorizada"
+        if not self.verificar_cliques:
+            self.backend.mover(x, y, 0.2)
+            self.backend.clicar(x, y, botao=botao, cliques=cliques)
+            return True, ""
+
+        descricao = str(decisao.get("descricao") or "elemento solicitado").strip()
+        alvo_x, alvo_y = int(x), int(y)
+        geometria_original = self.backend.geometria()
+        for tentativa in range(1, 3):
+            self.backend.mover(alvo_x, alvo_y, 0.25)
+            if not self.backend.esperar(0.18, self._cancelar):
+                return False, "cancelada antes da verificação visual do clique"
+            with self._medir("captura_verificacao"):
+                imagens = self.backend.capturar_tela_para_verificacao(alvo_x, alvo_y)
+            if self.backend.geometria() != geometria_original:
+                return False, "monitor ou resolução mudou durante a verificação; clique cancelado"
+            instrucao = (
+                f"VERIFICAÇÃO DE CLIQUE {tentativa}/2: o cursor e o marcador magenta "
+                f"estão no ponto proposto para '{descricao}'. A primeira imagem é a "
+                "tela geral e a segunda é um zoom do alvo. Confirme somente se o centro "
+                "do marcador estiver dentro do elemento descrito."
+            )
+            self._historico.append(instrucao)
+            self._mudar_estado("verificando", f"Conferindo o alvo: {descricao}")
+            verificacao = self._decidir(imagens)
+            if self._cancelar.is_set():
+                return False, "cancelada durante a verificação visual do clique"
+            if not verificacao:
+                return False, "modelo não devolveu confirmação visual válida"
+
+            tipo_verificacao = str(verificacao.get("acao") or "").strip().lower()
+            if tipo_verificacao == "confirmar_clique":
+                confere = verificacao.get("alvo_confere") is True
+                try:
+                    confianca = float(verificacao.get("confianca", 0))
+                except (TypeError, ValueError):
+                    confianca = 0.0
+                if not confere or confianca < 0.75:
+                    return False, (
+                        f"modelo não confirmou o alvo com segurança "
+                        f"(confiança {confianca:.2f})"
+                    )
+                if self.backend.geometria() != geometria_original:
+                    return False, "monitor ou resolução mudou antes do clique; clique cancelado"
+                self.backend.clicar(alvo_x, alvo_y, botao=botao, cliques=cliques)
+                self._historico.append(
+                    f"ALVO CONFIRMADO visualmente para '{descricao}' "
+                    f"(confiança {confianca:.2f})."
+                )
+                return True, ""
+
+            if tipo_verificacao in {"clicar", "clicar_celula", "clicar_direito", "duplo_clique"}:
+                if not self._tem_offsets_finos(verificacao):
+                    return False, "relocalização recusada: offsets finos ausentes"
+                novo_x, novo_y = self._coordenadas(verificacao)
+                if novo_x is None or novo_y is None:
+                    return False, "relocalização visual devolveu coordenadas inválidas"
+                alvo_x, alvo_y = novo_x, novo_y
+                self._historico.append(
+                    f"RELOCALIZAÇÃO: o primeiro ponto não cobria '{descricao}'; "
+                    "uma nova posição será verificada antes do clique."
+                )
+                continue
+
+            if tipo_verificacao == "ajustar_clique_zoom":
+                try:
+                    novo_x, novo_y = self.backend.coordenada_no_zoom(
+                        float(verificacao["zoom_x"]), float(verificacao["zoom_y"]),
+                    )
+                except (KeyError, TypeError, ValueError, ErroBackendDesktop) as exc:
+                    return False, f"ajuste pelo zoom inválido: {exc}"
+                alvo_x, alvo_y = novo_x, novo_y
+                self._historico.append(
+                    f"AJUSTE PELO ZOOM: centro de '{descricao}' relocalizado; "
+                    "verificando novamente antes do clique."
+                )
+                continue
+
+            motivo = str(verificacao.get("mensagem") or verificacao.get("descricao") or "")
+            return False, f"alvo visual não confirmado{': ' + motivo if motivo else ''}"
+
+        return False, "alvo não confirmado após a relocalização; clique cancelado"
+
+    def _executar_acao(self, decisao: dict) -> tuple[bool, str]:
+        tipo = str(decisao.get("acao") or "").strip().lower()
+        texto = str(decisao.get("texto") or "")
+        x, y = self._coordenadas(decisao)
+        precisa_xy = {"clicar", "clicar_celula", "clicar_tarefa", "clicar_direito",
+                      "duplo_clique", "mover_mouse"}
+        if tipo in precisa_xy and (x is None or y is None):
+            return False, "coordenadas ausentes ou inválidas"
+        try:
+            if self._foco_pendente and tipo in {"digitar", "digitar_unicode", "pressionar", "apagar_tudo", "atalho"}:
+                if x is not None and y is not None:
+                    ok, detalhe = self._clicar_com_verificacao(decisao, x, y)
+                    if not ok:
+                        return False, detalhe
+                    self._foco_pendente = False
+                else:
+                    return False, "Foco anterior não confirmado. Localize/clique na janela pretendida ou ative-a antes de enviar teclado; não envie atalhos para outra janela."
+            if tipo in {"clicar", "clicar_celula"}:
+                resultado = self._clicar_com_verificacao(decisao, x, y)
+                if resultado[0]:
+                    self._foco_pendente = False
+                return resultado
+            elif tipo == "clicar_direito":
+                return self._clicar_com_verificacao(decisao, x, y, botao="right")
+            elif tipo == "duplo_clique":
+                return self._clicar_com_verificacao(decisao, x, y, cliques=2)
+            elif tipo == "mover_mouse":
+                self.backend.mover(x, y, 0.3)
+            elif tipo == "digitar" or tipo == "digitar_unicode":
+                if x is not None and y is not None:
+                    ok, detalhe = self._clicar_com_verificacao(decisao, x, y)
+                    if not ok:
+                        return False, detalhe
+                self.backend.digitar(texto, 0.04)
+            elif tipo == "pressionar":
+                self.backend.pressionar(texto, int(decisao.get("vezes", 1)))
+            elif tipo == "apagar_tudo":
+                self.backend.atalho(("ctrl", "a"))
+                self.backend.pressionar("backspace")
+            elif tipo == "atalho":
+                teclas = tuple(t.strip() for t in texto.split("+") if t.strip())
+                if not teclas:
+                    return False, "atalho vazio"
+                if tuple(t.lower() for t in teclas) == ("alt", "tab"):
+                    if self._trocas_janela >= MAX_TROCAS_JANELA:
+                        return False, (
+                            "limite de alternâncias de janela atingido; use ativar_janela, "
+                            "clicar_tarefa ou clique diretamente no aplicativo já visível"
+                        )
+                    self._trocas_janela += 1
+                self.backend.atalho(teclas)
+            elif tipo == "rolar":
+                if x is not None and y is not None:
+                    self.backend.mover(x, y, 0.1)
+                direcao = str(decisao.get("direcao") or "baixo").lower()
+                self.backend.rolar(15 if direcao == "cima" else -15)
+            elif tipo == "esperar":
+                ok = self.backend.esperar(float(decisao.get("tempo", 1.5)), self._cancelar)
+                return ok, "cancelada durante a espera" if not ok else ""
+            elif tipo == "trocar_janela":
+                if self._trocas_janela >= MAX_TROCAS_JANELA:
+                    return False, (
+                        "limite de alternâncias de janela atingido; use ativar_janela, "
+                        "clicar_tarefa ou clique diretamente no aplicativo já visível"
+                    )
+                self._trocas_janela += 1
+                self.backend.atalho(("alt", "tab"))
+            elif tipo in {"minimizar", "maximizar"}:
+                self.backend.atalho(("win", "down" if tipo == "minimizar" else "up"))
+            elif tipo == "ativar_janela":
+                nome = self._nome_app_decidido(texto or str(decisao.get("descricao") or ""))
+                if not self.backend.ativar_janela(nome):
+                    self._foco_pendente = True
+                    return False, f"Não confirmei o foco da janela '{nome}'. Não abri outra janela. Use a captura para localizar/clicar na janela existente antes de digitar."
+                self._foco_pendente = False
+            elif tipo == "abrir_app":
+                nome = self._nome_app_decidido(texto)
+                if not self.backend.ativar_janela(nome):
+                    chave = nome.casefold().strip()
+                    if chave in self._apps_lancados:
+                        return False, f"'{nome}' já recebeu um pedido de abertura nesta tarefa. Não abri outra janela; verifique a tela e clique na existente."
+                    if not self.backend.abrir_app(nome):
+                        return False, f"não consegui abrir '{nome}'"
+                    self._apps_lancados.add(chave)
+                    self._foco_pendente = True
+                else:
+                    self._foco_pendente = False
+            elif tipo == "clicar_tarefa":
+                # A ação aponta para um ícone que o modelo viu na captura.
+                # Tentar abrir_app antes fazia o clique nunca acontecer quando
+                # o launcher aceitava o pedido, mesmo sem trazer a janela.
+                resultado = self._clicar_com_verificacao(decisao, x, y)
+                if resultado[0]:
+                    self._foco_pendente = False
+                return resultado
+            elif tipo == "confirmar_clique":
+                return False, "confirmar_clique só é válido durante a verificação de um alvo pendente"
+            elif tipo == "ferramenta":
+                return self._executar_ferramenta(decisao)
+            else:
+                return False, f"ação desconhecida: {tipo}"
+            return True, ""
+        except ErroBackendDesktop as exc:
+            return False, str(exc)
+        except Exception as exc:  # noqa: BLE001
+            return False, f"{type(exc).__name__}: {exc}"
+
+    def _perguntar_vitor(self, pergunta: str, tipo: str = "duvida") -> tuple[bool, str]:
+        with self._lock:
+            self._pergunta_descricao = pergunta
+            self._pergunta_resposta = ""
+            self._pergunta_evento.clear()
+        self._iniciar_espera()
+        try:
+            self._mudar_estado("aguardando_confirmacao", pergunta)
+            self._falar(pergunta)
+            def externa():
+                return self._pergunta_resposta if self._pergunta_evento.is_set() else None
+            import interface_web
+            resposta = interface_web.perguntar_usuario_tarefa(
+                pergunta, tipo, cancelar=self._cancelar, resposta_externa=externa)
+            if resposta.startswith("Não consegui abrir a pergunta"):
+                # O celular envia a resposta ao mesmo agente pela ponte.
+                limite = time.monotonic() + 600
+                while not self._pergunta_evento.wait(.1):
+                    if self._cancelar.is_set():
+                        return False, "Pergunta cancelada"
+                    if time.monotonic() >= limite:
+                        return False, "Não recebi resposta; não vou presumir autorização."
+                resposta = self._pergunta_resposta
+            if self._cancelar.is_set() or resposta.startswith(("O Vitor não respondeu", "Pergunta cancelada")):
+                return False, resposta
+            return bool(resposta.strip()), resposta
+        finally:
+            with self._lock:
+                self._pergunta_descricao = ""
+            self._terminar_espera()
+            if not self._cancelar.is_set() and self._executar.is_set():
+                self._mudar_estado("rodando", "Continuando com sua resposta")
+
+    def _executar_ferramenta(self, decisao: dict) -> tuple[bool, str]:
+        nome = str(decisao.get("ferramenta") or decisao.get("nome") or "").strip()
+        argumentos = decisao.get("argumentos") or {}
+        if not nome or not isinstance(argumentos, dict):
+            return False, "nome/argumentos de ferramenta inválidos"
+        if nome == "abrir_app":
+            return self._executar_acao({"acao": "abrir_app", "texto": str(argumentos.get("nome") or "")})
+        import ferramentas
+        from agente_ui_catalogo import EXCLUIDAS
+        if nome in EXCLUIDAS:
+            return False, "Já existe uma sessão visual ativa; use as ferramentas dentro desta tarefa."
+        self._iniciar_espera()
+        try:
+            if nome == "abrir_ferramentas":
+                dominio = str(argumentos.get("dominio") or "")
+                if dominio not in ferramentas.GRUPOS_SOB_DEMANDA:
+                    return False, "Domínio desconhecido; use um domínio do catálogo."
+                self._dominios_ferramentas.add(dominio)
+                ferramentas.esquemas(grupos=[dominio])
+                ok, texto = True, "Ferramentas carregadas: " + dominio + ". Use os novos parâmetros do catálogo."
+            elif nome in {"perguntar_usuario_tarefa", "code_perguntar"}:
+                pergunta = str(argumentos.get("pergunta") or "").strip()
+                if not pergunta:
+                    return False, "Pergunta vazia"
+                ok, texto = self._perguntar_vitor(pergunta, str(argumentos.get("tipo") or "duvida"))
+                texto = "Resposta do usuário: " + texto if ok else texto
+            else:
+                f = ferramentas.CATALOGO.get(nome)
+                if f and f.destrutiva:
+                    autorizado, motivo = self._autorizar_acao_destrutiva({
+                        "destrutiva": True, "descricao": f"{nome}: {json.dumps(argumentos, ensure_ascii=False)}"})
+                    if not autorizado:
+                        return False, motivo
+                args = dict(argumentos)
+                if nome == "executar_terminal":
+                    # Só o executor pode ligar confirmação depois da resposta
+                    # humana. Nunca confiar nessa flag vinda do modelo.
+                    args.pop("autorizacao_direta", None)
+                    args["confirmado"] = False
+                resultado = ferramentas.executar_estruturado(
+                    nome, args, contexto={"pedido_explicito": True, "dono_confirmado": True,
+                                        **({"cancelar_terminal_evento": self._cancelar} if nome == "executar_terminal" else {})})
+                if nome == "executar_terminal" and not resultado.ok:
+                    import terminal
+                    comando = str(args.get("comando") or "")
+                    if comando and terminal.classificar(comando) == terminal.CONFIRMAR:
+                        autorizado, motivo = self._autorizar_acao_destrutiva({
+                            "destrutiva": True, "descricao": "Executar este comando: " + comando})
+                        if autorizado and not self._cancelar.is_set():
+                            args["confirmado"] = True
+                            resultado = ferramentas.executar_estruturado(
+                                nome, args, contexto={"pedido_explicito": True, "dono_confirmado": True,
+                                                    "cancelar_terminal_evento": self._cancelar})
+                        else:
+                            return False, motivo
+                ok, texto = bool(resultado.ok), str(resultado.texto or resultado.erro or "")
+            # Guardar o conteúdo, não apenas "OK". Ele pode conter o caminho,
+            # fontes da pesquisa, dependências ou instruções de continuação.
+            if len(texto) > 6000:
+                texto = texto[:4500] + "\n[saída abreviada]\n" + texto[-1500:]
+            self._resultados_ferramentas.append(
+                f"RESULTADO DA FERRAMENTA {nome} ({'OK' if ok else 'FALHA'}):\n{texto}")
+            self._registrar(f"FERRAMENTA {nome}: {texto[:1600]}")
+            return ok, texto
+        finally:
+            self._terminar_espera()
 
 
-# ─────────────────────────────────────────────
-# API PÚBLICA — chamada pelo automacao.py
-# ─────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
+# API PÚBLICA LEGADA
+# ═════════════════════════════════════════════════════════════════
 
-def iniciar_agente_ui(objetivo: str, callback_falar=None) -> str:
-    """Inicia o agente de UI com o objetivo dado."""
-    global _agente_thread, _callback_falar
+_lock_global = threading.RLock()
+_sessao_atual: SessaoAgenteUI = SessaoAgenteUI()
+_ouvintes_globais: list[OuvinteEstado] = []
+_callback_falar_global: Optional[Callable[[str], None]] = None
 
-    if not _PYAUTOGUI_OK:
-        return "Preciso do pyautogui pra isso! Instala com: pip install pyautogui"
 
-    if _agente_rodando.is_set():
-        return "Já tô fazendo outra coisa na tela, Vitor! Me fala pra parar primeiro."
-
-    if not objetivo or not objetivo.strip():
-        return "Me diz o que você quer que eu faça na tela, Vitor!"
-
-    if callback_falar:
-        _callback_falar = callback_falar
-
-    _agente_rodando.set()
-    _agente_thread = threading.Thread(
-        target=_loop_agente,
-        args=(objetivo,),
-        daemon=True,
+def _nova_sessao(callback_falar=None, backend: Optional[BackendDesktop] = None,
+                 decisor: Optional[DecisorUI] = None) -> SessaoAgenteUI:
+    sessao = SessaoAgenteUI(
+        backend=backend,
+        decisor=decisor,
+        callback_falar=callback_falar or _callback_falar_global,
     )
-    _agente_thread.start()
+    for callback in _ouvintes_globais:
+        sessao.adicionar_ouvinte(callback)
+    return sessao
 
-    import modelo as _modelo_ref
-    frase_inicio = _modelo_ref.gerar_frase_acao("agente_ui_iniciando", objetivo) or "Vou fazer isso na tela!"
-    _modelo_ref.registrar_acao_no_historico(f"Iniciou agente de UI com objetivo: {objetivo}")
-    return frase_inicio
+
+def definir_sessao_agente_ui(sessao: SessaoAgenteUI) -> None:
+    """Injeção explícita para testes e integrações avançadas."""
+    global _sessao_atual
+    with _lock_global:
+        _sessao_atual = sessao
+        for callback in _ouvintes_globais:
+            sessao.adicionar_ouvinte(callback)
+
+
+def definir_callback_falar(callback: Optional[Callable[[str], None]]) -> None:
+    """Define a fala padrão das próximas sessões e atualiza a sessão atual."""
+    global _callback_falar_global
+    with _lock_global:
+        _callback_falar_global = callback
+        _sessao_atual.callback_falar = callback
+
+
+def sessao_agente_ui() -> SessaoAgenteUI:
+    with _lock_global:
+        return _sessao_atual
+
+
+def iniciar_agente_ui(objetivo: str, callback_falar=None, *, action_id: str = "") -> str:
+    global _sessao_atual
+    objetivo = (objetivo or "").strip()
+    if not objetivo:
+        return "Me diz o que você quer que eu faça na tela, Vitor!"
+    with _lock_global:
+        if _sessao_atual.retrato()["ativo"]:
+            return "Já tô fazendo outra coisa na tela, Vitor! Me fala pra parar primeiro."
+        _sessao_atual = _nova_sessao(callback_falar=callback_falar)
+        iniciou = _sessao_atual.iniciar(objetivo, em_thread=True, action_id=action_id)
+        if not iniciou:
+            erro = _sessao_atual.retrato().get("erro") or "automação de desktop indisponível"
+            return f"Não consigo controlar a tela agora: {erro}"
+    try:
+        import modelo
+        modelo.registrar_acao_no_historico(f"Iniciou agente de UI com objetivo: {objetivo}")
+        # O recibo da ponte não pode aguardar outra inferência após iniciar os cliques.
+        if action_id:
+            return "Pedido recebido pelo agente visual; acompanhe o estado para saber o resultado."
+        return modelo.gerar_frase_acao("agente_ui_iniciando", objetivo) or "Vou fazer isso na tela!"
+    except Exception:
+        return "Vou fazer isso na tela!"
 
 
 def pausar_agente_ui() -> str:
-    """Pausa o agente (pode continuar depois)."""
-    if not _agente_rodando.is_set():
-        return "Não tô fazendo nada na tela agora, Vitor!"
-    if not _agente_pausado.is_set():
-        return "Já tô pausado!"
-    _agente_pausado.clear()
-    return "Pausei! Me fala 'continua o que tava fazendo na tela' quando quiser."
+    return ("Pausei! Me fala 'continua o que tava fazendo na tela' quando quiser."
+            if sessao_agente_ui().pausar()
+            else "Não tô rodando ou já tô pausada, Vitor!")
+
+
+def retomar_agente_ui() -> str:
+    return ("Continuando!" if sessao_agente_ui().retomar()
+            else "Não tem nada pausado agora, Vitor!")
 
 
 def continuar_agente_ui() -> str:
-    """Retoma um agente pausado."""
-    if not _agente_rodando.is_set():
-        return "Não tem nada pausado agora, Vitor!"
-    if _agente_pausado.is_set():
-        return "Já tô rodando, não tô pausado!"
-    _agente_pausado.set()
-    return "Continuando!"
+    return retomar_agente_ui()
 
 
 def parar_agente_ui() -> str:
-    """Para o agente completamente."""
-    if not _agente_rodando.is_set():
-        return "Não tô fazendo nada na tela agora, Vitor!"
-    _agente_parar.set()
-    _agente_pausado.set()  # libera o wait caso esteja pausado
-    return "Parando o que eu tava fazendo na tela!"
+    return ("Parando o que eu tava fazendo na tela!" if sessao_agente_ui().cancelar()
+            else "Não tô fazendo nada na tela agora, Vitor!")
+
+
+def estado_agente_ui() -> dict[str, Any]:
+    return sessao_agente_ui().retrato()
 
 
 def status_agente_ui() -> str:
-    """Retorna o status atual do agente."""
-    if not _agente_rodando.is_set():
+    estado = estado_agente_ui()
+    if not estado["ativo"]:
         return "Agente de UI: parado"
-    estado = "pausado" if not _agente_pausado.is_set() else "rodando"
-    return f"Agente de UI {estado}: {_agente_objetivo}"
+    rotulo = "pausado" if estado["estado"] == "pausado" else "rodando"
+    return f"Agente de UI {rotulo}: {estado['objetivo']}"
 
 
 def enviar_mensagem_ao_vivo(mensagem: str) -> bool:
-    """
-    Envia uma mensagem do usuário pra ser considerada pelo agente no próximo passo.
-    Retorna True se o agente está rodando e a mensagem foi enfileirada.
-    Retorna False se o agente não está ativo.
-    """
-    if not _agente_rodando.is_set():
-        return False
-    if mensagem and mensagem.strip():
-        _fila_mensagens_ao_vivo.put(mensagem.strip())
-        print(f"[AGENTE_UI] 💬 Mensagem ao vivo enfileirada: '{mensagem.strip()}'")
-    return True
+    return sessao_agente_ui().enviar_mensagem(mensagem)
+
+
+def adicionar_ouvinte_agente_ui(callback: OuvinteEstado) -> None:
+    with _lock_global:
+        if callback not in _ouvintes_globais:
+            _ouvintes_globais.append(callback)
+        _sessao_atual.adicionar_ouvinte(callback)
+
+
+def remover_ouvinte_agente_ui(callback: OuvinteEstado) -> None:
+    with _lock_global:
+        if callback in _ouvintes_globais:
+            _ouvintes_globais.remove(callback)
+        _sessao_atual.remover_ouvinte(callback)
+
+
+__all__ = [
+    "EstadoAgenteUI", "SessaoAgenteUI", "adicionar_ouvinte_agente_ui",
+    "continuar_agente_ui", "definir_callback_falar", "definir_sessao_agente_ui",
+    "enviar_mensagem_ao_vivo",
+    "estado_agente_ui", "iniciar_agente_ui", "parar_agente_ui", "pausar_agente_ui",
+    "remover_ouvinte_agente_ui", "retomar_agente_ui", "sessao_agente_ui",
+    "status_agente_ui",
+]

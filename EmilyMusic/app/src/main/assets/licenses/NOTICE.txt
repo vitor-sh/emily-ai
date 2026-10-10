@@ -1,0 +1,2 @@
+Emily Music client: GPL-3.0-or-later. Corresponding source and third-party notices: https://github.com/vitor-sh/emily-music-releases
+NewPipeExtractor v0.26.5: https://github.com/TeamNewPipe/NewPipeExtractor/tree/v0.26.5

@@ -1,0 +1,78 @@
+{
+  "ativo": {
+    "estado": "ativo",
+    "frames": 24,
+    "fps": 12,
+    "duracao_segundos": 2.0,
+    "colunas": 4,
+    "linhas": 6,
+    "celula_pixels": [
+      216,
+      192
+    ],
+    "spritesheet_pixels": [
+      864,
+      1152
+    ],
+    "pivo_normalizado": [
+      0.5,
+      0.5
+    ],
+    "pixels_por_unidade": 180,
+    "bounds_visuais_pixels": [
+      38,
+      4,
+      178,
+      188
+    ],
+    "tamanho_visual_unidades": [
+      0.7778,
+      1.0222
+    ],
+    "origem": "art/emily_hk_referencia_expectativa.png"
+  },
+  "banco": {
+    "estado": "banco",
+    "frames": 24,
+    "fps": 12,
+    "duracao_segundos": 2.0,
+    "colunas": 4,
+    "linhas": 6,
+    "celula_pixels": [
+      240,
+      168
+    ],
+    "spritesheet_pixels": [
+      960,
+      1008
+    ],
+    "pivo_normalizado": [
+      0.5,
+      0.5
+    ],
+    "pixels_por_unidade": 180,
+    "bounds_visuais_pixels": [
+      8,
+      16,
+      231,
+      163
+    ],
+    "tamanho_visual_unidades": [
+      1.2389,
+      0.8167
+    ],
+    "origem": ".cache/emily-idle-raw/frame_*.png"
+  },
+  "alternancia": "PlayerData.atBench",
+  "orientacao": "HeroController.cState.facingRight",
+  "movimento_ativo": {
+    "batidas_de_asa_por_ciclo": 3,
+    "componentes": [
+      "asas_articuladas",
+      "flutuacao_vertical",
+      "balanco_horizontal",
+      "inclinacao",
+      "impulso_elastico"
+    ]
+  }
+}

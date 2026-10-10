@@ -4,6 +4,10 @@
 .env
 .env.local
 .env.*
+!public-release/modelo/.env.example
+# Perfil da primeira inicialização pública (normalmente fica fora do projeto).
+configuracao.json
+provedor.env
 
 # ─────────────────────────────────────────────────────────────────
 # KIRO GATEWAY — credenciais e estado do proxy local
@@ -25,6 +29,14 @@ kiro_gateway/debug_logs/
 
 # Memória persistente — contém fatos pessoais sobre o usuário
 memoria.json
+
+# Memória unificada: ChromaDB, journal e checkpoints locais. O padrão fica em
+# ~/.local/share/emily/memoria_unificada; estas regras protegem também quem
+# apontar EMILY_MEMORIA_PASTA pra dentro do projeto.
+memoria_unificada_dados/
+.emily_memoria_unificada/
+chroma.sqlite3
+journal.sqlite3
 
 # Configurações e cache do Discord (token, IDs de canal)
 .emily_discord.json
@@ -76,15 +88,29 @@ venv/
 env/
 ENV/
 .env/
+.tools/
+
+# Build local do mod de Hollow Knight. Código, documentação e arte ficam no
+# repositório; SDK, DLL compilada, backup da instalação e áudio de runtime não.
+hollow_knight_emily/mod/bin/
+hollow_knight_emily/mod/obj/
+hollow_knight_emily/runtime/
+hollow_knight_emily/backups/
+hollow_knight_emily/.cache/
 
 # ─────────────────────────────────────────────────────────────────
 # PYINSTALLER — executável compilado
 # ─────────────────────────────────────────────────────────────────
 build/
 dist/
-*.spec
 *.exe
 *.exe_extracted/
+
+# ─────────────────────────────────────────────────────────────────
+# SEGREDOS EM CÓDIGO/CONFIG — chaves hardcoded
+# ─────────────────────────────────────────────────────────────────
+config.yaml
+testepython.py
 
 # ─────────────────────────────────────────────────────────────────
 # ÁUDIO TEMPORÁRIO
@@ -135,3 +161,97 @@ gerador_imagem.py
 
 # Arquivo gitignore sem ponto (nome errado — o .gitignore correto é esse aqui)
 gitignore
+
+# ─────────────────────────────────────────────────────────────────
+# DADOS PESSOAIS E DE EXECUÇÃO gerados pela Emily
+# ─────────────────────────────────────────────────────────────────
+
+# Histórico de conversas/sessões de jogo (dados de execução)
+historico_jogo.jsonl
+historico_servidor.jsonl
+
+# Memória do Discord (fatos pessoais extraídos de conversas)
+memoria_discord.json
+
+# Configurações e cache da agenda (tarefas pessoais)
+agenda.json
+
+# Publicações no Discord (IDs de canal/mensagem da conta)
+publicacoes.json
+
+# Estado do servidor Minecraft (jogadores, eventos)
+servidor_minecraft.json
+
+# Palavras-chave de wake word extraídas de amostras pessoais de voz
+keywords.txt
+keywords_raw.txt
+
+# Cache de curadoria de modpacks (caminhos locais do usuário)
+curadoria_modpacks.json
+
+# Amostras de voz pessoais (você + Emily)
+amostras_pessoas/
+
+# ─────────────────────────────────────────────────────────────────
+# MODELOS BINÁRIOS E RECURSOS DE TERCEIROS
+# ─────────────────────────────────────────────────────────────────
+emily.onnx
+emily.tflite
+sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/
+
+# ─────────────────────────────────────────────────────────────────
+# REPOSITÓRIO ANINHADO (cópia do repo emily-ai dentro do projeto)
+# ─────────────────────────────────────────────────────────────────
+emily-ai/
+
+# ─────────────────────────────────────────────────────────────────
+# SANDBOX/DEV — artefatos gerados em uso (arquivos de teste locais)
+# ─────────────────────────────────────────────────────────────────
+_prova_call.txt
+_saida2.txt
+_tem.txt
+_tmp_titular.py
+
+# Cache da WebView2 (cookies, localStorage da interface). Gerado em uso.
+.webview/
+
+# Veredito da sonda da interface (gerado em uso)
+_teste_interface_web.txt
+testes_manuais/*.txt
+
+# Claude Code / agent harness (não é do projeto)
+.claude/
+.mcp.json
+
+
+# Áudio personalizado do xadrez: dados locais, não redistribuir.
+sons_xadrez_pessoais/
+
+# Áudio pessoal e arquivos temporários do Emily Music.
+music_offline/
+.download-*/
+
+# Music Cloud: secret bindings and local Cloudflare state
+music-cloud/.dev.vars*
+music-cloud/.wrangler/
+music-cloud/node_modules/
+
+# ─────────────────────────────────────────────────────────────────
+# ARTEFATOS PESADOS / LOCAIS — builds e perfis que não são código
+# ─────────────────────────────────────────────────────────────────
+emily-linux-instance/
+emily-windows-instance/
+dist_visual_backup_*/
+EmilyAPP2/**/build/
+EmilyAPP2/.gradle/
+output/
+navegador-interno/
+certificados_tv/
+*.key
+*.pem
+**/.wrangler/
+node_modules/
+*.sqlite
+:memory:*
+EmilyAPP2/
+android-editor-draft.json

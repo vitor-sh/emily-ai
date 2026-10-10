@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "updated_at": 1791394996.3438842,
+  "theme": {},
+  "elements": {
+    "id:btn-code": {
+      "hidden": true,
+      "styles": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    "id:tv-cancel": {
+      "styles": {
+        "x": 0,
+        "y": 8
+      }
+    },
+    "id:tv-ok": {
+      "styles": {
+        "x": 0,
+        "y": 8
+      }
+    },
+    "id:cfg-gateway-parear": {
+      "styles": {
+        "x": 16,
+        "y": 0
+      }
+    },
+    "root|div.popover.12|button.popover-item.1": {
+      "label": "Claude Sonnet 5"
+    },
+    "root|div.popover.12|button.popover-item.4": {
+      "label": "Fa"
+    },
+    "id:cfg-gateway-pair-code": {
+      "styles": {
+        "x": 16,
+        "y": 8
+      }
+    },
+    "section:voz|div.lista.1|div.item.3": {
+      "hidden": true
+    },
+    "section:voz|div.lista.1|div.item.2": {
+      "hidden": true
+    },
+    "section:voz|div.lista.1|div.item.4": {
+      "hidden": true
+    }
+  },
+  "pages": []
+}

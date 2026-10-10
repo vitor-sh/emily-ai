@@ -1,0 +1,1512 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0a0f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Emily">
+<link rel="manifest" href="/manifest.json">
+<title>Emily Remote</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #0a0a0f;
+    --surface: #111118;
+    --border:  #1e1e2e;
+    --accent:  #7c6aff;
+    --accent2: #a78bfa;
+    --ok:      #34d399;
+    --err:     #f87171;
+    --warn:    #fbbf24;
+    --text:    #e2e8f0;
+    --muted:   #64748b;
+    --mono:    'Space Mono', monospace;
+    --sans:    'DM Sans', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── CABEÇALHO ── */
+  header {
+    padding: 16px 20px 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .logo-dot {
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 10px var(--accent);
+    flex-shrink: 0;
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+  @keyframes pulse-dot {
+    0%,100% { opacity:1; box-shadow: 0 0 10px var(--accent); }
+    50%      { opacity:.4; box-shadow: 0 0 3px var(--accent); }
+  }
+
+  .logo-nome {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent2);
+    letter-spacing: .14em;
+    text-transform: uppercase;
+  }
+
+  .header-acoes {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .status-chip {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 3px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    letter-spacing: .07em;
+    transition: all .3s;
+    white-space: nowrap;
+  }
+  .status-chip.ok        { color: var(--ok);   border-color: var(--ok);   background: rgba(52,211,153,.07); }
+  .status-chip.erro      { color: var(--err);  border-color: var(--err);  background: rgba(248,113,113,.07); }
+  .status-chip.aguardando{ color: var(--warn); border-color: var(--warn); background: rgba(251,191,36,.07); }
+
+  .btn-config {
+    width: 30px; height: 30px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px;
+    transition: all .2s;
+    flex-shrink: 0;
+  }
+  .btn-config:active { background: var(--border); }
+
+  /* ── LOG ── */
+  .log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    scroll-behavior: smooth;
+  }
+  .log::-webkit-scrollbar { width: 0; }
+
+  .msg {
+    max-width: 82%;
+    padding: 9px 13px;
+    border-radius: 16px;
+    font-size: 14px;
+    line-height: 1.5;
+    animation: slide-in .18s ease;
+    word-break: break-word;
+  }
+  @keyframes slide-in {
+    from { opacity:0; transform:translateY(5px); }
+    to   { opacity:1; transform:translateY(0);   }
+  }
+
+  .msg.enviado {
+    background: var(--accent);
+    color: #fff;
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+  }
+  .msg.recebido {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+  .msg.recebido.ok-msg   { border-color: rgba(52,211,153,.35); }
+  .msg.recebido.err-msg  { border-color: rgba(248,113,113,.35); color: var(--err); }
+  .msg.recebido.info-msg { border-color: rgba(124,106,255,.35); }
+  .msg.recebido.voz-msg  { border-color: rgba(167,139,250,.35); color: var(--accent2); }
+
+  /* Mensagem com imagem enviada */
+  .msg.enviado .msg-img-thumb {
+    display: block;
+    max-width: 180px;
+    max-height: 180px;
+    border-radius: 10px;
+    margin-bottom: 6px;
+    object-fit: cover;
+    border: 1px solid rgba(255,255,255,.15);
+  }
+  .msg.enviado .msg-img-nome {
+    font-size: 11px;
+    opacity: .7;
+  }
+
+  /* ── ATALHOS ── */
+  .atalhos {
+    padding: 8px 16px;
+    display: flex;
+    gap: 7px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-shrink: 0;
+  }
+  .atalhos::-webkit-scrollbar { display: none; }
+
+  .atalho {
+    flex-shrink: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 13px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--mono);
+    cursor: pointer;
+    transition: all .15s;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .atalho:active { background: var(--accent); border-color: var(--accent); color: #fff; transform: scale(.95); }
+
+  /* ── PREVIEW DE ARQUIVOS / IMAGENS PENDENTES ── */
+  .preview-area {
+    padding: 0 16px 8px;
+    display: none; /* exibido via JS quando há arquivos */
+    gap: 8px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+    animation: slide-in .2s ease;
+  }
+  .preview-area.visivel {
+    display: flex;
+  }
+
+  .preview-item {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 5px 8px 5px 6px;
+    max-width: 100%;
+    animation: slide-in .15s ease;
+  }
+
+  /* Item do tipo imagem — mostra thumbnail */
+  .preview-item.tipo-imagem {
+    padding: 4px 8px 4px 4px;
+  }
+  .preview-item .thumb {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 8px;
+    flex-shrink: 0;
+    border: 1px solid rgba(124,106,255,.25);
+  }
+
+  /* Item do tipo arquivo genérico — mostra ícone */
+  .preview-item .file-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    background: rgba(124,106,255,.12);
+    border: 1px solid rgba(124,106,255,.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  .preview-item .file-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 120px;
+  }
+  .preview-item .file-nome {
+    font-size: 11px;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .preview-item .file-tamanho {
+    font-size: 10px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+
+  /* Botão X de remover */
+  .btn-remover-arquivo {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 1px solid rgba(248,113,113,.4);
+    background: rgba(248,113,113,.12);
+    color: var(--err);
+    font-size: 11px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: all .15s;
+    line-height: 1;
+    font-weight: bold;
+  }
+  .btn-remover-arquivo:active {
+    background: rgba(248,113,113,.3);
+    transform: scale(.88);
+  }
+
+  /* Indicador de progresso de upload */
+  .preview-item .upload-progress {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 3px;
+    background: rgba(124,106,255,.15);
+    border-radius: 0 0 12px 12px;
+    overflow: hidden;
+  }
+  .preview-item .upload-progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 3px;
+    width: 0%;
+    transition: width .3s ease;
+  }
+
+  /* ── INPUT ── */
+  .input-area {
+    padding: 10px 16px 16px;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+    flex-shrink: 0;
+  }
+
+  textarea {
+    flex: 1;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 11px 15px;
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 15px;
+    resize: none;
+    outline: none;
+    min-height: 46px;
+    max-height: 110px;
+    line-height: 1.5;
+    transition: border-color .2s;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  textarea::placeholder { color: var(--muted); }
+  textarea:focus { border-color: var(--accent); }
+
+  /* drag-over no textarea */
+  textarea.drag-over {
+    border-color: var(--accent);
+    background: rgba(124,106,255,.07);
+  }
+
+  /* botões redondos */
+  .btn-round {
+    width: 46px; height: 46px;
+    border-radius: 50%;
+    border: none;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+    transition: all .15s;
+  }
+
+  .btn-enviar {
+    background: var(--accent);
+    box-shadow: 0 0 18px rgba(124,106,255,.3);
+  }
+  .btn-enviar:active { transform: scale(.88); }
+  .btn-enviar svg { width: 19px; height: 19px; fill: white; }
+
+  /* botão de microfone */
+  .btn-mic {
+    background: var(--surface);
+    border: 1px solid var(--border) !important;
+    border: none;
+  }
+  .btn-mic svg { width: 20px; height: 20px; fill: var(--muted); transition: fill .2s; }
+  .btn-mic:active { transform: scale(.88); }
+
+  /* estado gravando */
+  .btn-mic.gravando {
+    background: rgba(248,113,113,.15);
+    border-color: var(--err) !important;
+    animation: pulse-mic .8s ease-in-out infinite;
+  }
+  .btn-mic.gravando svg { fill: var(--err); }
+  @keyframes pulse-mic {
+    0%,100% { box-shadow: 0 0 0 0 rgba(248,113,113,.4); }
+    50%      { box-shadow: 0 0 0 8px rgba(248,113,113,0); }
+  }
+
+  /* ── BOTÃO ANEXO ── */
+  .btn-anexo {
+    background: var(--surface);
+    border: 1px solid var(--border) !important;
+  }
+  .btn-anexo svg { width: 20px; height: 20px; fill: var(--muted); transition: fill .2s; }
+  .btn-anexo:active { transform: scale(.88); }
+  .btn-anexo.tem-arquivo {
+    background: rgba(124,106,255,.12);
+    border-color: var(--accent) !important;
+  }
+  .btn-anexo.tem-arquivo svg { fill: var(--accent); }
+
+  /* Indicador de badge no botão de anexo */
+  .btn-anexo-wrapper {
+    position: relative;
+    flex-shrink: 0;
+  }
+  .badge-anexo {
+    position: absolute;
+    top: -3px; right: -3px;
+    min-width: 16px; height: 16px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: white;
+    font-size: 9px;
+    font-family: var(--mono);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0 3px;
+    border: 1.5px solid var(--bg);
+    font-weight: bold;
+  }
+  .badge-anexo.visivel { display: flex; }
+
+  /* Input de arquivo escondido */
+  #file-input { display: none; }
+
+  /* ── BOTÃO TELA ── */
+  .btn-tela {
+    background: var(--surface);
+    border: 1px solid var(--border) !important;
+    border: none;
+  }
+  .btn-tela svg { width: 20px; height: 20px; fill: var(--muted); transition: fill .2s; }
+  .btn-tela:active { transform: scale(.88); }
+  .btn-tela.stream-ativo {
+    background: rgba(52,211,153,.12);
+    border-color: var(--ok) !important;
+    animation: pulse-tela 1.5s ease-in-out infinite;
+  }
+  .btn-tela.stream-ativo svg { fill: var(--ok); }
+  @keyframes pulse-tela {
+    0%,100% { box-shadow: 0 0 0 0 rgba(52,211,153,.35); }
+    50%      { box-shadow: 0 0 0 7px rgba(52,211,153,0); }
+  }
+
+  /* ── TOAST DE PASTA ── */
+  .toast {
+    position: fixed;
+    bottom: 90px;
+    left: 50%;
+    transform: translateX(-50%) translateY(10px);
+    background: rgba(30,30,46,.95);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 9px 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s, transform .25s;
+    z-index: 500;
+    white-space: nowrap;
+    max-width: 90vw;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    backdrop-filter: blur(6px);
+  }
+  .toast.visivel {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+
+  /* ── PAINEL DE STREAM ── */
+  .stream-painel {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.92);
+    backdrop-filter: blur(6px);
+    z-index: 300;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .25s;
+  }
+  .stream-painel.visivel {
+    opacity: 1;
+    pointer-events: all;
+  }
+
+  .stream-cabecalho {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px 10px;
+    flex-shrink: 0;
+  }
+
+  .stream-titulo {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ok);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .stream-titulo::before {
+    content: '';
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 8px var(--ok);
+    animation: blink-live 1s step-end infinite;
+  }
+  @keyframes blink-live {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0; }
+  }
+
+  .stream-controles {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .stream-qualidade {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 3px 11px;
+    cursor: pointer;
+    transition: all .2s;
+    user-select: none;
+  }
+  .stream-qualidade:active { background: var(--border); }
+
+  .btn-fechar-stream {
+    width: 32px; height: 32px;
+    background: rgba(248,113,113,.12);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 50%;
+    color: var(--err);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .15s;
+    flex-shrink: 0;
+  }
+  .btn-fechar-stream:active { background: rgba(248,113,113,.25); transform: scale(.9); }
+
+  .stream-wrapper {
+    flex: 1;
+    width: 100%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px 8px;
+  }
+
+  .stream-img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    display: block;
+  }
+
+  .stream-carregando {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+  }
+
+  .stream-rodape {
+    width: 100%;
+    padding: 8px 18px 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .stream-info {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  /* ── MODAL DE CONFIGURAÇÃO ── */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.7);
+    backdrop-filter: blur(4px);
+    display: flex; align-items: flex-end;
+    z-index: 200;
+    opacity: 0; pointer-events: none;
+    transition: opacity .25s;
+  }
+  .modal-overlay.visivel { opacity: 1; pointer-events: all; }
+
+  .modal {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 24px 24px 0 0;
+    padding: 24px 20px 32px;
+    transform: translateY(100%);
+    transition: transform .3s cubic-bezier(.4,0,.2,1);
+  }
+  .modal-overlay.visivel .modal { transform: translateY(0); }
+
+  .modal h2 {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent2);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+
+  .modal label {
+    display: block;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--mono);
+    margin-bottom: 6px;
+    letter-spacing: .06em;
+  }
+
+  .modal input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    outline: none;
+    margin-bottom: 16px;
+    transition: border-color .2s;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+  .modal input:focus { border-color: var(--accent); }
+
+  .modal-info {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.6;
+    margin-bottom: 16px;
+  }
+
+  .btn-salvar {
+    width: 100%;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 14px;
+    padding: 14px;
+    font-family: var(--mono);
+    font-size: 13px;
+    letter-spacing: .08em;
+    cursor: pointer;
+    transition: opacity .2s;
+  }
+  .btn-salvar:active { opacity: .8; }
+
+  /* ── OVERLAY DE CONEXÃO INICIAL ── */
+  .overlay {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 14px; padding: 40px;
+    z-index: 100;
+    transition: opacity .4s;
+  }
+  .overlay.escondido { opacity: 0; pointer-events: none; }
+
+  .overlay h1 { font-family: var(--mono); font-size: 20px; color: var(--accent2); letter-spacing: .1em; }
+  .overlay p  { font-size: 13px; color: var(--muted); text-align: center; line-height: 1.7; }
+  .overlay .btn-config-url {
+    margin-top: 8px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 20px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .overlay .btn-config-url:active { background: var(--surface); }
+
+  .spinner {
+    width: 32px; height: 32px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<!-- Overlay inicial -->
+<div class="overlay" id="overlay">
+  <div class="spinner" id="spinner"></div>
+  <h1>EMILY</h1>
+  <p id="overlay-msg">Conectando ao PC...<br>Isso leva um segundo.</p>
+  <button class="btn-config-url" onclick="abrirConfig()">Configurar URL do ngrok</button>
+</div>
+
+<!-- Modal de configuração -->
+<div class="modal-overlay" id="modal-overlay" onclick="fecharConfigSeForaDoModal(event)">
+  <div class="modal">
+    <h2>⚙ Configuração</h2>
+    <label>URL do ngrok</label>
+    <input type="url" id="input-url" placeholder="https://xxxx.ngrok-free.app" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <p class="modal-info">
+      Cole aqui a URL que aparece no terminal do ngrok.<br>
+      Ela muda toda vez que você reinicia o ngrok.
+    </p>
+    <button class="btn-salvar" onclick="salvarUrl()">Salvar e conectar</button>
+  </div>
+</div>
+
+<!-- Cabeçalho -->
+<header>
+  <div class="logo-dot"></div>
+  <span class="logo-nome">Emily Remote</span>
+  <div class="header-acoes">
+    <div class="status-chip aguardando" id="chip">aguardando</div>
+    <button class="btn-config" onclick="abrirConfig()" title="Configurar URL">⚙</button>
+  </div>
+</header>
+
+<!-- Log -->
+<div class="log" id="log"></div>
+
+<!-- Atalhos -->
+<div class="atalhos">
+  <div class="atalho" onclick="enviarAtalho('abre o discord')">Discord</div>
+  <div class="atalho" onclick="enviarAtalho('abre o spotify')">Spotify</div>
+  <div class="atalho" onclick="enviarAtalho('abre o vs code')">VS Code</div>
+  <div class="atalho" onclick="enviarAtalho('abre o steam')">Steam</div>
+  <div class="atalho" onclick="enviarAtalho('abre a pasta downloads')">Downloads</div>
+  <div class="atalho" onclick="enviarAtalho('abre o brave')">Brave</div>
+</div>
+
+<!-- Área de preview de arquivos/imagens pendentes -->
+<div class="preview-area" id="preview-area"></div>
+
+<!-- Painel de stream de tela -->
+<div class="stream-painel" id="stream-painel">
+  <div class="stream-cabecalho">
+    <span class="stream-titulo" id="stream-titulo">Tela ao vivo</span>
+    <div class="stream-controles">
+      <span class="stream-qualidade" id="btn-qualidade" onclick="alternarQualidade()" title="Qualidade do stream">HQ</span>
+      <button class="btn-fechar-stream" onclick="fecharStream()" title="Fechar stream">✕</button>
+    </div>
+  </div>
+
+  <div class="stream-wrapper" id="stream-wrapper">
+    <div class="stream-carregando" id="stream-carregando">
+      <div class="spinner"></div>
+      <span>Iniciando stream da tela...</span>
+    </div>
+    <img
+      class="stream-img"
+      id="stream-img"
+      style="display:none"
+      alt="Tela do PC"
+    />
+  </div>
+
+  <div class="stream-rodape">
+    <span class="stream-info" id="stream-fps">— fps  ·  Toque em ✕ para encerrar</span>
+  </div>
+</div>
+
+<!-- Input de arquivo oculto -->
+<input type="file" id="file-input" multiple accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.txt,.zip,.rar">
+
+<!-- Área de input -->
+<div class="input-area">
+  <button class="btn-round btn-mic" id="btn-mic" onclick="toggleVoz()" title="Falar comando">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 1a4 4 0 0 1 4 4v6a4 4 0 0 1-8 0V5a4 4 0 0 1 4-4zm-1 17.93V21H9v2h6v-2h-2v-2.07A8 8 0 0 0 20 11h-2a6 6 0 0 1-12 0H4a8 8 0 0 0 7 7.93z"/>
+    </svg>
+  </button>
+
+  <!-- Botão de anexo com badge -->
+  <div class="btn-anexo-wrapper">
+    <button class="btn-round btn-anexo" id="btn-anexo" onclick="abrirSeletorArquivo()" title="Anexar arquivo ou imagem">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .83-.67 1.5-1.5 1.5s-1.5-.67-1.5-1.5V6H9v9.5a3 3 0 0 0 6 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/>
+      </svg>
+    </button>
+    <span class="badge-anexo" id="badge-anexo">0</span>
+  </div>
+
+  <textarea
+    id="input"
+    placeholder="Manda um comando pra Emily... (Ctrl+V para colar imagem)"
+    rows="1"
+    onkeydown="teclaInput(event)"
+    oninput="ajustarAltura(this)"
+    ondragover="dragOver(event)"
+    ondragleave="dragLeave(event)"
+    ondrop="dropArquivo(event)"
+  ></textarea>
+
+  <button class="btn-round btn-tela" id="btn-tela" onclick="toggleStream()" title="Ver tela do PC ao vivo">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M20 3H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h6l-1 3H7v2h10v-2h-2l-1-3h6a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 13H4V5h16v11z"/>
+    </svg>
+  </button>
+
+  <button class="btn-round btn-enviar" onclick="enviarComando()">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+    </svg>
+  </button>
+</div>
+
+<!-- Toast de feedback -->
+<div class="toast" id="toast"></div>
+
+<!-- Áudio escondido: reproduz a voz da Emily vinda do PC -->
+<audio id="audio-emily" style="display:none" preload="none"></audio>
+
+<script>
+// ── CONFIGURAÇÃO DE URL ──
+const CHAVE_URL = "emily_url";
+
+function getBase() {
+  return localStorage.getItem(CHAVE_URL) || window.location.origin;
+}
+
+function salvarUrl() {
+  const val = document.getElementById("input-url").value.trim().replace(/\/$/, "");
+  if (!val.startsWith("http")) {
+    alert("URL inválida. Começa com https://");
+    return;
+  }
+  localStorage.setItem(CHAVE_URL, val);
+  fecharConfig();
+  adicionarMsg("URL salva! Tentando conectar...", "recebido info-msg");
+  verificarStatus();
+}
+
+function abrirConfig() {
+  const urlSalva = localStorage.getItem(CHAVE_URL) || "";
+  document.getElementById("input-url").value = urlSalva;
+  document.getElementById("modal-overlay").classList.add("visivel");
+}
+
+function fecharConfig() {
+  document.getElementById("modal-overlay").classList.remove("visivel");
+}
+
+function fecharConfigSeForaDoModal(e) {
+  if (e.target === document.getElementById("modal-overlay")) fecharConfig();
+}
+
+// ── STATUS ──
+const chipEl    = document.getElementById("chip");
+const overlayEl = document.getElementById("overlay");
+const logEl     = document.getElementById("log");
+const inputEl   = document.getElementById("input");
+
+let emilyPronta = false;
+
+async function verificarStatus() {
+  try {
+    const r = await fetch(`${getBase()}/status`, { signal: AbortSignal.timeout(5000) });
+    const d = await r.json();
+
+    if (d.emily_pronta) {
+      emilyPronta = true;
+      overlayEl.classList.add("escondido");
+      chipEl.textContent = "online";
+      chipEl.className = "status-chip ok";
+      adicionarMsg("Emily online! Pode mandar o comando.", "recebido info-msg");
+    } else {
+      chipEl.textContent = "iniciando";
+      chipEl.className = "status-chip aguardando";
+      setTimeout(verificarStatus, 2000);
+    }
+  } catch {
+    chipEl.textContent = "sem conexão";
+    chipEl.className = "status-chip erro";
+
+    if (!emilyPronta) {
+      document.getElementById("overlay-msg").textContent =
+        "Não consegui conectar.\nVerifica se a Emily tá rodando e se a URL tá certa.";
+      document.getElementById("spinner").style.display = "none";
+    }
+    setTimeout(verificarStatus, 4000);
+  }
+}
+
+// ── TOAST ──
+let _toastTimer = null;
+function mostrarToast(msg, duracao = 2500) {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.classList.add("visivel");
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.classList.remove("visivel"), duracao);
+}
+
+// ── GERENCIADOR DE ARQUIVOS PENDENTES ──
+// Cada item: { id, file, dataUrl, nome, tamanho, tipo }
+let _arquivosPendentes = [];
+let _proxId = 0;
+
+const previewAreaEl = document.getElementById("preview-area");
+const badgeAnexoEl  = document.getElementById("badge-anexo");
+const btnAnexoEl    = document.getElementById("btn-anexo");
+
+function atualizarPreviewArea() {
+  const qtd = _arquivosPendentes.length;
+
+  // Atualiza badge
+  if (qtd > 0) {
+    badgeAnexoEl.textContent = qtd;
+    badgeAnexoEl.classList.add("visivel");
+    btnAnexoEl.classList.add("tem-arquivo");
+    previewAreaEl.classList.add("visivel");
+  } else {
+    badgeAnexoEl.classList.remove("visivel");
+    btnAnexoEl.classList.remove("tem-arquivo");
+    previewAreaEl.classList.remove("visivel");
+    previewAreaEl.innerHTML = "";
+  }
+}
+
+function adicionarArquivo(file) {
+  // Limite de 10 arquivos por vez
+  if (_arquivosPendentes.length >= 10) {
+    mostrarToast("⚠ Máximo de 10 arquivos por envio.");
+    return;
+  }
+
+  const id = _proxId++;
+  const eImagem = file.type.startsWith("image/");
+  const item = { id, file, dataUrl: null, nome: file.name, tamanho: file.size, tipo: file.type, eImagem };
+  _arquivosPendentes.push(item);
+
+  // Cria o elemento de preview
+  const div = document.createElement("div");
+  div.className = "preview-item" + (eImagem ? " tipo-imagem" : "");
+  div.id = `preview-item-${id}`;
+
+  if (eImagem) {
+    // Para imagens: mostra thumbnail via FileReader
+    const img = document.createElement("img");
+    img.className = "thumb";
+    img.alt = file.name;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      img.src = e.target.result;
+      item.dataUrl = e.target.result;
+    };
+    reader.readAsDataURL(file);
+
+    div.appendChild(img);
+  } else {
+    // Para outros arquivos: ícone genérico
+    const iconDiv = document.createElement("div");
+    iconDiv.className = "file-icon";
+    iconDiv.textContent = iconeParaTipo(file.type);
+    div.appendChild(iconDiv);
+  }
+
+  // Info do arquivo
+  const infoDiv = document.createElement("div");
+  infoDiv.className = "file-info";
+  const nomeEl = document.createElement("span");
+  nomeEl.className = "file-nome";
+  nomeEl.textContent = file.name;
+  const tamEl = document.createElement("span");
+  tamEl.className = "file-tamanho";
+  tamEl.textContent = formatarTamanho(file.size);
+  infoDiv.appendChild(nomeEl);
+  infoDiv.appendChild(tamEl);
+  div.appendChild(infoDiv);
+
+  // Botão X para remover
+  const btnX = document.createElement("button");
+  btnX.className = "btn-remover-arquivo";
+  btnX.title = "Remover";
+  btnX.innerHTML = "✕";
+  btnX.onclick = () => removerArquivo(id);
+  div.appendChild(btnX);
+
+  // Barra de progresso (oculta por padrão, ativada ao fazer upload)
+  const progDiv = document.createElement("div");
+  progDiv.className = "upload-progress";
+  const progBar = document.createElement("div");
+  progBar.className = "upload-progress-bar";
+  progBar.id = `prog-bar-${id}`;
+  progDiv.appendChild(progBar);
+  div.appendChild(progDiv);
+
+  previewAreaEl.appendChild(div);
+  atualizarPreviewArea();
+}
+
+function removerArquivo(id) {
+  _arquivosPendentes = _arquivosPendentes.filter(a => a.id !== id);
+  const el = document.getElementById(`preview-item-${id}`);
+  if (el) {
+    el.style.opacity = "0";
+    el.style.transform = "scale(.85)";
+    el.style.transition = "all .15s";
+    setTimeout(() => el.remove(), 150);
+  }
+  atualizarPreviewArea();
+}
+
+function iconeParaTipo(tipo) {
+  if (tipo.startsWith("video/"))       return "🎬";
+  if (tipo.startsWith("audio/"))       return "🎵";
+  if (tipo === "application/pdf")      return "📄";
+  if (tipo.includes("word"))           return "📝";
+  if (tipo.includes("zip") || tipo.includes("rar")) return "🗜";
+  if (tipo.startsWith("text/"))        return "📃";
+  return "📎";
+}
+
+function formatarTamanho(bytes) {
+  if (bytes < 1024)       return bytes + " B";
+  if (bytes < 1024*1024)  return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024*1024)).toFixed(1) + " MB";
+}
+
+// ── SELETOR DE ARQUIVO (botão de anexo) ──
+function abrirSeletorArquivo() {
+  document.getElementById("file-input").click();
+}
+
+document.getElementById("file-input").addEventListener("change", function () {
+  Array.from(this.files).forEach(adicionarArquivo);
+  this.value = ""; // reset para permitir selecionar o mesmo arquivo de novo
+});
+
+// ── COLAR DO CLIPBOARD (Ctrl+V) ──
+document.addEventListener("paste", function (e) {
+  // Só processa se não há um campo de texto específico capturando
+  // (evita duplicar quando o usuário cola texto normal no textarea)
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  let imagemColada = false;
+  for (const item of items) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) {
+        // Cria um nome amigável com timestamp
+        const ext = item.type.split("/")[1] || "png";
+        const nomeArquivo = `imagem_colada_${Date.now()}.${ext}`;
+        // Cria um novo File com nome amigável
+        const fileNomeado = new File([file], nomeArquivo, { type: item.type });
+        adicionarArquivo(fileNomeado);
+        imagemColada = true;
+        mostrarToast("📋 Imagem colada do clipboard!");
+      }
+    }
+  }
+
+  // Se colou imagem, evita que o texto do clipboard seja inserido no textarea
+  if (imagemColada) {
+    e.preventDefault();
+  }
+});
+
+// ── DRAG & DROP no textarea ──
+function dragOver(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  inputEl.classList.add("drag-over");
+}
+
+function dragLeave(e) {
+  e.preventDefault();
+  inputEl.classList.remove("drag-over");
+}
+
+function dropArquivo(e) {
+  e.preventDefault();
+  e.stopPropagation();
+  inputEl.classList.remove("drag-over");
+
+  const files = e.dataTransfer?.files;
+  if (files && files.length > 0) {
+    Array.from(files).forEach(adicionarArquivo);
+    mostrarToast(`📎 ${files.length} arquivo(s) adicionado(s)!`);
+  }
+}
+
+// ── ENVIAR COMANDO (texto + arquivos) ──
+async function enviarComando() {
+  const texto = inputEl.value.trim();
+  const temArquivos = _arquivosPendentes.length > 0;
+
+  if (!texto && !temArquivos) return;
+
+  // 1) Envia arquivos pendentes
+  if (temArquivos) {
+    const arquivosParaEnviar = [..._arquivosPendentes];
+
+    // Mostra preview no chat antes de enviar
+    const msgDiv = document.createElement("div");
+    msgDiv.className = "msg enviado";
+    for (const arq of arquivosParaEnviar) {
+      if (arq.eImagem && arq.dataUrl) {
+        const img = document.createElement("img");
+        img.className = "msg-img-thumb";
+        img.src = arq.dataUrl;
+        img.alt = arq.nome;
+        msgDiv.appendChild(img);
+      }
+    }
+    if (arquivosParaEnviar.some(a => !a.eImagem)) {
+      const nomes = arquivosParaEnviar.filter(a => !a.eImagem).map(a => a.nome).join(", ");
+      const sp = document.createElement("span");
+      sp.className = "msg-img-nome";
+      sp.textContent = "📎 " + nomes;
+      msgDiv.appendChild(sp);
+    }
+    if (texto) {
+      const sp = document.createElement("span");
+      sp.style.display = "block";
+      sp.style.marginTop = "6px";
+      sp.textContent = texto;
+      msgDiv.appendChild(sp);
+    }
+    logEl.appendChild(msgDiv);
+    logEl.scrollTop = logEl.scrollHeight;
+
+    // Limpa o input
+    inputEl.value = "";
+    ajustarAltura(inputEl);
+    const idsEnviando = arquivosParaEnviar.map(a => a.id);
+    _arquivosPendentes = _arquivosPendentes.filter(a => !idsEnviando.includes(a.id));
+    atualizarPreviewArea();
+
+    // Envia cada arquivo
+    chipEl.textContent = "enviando...";
+    chipEl.className = "status-chip aguardando";
+
+    let algumErro = false;
+    for (const arq of arquivosParaEnviar) {
+      try {
+        await enviarArquivoParaServidor(arq, texto);
+      } catch (err) {
+        algumErro = true;
+        adicionarMsg(`✗ Erro ao enviar "${arq.nome}": ${err.message}`, "recebido err-msg");
+      }
+    }
+
+    if (!algumErro) {
+      const qtd = arquivosParaEnviar.length;
+      adicionarMsg(`✓ ${qtd} arquivo(s) enviado(s) com sucesso.`, "recebido ok-msg");
+    }
+
+    setTimeout(() => {
+      chipEl.textContent = "online";
+      chipEl.className = "status-chip ok";
+    }, 3000);
+
+    return;
+  }
+
+  // 2) Só texto
+  adicionarMsg(texto, "enviado");
+  inputEl.value = "";
+  ajustarAltura(inputEl);
+
+  try {
+    const r = await fetch(`${getBase()}/comando`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ texto }),
+      signal: AbortSignal.timeout(8000)
+    });
+    const d = await r.json();
+
+    if (d.ok) {
+      chipEl.textContent = "executando";
+      chipEl.className = "status-chip aguardando";
+      adicionarMsg("✓ " + d.mensagem, "recebido ok-msg");
+      setTimeout(() => {
+        chipEl.textContent = "online";
+        chipEl.className = "status-chip ok";
+      }, 3000);
+    } else {
+      adicionarMsg("✗ " + d.erro, "recebido err-msg");
+    }
+  } catch {
+    adicionarMsg("✗ Sem conexão com o PC.", "recebido err-msg");
+    chipEl.textContent = "sem conexão";
+    chipEl.className = "status-chip erro";
+  }
+}
+
+async function enviarArquivoParaServidor(arq, textoExtra) {
+  // Aguarda o dataUrl se for imagem e ainda não carregou
+  if (arq.eImagem && !arq.dataUrl) {
+    await new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (e) => { arq.dataUrl = e.target.result; resolve(); };
+      reader.readAsDataURL(arq.file);
+    });
+  }
+
+  // Usa multipart/form-data (mais eficiente para arquivos grandes)
+  const formData = new FormData();
+  formData.append("arquivo", arq.file, arq.nome);
+  if (textoExtra) formData.append("texto", textoExtra);
+
+  const r = await fetch(`${getBase()}/upload`, {
+    method: "POST",
+    body: formData,
+    signal: AbortSignal.timeout(30000),
+  });
+
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ erro: "Erro desconhecido" }));
+    throw new Error(err.erro || `HTTP ${r.status}`);
+  }
+
+  return await r.json();
+}
+
+function enviarAtalho(texto) {
+  inputEl.value = texto;
+  enviarComando();
+}
+
+// ── VOZ ──
+let reconhecimento = null;
+let gravando = false;
+const btnMic = document.getElementById("btn-mic");
+
+function toggleVoz() {
+  if (!("webkitSpeechRecognition" in window) && !("SpeechRecognition" in window)) {
+    adicionarMsg("✗ Seu navegador não suporta reconhecimento de voz. Usa o Chrome.", "recebido err-msg");
+    return;
+  }
+
+  if (gravando) {
+    pararVoz();
+    return;
+  }
+
+  iniciarVoz();
+}
+
+function iniciarVoz() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  reconhecimento = new SR();
+  reconhecimento.lang = "pt-BR";
+  reconhecimento.interimResults = false;
+  reconhecimento.maxAlternatives = 1;
+
+  reconhecimento.onstart = () => {
+    gravando = true;
+    btnMic.classList.add("gravando");
+    adicionarMsg("🎙 Ouvindo...", "recebido voz-msg");
+  };
+
+  reconhecimento.onresult = (e) => {
+    const texto = e.results[0][0].transcript.trim();
+    const msgs = logEl.querySelectorAll(".voz-msg");
+    msgs[msgs.length - 1]?.remove();
+
+    if (texto) {
+      inputEl.value = texto;
+      ajustarAltura(inputEl);
+      enviarComando();
+    }
+  };
+
+  reconhecimento.onerror = (e) => {
+    adicionarMsg("✗ Erro no microfone: " + e.error, "recebido err-msg");
+    pararVoz();
+  };
+
+  reconhecimento.onend = () => {
+    pararVoz();
+  };
+
+  reconhecimento.start();
+}
+
+function pararVoz() {
+  gravando = false;
+  btnMic.classList.remove("gravando");
+  reconhecimento?.stop();
+  reconhecimento = null;
+}
+
+// ── UI ──
+function adicionarMsg(texto, classe) {
+  const div = document.createElement("div");
+  div.className = "msg " + classe;
+  div.textContent = texto;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function ajustarAltura(el) {
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 110) + "px";
+}
+
+function teclaInput(e) {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    enviarComando();
+  }
+}
+
+// ── SERVICE WORKER (PWA) ──
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch(() => {});
+}
+
+// ── ÁUDIO DA EMILY NO CELULAR ──
+const audioEmily = document.getElementById("audio-emily");
+
+function tocarFalaEmily(audioBase64, texto) {
+  if (!audioBase64) return;
+
+  const src = "data:audio/wav;base64," + audioBase64;
+  audioEmily.src = src;
+  audioEmily.currentTime = 0;
+  audioEmily.load();
+
+  const promise = audioEmily.play();
+  if (promise && typeof promise.catch === "function") {
+    promise.catch(e => {
+      if (e.name === "NotAllowedError") {
+        adicionarMsg("🎧 Toque aqui para habilitar o som da Emily", "recebido voz-msg");
+      } else {
+        console.error("Erro ao tocar áudio:", e);
+      }
+    });
+  }
+
+  if (texto) {
+    adicionarMsg("🗣 " + texto, "recebido voz-msg");
+  }
+}
+
+async function escutarFalasEmily() {
+  while (true) {
+    try {
+      const r = await fetch(`${getBase()}/fala`, {
+        signal: AbortSignal.timeout(30000)
+      });
+      if (r.status === 204) continue;
+      if (!r.ok) throw new Error("erro http");
+
+      const d = await r.json();
+      if (d.ok && d.audio) {
+        tocarFalaEmily(d.audio, d.texto);
+      }
+    } catch (e) {
+      await new Promise(res => setTimeout(res, 3000));
+    }
+  }
+}
+
+// Habilita áudio na primeira interação do usuário
+document.body.addEventListener("click", () => {
+  if (audioEmily.paused && audioEmily.src) {
+    audioEmily.play().catch(() => {});
+  }
+}, { once: true });
+
+// ── STREAM DE TELA ──
+let _streamAtivo    = false;
+let _streamUrl      = null;
+let _streamFpsTimer = null;
+let _streamFrames   = 0;
+let _streamT0       = null;
+let _qualidadeAlta  = true;
+
+const btnTelaEl      = document.getElementById("btn-tela");
+const streamPainelEl = document.getElementById("stream-painel");
+const streamImgEl    = document.getElementById("stream-img");
+const streamLoadEl   = document.getElementById("stream-carregando");
+const streamFpsEl    = document.getElementById("stream-fps");
+const btnQualEl      = document.getElementById("btn-qualidade");
+
+function toggleStream() {
+  if (_streamAtivo) {
+    fecharStream();
+  } else {
+    abrirStream();
+  }
+}
+
+function abrirStream() {
+  _streamAtivo = true;
+  btnTelaEl.classList.add("stream-ativo");
+  streamPainelEl.classList.add("visivel");
+
+  streamImgEl.style.display = "none";
+  streamLoadEl.style.display = "flex";
+
+  const qualParam = _qualidadeAlta ? "hq" : "lq";
+  const streamEndpoint = `${getBase()}/stream?q=${qualParam}&t=${Date.now()}`;
+
+  _streamFrames = 0;
+  _streamT0 = Date.now();
+
+  streamImgEl.onload = () => {
+    streamImgEl.style.display = "block";
+    streamLoadEl.style.display = "none";
+  };
+
+  streamImgEl.onerror = () => {
+    streamLoadEl.innerHTML = '<span style="color:var(--err)">✗ Falha ao carregar stream.<br>Verifique a conexão.</span>';
+    streamLoadEl.style.display = "flex";
+    streamImgEl.style.display = "none";
+  };
+
+  streamImgEl.src = streamEndpoint;
+
+  _streamFpsTimer = setInterval(() => {
+    const elapsed = (Date.now() - _streamT0) / 1000;
+    if (elapsed > 0) {
+      const fps = (streamImgEl.naturalWidth > 0) ? "~10" : "—";
+      streamFpsEl.textContent = `${fps} fps  ·  ${_qualidadeAlta ? "HQ" : "LQ"}  ·  Toque em ✕ para encerrar`;
+    }
+  }, 2000);
+
+  adicionarMsg("📺 Stream de tela iniciado. Acompanhe em tempo real!", "recebido info-msg");
+}
+
+function fecharStream() {
+  _streamAtivo = false;
+  btnTelaEl.classList.remove("stream-ativo");
+  streamPainelEl.classList.remove("visivel");
+
+  streamImgEl.src = "";
+  streamImgEl.style.display = "none";
+  streamLoadEl.style.display = "flex";
+  streamLoadEl.innerHTML = '<div class="spinner"></div><span>Iniciando stream da tela...</span>';
+
+  clearInterval(_streamFpsTimer);
+  _streamFpsTimer = null;
+
+  fetch(`${getBase()}/stream/parar`, { method: "POST" }).catch(() => {});
+}
+
+function alternarQualidade() {
+  _qualidadeAlta = !_qualidadeAlta;
+  btnQualEl.textContent = _qualidadeAlta ? "HQ" : "LQ";
+
+  if (_streamAtivo) {
+    streamImgEl.style.display = "none";
+    streamLoadEl.style.display = "flex";
+
+    const qualParam = _qualidadeAlta ? "hq" : "lq";
+    streamImgEl.src = `${getBase()}/stream?q=${qualParam}&t=${Date.now()}`;
+  }
+}
+
+// Fecha o stream com swipe para baixo no painel
+let _swipeY0 = null;
+streamPainelEl.addEventListener("touchstart", e => { _swipeY0 = e.touches[0].clientY; }, { passive: true });
+streamPainelEl.addEventListener("touchend",   e => {
+  if (_swipeY0 === null) return;
+  const dy = e.changedTouches[0].clientY - _swipeY0;
+  if (dy > 80) fecharStream();
+  _swipeY0 = null;
+}, { passive: true });
+
+// ── INICIALIZAÇÃO ──
+verificarStatus();
+escutarFalasEmily();
+</script>
+</body>
+</html>

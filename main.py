@@ -4,12 +4,117 @@ import re
 import threading
 import time
 from typing import Optional
+
+_MODO_PUBLICO = os.getenv("EMILY_PUBLIC_MODE") == "1"
+
+# No Windows o primeiro import de uma lib de tela fixa a consciência de DPI do
+# processo. Faça-o antes de carregar os módulos que importam pyautogui/mss.
+import desktop_backend as _desktop_backend
+_desktop_backend._configurar_dpi_windows()
+
+# O Konsole carrega PATH e mostra stdout; atalhos .desktop não garantem nenhum
+# dos dois. Normalize antes de importar módulos que iniciam processos e grave
+# sempre o mesmo log que a interface consegue abrir.
+import servicos_runtime as _servicos_runtime
+import emily_logs as _emily_logs
+
+def _aquecer_memoria_no_boot() -> None:
+    """
+    Consulta a memória unificada UMA VEZ em thread de fundo, no boot.
+
+    Por que existe: a PRIMEIRA busca depois de abrir a Emily paga dois
+    cold-loads em série — o Chroma abrindo a coleção e o Ollama carregando o
+    embedding (medido: 10,4s na primeira consulta, contra 0,1–0,4s aquecida).
+    Sem isto o Vitor falava "oi" logo após abrir a Emily e o turno inteiro
+    esperava o embedding carregar. Em thread: o boot NÃO pode esperar memória.
+    """
+    def rodar():
+        try:
+            import memoria_unificada as mu
+            if not mu.ponte_ativa():
+                return
+            mu.ponte().bloco_contexto(mu.dono_id(), "aquecimento do boot",
+                                      memory_pool="general")
+            print("[MEMORIA-UNIFICADA] aquecida (coleção e embedding na RAM)")
+        except Exception as erro:  # noqa: BLE001 - aquecimento é melhoria
+            print(f"[MEMORIA-UNIFICADA] aquecimento falhou (seguindo): "
+                  f"{type(erro).__name__}: {erro}")
+    threading.Thread(target=rodar, name="memoria-aquecimento",
+                     daemon=True).start()
+
+
+def _aquecer_provedor_llm_no_boot() -> None:
+    """
+    Abre a conexão com o provedor ATIVO em thread de fundo, no boot.
+
+    Por que existe: a PRIMEIRA chamada de LLM de cada sessão paga o handshake
+    frio (DNS + TCP + TLS) contra o provedor. Medido no relay da Anthropic do
+    .env: 4,8–10,6s na primeira chamada contra 1,8–2,4s com a conexão quente.
+    Sem isto, o Vitor abria a Emily, falava algo e o primeiro turno levava o
+    dobro do tempo — o handshake ia junto com a resposta.
+
+    Uma requisição mínima (1 token) já deixa o socket pronto no pool de
+    keep-alive. Em thread: o boot não espera o provedor responder.
+    """
+    def rodar():
+        try:
+            import llm
+            # Rota 'classificador': max_tokens=16, temperatura 0 e raciocínio
+            # desligado — é a chamada mais barata que existe na Emily. Serve
+            # só para estabelecer o socket, o texto não é usado.
+            llm.chamar([{"role": "user", "content": "ok"}],
+                       rota_nome="classificador", max_tokens=1)
+            print(f"[LLM] provedor '{llm.TABELA_ATIVA}' aquecido "
+                  "(conexão pronta no pool)")
+        except Exception as erro:  # noqa: BLE001 - aquecimento é melhoria
+            print(f"[LLM] aquecimento do provedor falhou (seguindo): "
+                  f"{type(erro).__name__}: {erro}")
+    threading.Thread(target=rodar, name="llm-aquecimento", daemon=True).start()
+
+
+_servicos_runtime.preparar_ambiente()
+_emily_logs.configurar()
+# Aquece a memória unificada em background: a primeira consulta paga o
+# cold-load do Chroma + embedding do Ollama (10,4s medidos). Em thread, o
+# boot não espera nada.
+if not _MODO_PUBLICO:
+    _aquecer_memoria_no_boot()
+
+# ─────────────────────────────────────────────────────────────────
+# BOOTSTRAP LINUX — tem que vir ANTES dos imports abaixo.
+#
+# No Linux a lib `keyboard` real exige root e o automacao.py foi escrito
+# pra Windows, então aqui a gente troca os módulos problemáticos por
+# wrappers compatíveis antes de qualquer um deles ser importado.
+# No Windows nada disso entra em cena.
+# ─────────────────────────────────────────────────────────────────
+import sys as _sys
+import platform_compat as _platform_compat
+
+if _platform_compat.is_linux():
+    import compat_imports as _compat
+    _sys.modules["keyboard"] = _compat.keyboard
+    _sys.modules["pyperclip"] = _compat.pyperclip
+    print("[MAIN] Linux detectado — imports de teclado/clipboard redirecionados pra camada de compatibilidade")
+
+# ─── PREFLIGHT DO ATUALIZADOR ───
+#
+# O botão "Atualizar agora" ensaia a atualização rodando ESTE executável com
+# os módulos novos no lugar (EMILY_OVERRIDE_DIR) e EMILY_PREFLIGHT=1. Aqui a
+# Emily importa TUDO e sai com 0 (ok) ou 1 (algo não importa — biblioteca
+# nova que o pacote não tem → o botão avisa que precisa recompilar, em vez de
+# aplicar uma atualização que quebraria a Emily). No uso normal, essa env não
+# existe e nada aqui roda.
+if os.environ.get("EMILY_PREFLIGHT"):
+    import atualizador_emily as _atualizador
+    _sys.exit(_atualizador.rodar_preflight())
+
 import automacao
-import gerador_imagem as imagem
-import interface
 import intencoes
 import memoria
 import modelo
+import orquestrador_voz
+import estilo_vitor
 import navegador
 import pesquisa
 import visao
@@ -21,6 +126,11 @@ import servidor
 import notificacoes
 import agente_ui
 import agente_jogo
+try:
+    from hollow_knight_emily.python import hollow_knight_ponte
+except Exception as _erro_hk_import:  # integração opcional, nunca impede o boot
+    hollow_knight_ponte = None
+    print(f"[HOLLOW-KNIGHT] ponte indisponível no import: {_erro_hk_import}")
 
 import unicodedata as _unicodedata
 
@@ -33,52 +143,129 @@ def _normalizar_simples(t: str) -> str:
 mem = memoria.carregar_memoria()
 modelo.atualizar_memoria(mem)
 
-# ─────────────────────────────────────────────
-# GATEWAY DO KIRO
-#
-# O LLM da Emily é um processo local desde a migração pro plano pago do
-# Kiro. Subir aqui, e não na primeira chamada, é de propósito: o custo de
-# boot (uns 5s) sai enquanto a interface carrega, e não no meio da
-# primeira frase que o Vitor falar.
-#
-# Em try/except porque emudecer a Emily inteira por causa do LLM é pior
-# que a falha: sem isso, um login expirado do Kiro impediria interface,
-# voz, Discord e automação de subir. A falha é falada e a Emily continua.
-#
-# Se falhar aqui, a próxima chamada de LLM tenta de novo — o garantir() é
-# idempotente e o ProvedorKiro o chama sozinho.
-# ─────────────────────────────────────────────
+# Aplica as escolhas do Vitor (provedor, modelo e raciocínio da conversa) que
+# ficaram salvas da última vez que ele mexeu no composer. Nome e personalidade
+# extra são lidos on-the-fly pelo modelo._system_base(), então não precisam disto.
+# Tolerante a falha: se prefs quebrar, a Emily abre com o padrão de fábrica.
 try:
-    import gateway
-
-    gateway.garantir()
-except Exception as _erro_gateway:  # noqa: BLE001
-    _motivo = getattr(_erro_gateway, "motivo", type(_erro_gateway).__name__)
-    _detalhe = getattr(_erro_gateway, "detalhe", str(_erro_gateway))
-    print(f"[MAIN] gateway do Kiro indisponível ({_motivo})")
-    print(f"[MAIN] {_detalhe}")
-    try:
-        _frase = _erro_gateway.frase() if hasattr(_erro_gateway, "frase") else None
-        if _frase:
-            voz.falar(_frase)
-    except Exception as _erro_voz:  # noqa: BLE001
-        print(f"[MAIN] não consegui falar o aviso de gateway: {_erro_voz}")
+    import llm
+    import preferencias
+    _prefs = preferencias.carregar()
+    _provedor = (_prefs.get("provedor") or "").strip()
+    _modelo = (_prefs.get("modelo") or "").strip()
+    if _provedor:
+        # Pref salva de provedor manda no start: sem isto, o EMILY_PROVEDOR_LLM
+        # do .env voltaria a vencer a cada abertura e a Emily abriria com o
+        # provedor errado (modelo de um provedor caindo na rota de outro ->
+        # 400 "not a valid model ID", medido na migração).
+        if not llm.definir_provedor_e_modelo(_provedor, _modelo):
+            print(f"[MAIN] provedor '{_provedor}' das preferências não aplicado; usando o do .env")
+    else:
+        llm.definir_modelo_conversa(_modelo)
+    llm.definir_raciocinio_conversa(_prefs.get("raciocinio", ""))
+except Exception as _erro_prefs:  # noqa: BLE001
+    print(f"[MAIN] não apliquei as preferências salvas: {_erro_prefs}")
 
 automacao.inicializar()
-discord_bot.inicializar()
+import discord_monitor
+if not _MODO_PUBLICO:
+    discord_monitor.preparar_legado()
+    discord_bot.inicializar()
+else:
+    from pathlib import Path as _PerfilPath
+    from emily_primeiro_inicio import carregar as _carregar_perfil_publico
+    _perfil_publico = (_carregar_perfil_publico(_PerfilPath(os.environ["EMILY_PUBLIC_CONFIG"]).parent)
+                       if os.getenv("EMILY_PUBLIC_CONFIG") else None)
+    _discord_publico = (_perfil_publico or {}).get("discord", {})
+    if _discord_publico.get("ativo"):
+        from emily_discord_publico import iniciar as _iniciar_discord_publico
+        _iniciar_discord_publico(_discord_publico)
 
-# Escuta do chat do Minecraft. Fica num try porque é o serviço mais novo e o que
-# mais depende de coisa de fora (painel de hospedagem, servidor ligado): se ele
-# não subir, a Emily inteira não pode deixar de abrir por causa disso.
-try:
-    import mine_jogo
-    mine_jogo.inicializar()
-except Exception as _erro_mc:  # noqa: BLE001
-    print(f"[MAIN] não consegui ligar a escuta do Minecraft: {_erro_mc}")
+# ─────────────────────────────────────────────
+# QUAL INTERFACE
+#
+# A nova (interface_web.py) é HTML/CSS/JS numa WebView2. A antiga
+# (interface.py, PyQt6) fica no projeto e volta com EMILY_UI=qt — o
+# contrato das duas é o mesmo nove pontos, então quem está abaixo daqui
+# não sabe qual está rodando.
+#
+# O fallback é automático: se o pywebview não estiver instalado ou a
+# WebView2 faltar, a Emily abre na antiga em vez de não abrir.
+# ─────────────────────────────────────────────
+_UI = os.getenv("EMILY_UI", "web").strip().lower()
+if _UI == "qt":
+    import interface
+else:
+    try:
+        import interface_web as interface
+    except Exception as _erro_ui:  # noqa: BLE001
+        print(f"[MAIN] interface web indisponível ({type(_erro_ui).__name__}: "
+              f"{_erro_ui}); abrindo a antiga.")
+        import interface
 
 janela = interface.JanelaEmily()
-automacao.definir_callback_status(janela.atualizar_status)
+
+
+def _preferencias_recebidas(dados: dict) -> None:
+    """Ajusta o modelo vivo e redesenha a identidade após a sync entre PCs."""
+    try:
+        import discord_monitor
+        discord_monitor.aplicar()
+    except Exception as exc:
+        print(f"[PREFERENCIAS] escuta do Discord não atualizada: {exc}")
+    try:
+        if dados.get("provedor"):
+            llm.definir_provedor_e_modelo(dados["provedor"], dados.get("modelo") or "")
+        llm.definir_raciocinio_conversa(dados.get("raciocinio") or "baixo")
+        if hasattr(janela, "_push"):
+            janela._push("preferencias_sync", {})
+    except Exception as exc:
+        print(f"[PREFERENCIAS] atualização ao vivo falhou: {exc}")
+
+
+preferencias.observar_alteracoes(_preferencias_recebidas)
+# ── MODO REMOTO: capturar a resposta do turno pra devolver ao celular ──
+# O celular pode pedir pra EMILY DO PC executar um comando (botão de PC no chat
+# do app). A resposta daqui passa pela janela (atualizar_status com status
+# "falando") — um interceptor junta as frases do turno remoto e entrega pro
+# servidor devolver ao celular no fim do turno. O registro na conversa fica
+# DESLIGADO nesse turno: quem digitou foi o celular, a conversa é de lá.
+_remota_ativa = False
+_remota_frases = []
+
+def _remota_inicio():
+    global _remota_ativa, _remota_frases
+    _remota_ativa = True
+    _remota_frases = []
+    janela.sem_registro_remoto = True
+
+def _remota_fim():
+    global _remota_ativa
+    _remota_ativa = False
+    janela.sem_registro_remoto = False
+    try:
+        import servidor as _srv
+        _srv.entregar_resposta_remota(" ".join(_remota_frases).strip())
+    except Exception as _e:
+        print(f"[REMOTA] nao consegui devolver a resposta: {_e}")
+
+_janela_status_original = janela.atualizar_status
+
+def _atualizar_status_com_captura(status, texto=""):
+    try:
+        if _remota_ativa and status == "falando" and texto:
+            _remota_frases.append(texto)
+    except Exception:
+        pass
+    _janela_status_original(status, texto)
+
+janela.atualizar_status = _atualizar_status_com_captura
+automacao.definir_callback_status(janela.atualizar_status)   # agora com captura
 agente_ui.definir_callback_falar(voz.falar)
+
+
+
+
 _notificando_download = False
 
 def _avisar_download(mensagem: str):
@@ -131,7 +318,8 @@ def _avisar_notificacao(app_nome: str, contato: str, mensagem: str):
     threading.Thread(target=_falar, daemon=True).start()
 
 notificacoes.definir_callback(_avisar_notificacao)
-notificacoes.iniciar_monitor()
+if not _MODO_PUBLICO:
+    notificacoes.iniciar_monitor()
       
       
 emily_ocupada = threading.Event()
@@ -144,6 +332,72 @@ timer_assistir_tela = None
 
 ultimo_uso_usuario = 0
 COOLDOWN_VISAO = 10
+
+# Orquestrador exclusivo do PTT no PC. Não é usado por chat escrito, Discord,
+# Android ou agentes. O catálogo rápido é montado uma vez no boot.
+_orquestrador_voz = orquestrador_voz.OrquestradorVoz()
+_trava_aviso_delegacao = threading.Lock()
+
+
+def _voz_delegacao_rapida_ativa() -> bool:
+    """Preferência do PTT local; lida a cada turno para dispensar reinício."""
+    try:
+        return bool(preferencias.obter("voz_delegacao_rapida", True))
+    except Exception as erro:
+        print(f"[VOZ] não consegui ler modo de delegação: {erro}")
+        return True
+
+
+def _executar_turno_voz_pc(texto: str) -> str:
+    """Seleciona somente a rota do PTT, mantendo o chat e o Android intactos."""
+    if _voz_delegacao_rapida_ativa():
+        return _executar_turno_voz_rapido(texto)
+    return _executar_turno_com_ferramentas(texto, canal="voz")
+
+
+def _pc_livre_para_aviso_delegacao() -> bool:
+    """Aviso espontâneo pode falar; nunca abre microfone nem interrompe um turno."""
+    return (
+        _voz_delegacao_rapida_ativa()
+        and not emily_ocupada.is_set()
+        and not voz.falar_ativo.is_set()
+        and not voz.escutando_ativo.is_set()
+    )
+
+
+def _falar_aviso_delegacao(texto: str, eh_resultado: bool) -> bool:
+    """Saída espontânea exclusivamente por voz, serializada com o resto do PC."""
+    texto = (texto or "").strip()
+    if not texto:
+        return False
+    with _trava_aviso_delegacao:
+        if not _pc_livre_para_aviso_delegacao():
+            return False
+        emily_ocupada.set()
+        try:
+            # Reconfere os eventos de áudio depois de reservar o runtime. O PTT
+            # pode ter começado entre o teste acima e o set() do evento.
+            if (not _voz_delegacao_rapida_ativa()
+                    or voz.falar_ativo.is_set() or voz.escutando_ativo.is_set()):
+                return False
+            print(
+                "[VOZ-RAPIDA] entregando resultado espontâneo"
+                if eh_resultado else
+                "[VOZ-RAPIDA] falando atualização espontânea"
+            )
+            # Reserva a saída ANTES de entrar em voz.falar(). Sem isto existe
+            # uma janela minúscula em que o MB5 acorda do wait, abre o microfone
+            # e só depois o TTS seta falar_ativo — gravando a própria Emily.
+            voz.falar_ativo.set()
+            try:
+                voz.falar(texto)
+            finally:
+                voz.falar_ativo.clear()
+            _orquestrador_voz.registrar_aviso_emitido(texto)
+            return True
+        finally:
+            emily_ocupada.clear()
+            restaurar_status()
 
 FRASES_ATIVAR_JOGO = (
     "monitora o jogo",
@@ -422,12 +676,12 @@ def _registrar_ferramentas_de_modo():
         return "Parei de olhar a tela, só te escutando agora."
 
     def discord_on():
-        discord_bot.ativar_escuta_discord()
-        return "Escuta do Discord ligada."
+        return ("Escuta do Discord ligada." if discord_bot.ativar_escuta_discord()
+                else "Não consegui transferir a escuta do Discord para este PC agora.")
 
     def discord_off():
-        discord_bot.desativar_escuta_discord()
-        return "Escuta do Discord desligada."
+        return ("Escuta do Discord desligada." if discord_bot.desativar_escuta_discord()
+                else "Não consegui desligar a escuta do Discord agora.")
 
     ferramentas.registrar_handler("ativar_modo_escrito", escrito_on)
     ferramentas.registrar_handler("desativar_modo_escrito", escrito_off)
@@ -440,8 +694,23 @@ def _registrar_ferramentas_de_modo():
     ferramentas.registrar_handler("ativar_escuta_discord", discord_on)
     ferramentas.registrar_handler("desativar_escuta_discord", discord_off)
 
+    # Ponte pro Music Player da interface. As ferramentas player_* chamam
+    # _chamar_handler('comando_player', acao=..., **dados); aqui vira um
+    # evento pro JS, que é quem realmente controla o áudio (Player do app.js).
+    # A interface antiga (Qt) não tem _push — nesse caso avisa que o player
+    # da interface não está disponível.
+    def comando_player(acao: str, **dados):
+        push = getattr(janela, "_push", None)
+        if push is None:
+            return ("O player da interface não está disponível nesta sessão "
+                    "(interface antiga). Use tocar_musica pra abrir no YouTube.")
+        push("player_comando", {"acao": acao, "dados": dados or {}})
+        return "Player da interface comandado."
+
+    ferramentas.registrar_handler("comando_player", comando_player)
+
     print(f"[MAIN] {len(ferramentas.CATALOGO)} ferramentas disponíveis, "
-          f"8 handlers de modo registrados")
+          f"9 handlers de modo/player registrados")
 
 
 def _processar_modo_ui(texto: str) -> bool:
@@ -450,6 +719,14 @@ def _processar_modo_ui(texto: str) -> bool:
     global modo_ui_ativo
 
     texto_norm = texto.lower().strip()
+
+    # Uma resposta à barreira humana de ação destrutiva tem prioridade sobre os
+    # comandos genéricos abaixo. Sem isso, "não, cancelar" cancelaria a sessão
+    # inteira em vez de negar somente o clique pendente.
+    if agente_ui.estado_agente_ui().get("estado") == "aguardando_confirmacao":
+        agente_ui.enviar_mensagem_ao_vivo(texto)
+        janela.atualizar_status("falando", "Confirmação recebida para a ação pendente.")
+        return True
 
     # Desativar o modo UI
     if any(frase in texto_norm for frase in FRASES_DESATIVAR_UI):
@@ -492,12 +769,127 @@ def restaurar_status():
     discord_bot.atualizar_status_discord("aguardando")
 
 
-# Responder por voz o que foi pedido por ESCRITO. Desligado.
-#
-# Ligue com EMILY_FALAR_TEXTO_DIGITADO=1 no .env se algum dia quiser as duas
-# coisas. O padrão é não falar porque foi o que o Vitor pediu: ele digita
-# enquanto joga de headset e a fala em cima do jogo incomoda.
-FALAR_TEXTO_DIGITADO = os.getenv("EMILY_FALAR_TEXTO_DIGITADO", "0").strip() == "1"
+def _falar_texto_digitado() -> bool:
+    """Escolha local do aparelho, independente das preferências sincronizadas."""
+    return bool(preferencias.obter(
+        "voz_texto_digitado",
+        os.getenv("EMILY_FALAR_TEXTO_DIGITADO", "0").strip() == "1"))
+
+
+def _executar_turno_com_ferramentas(texto: str, canal: str) -> str:
+    """Executa o mesmo protocolo visual/TTS para chat escrito e voz."""
+    fila_frases = queue.Queue()
+    respostas = []
+    erros = []
+    janela.progresso_evento("inicio", {})
+
+    def gerar():
+        try:
+            resposta = modelo.conversar_com_ferramentas(
+                texto,
+                callback=lambda frase: janela.atualizar_status("falando", frase),
+                fila_frases=fila_frases,
+                on_progresso=janela.progresso_evento,
+                canal=canal,
+            )
+            if resposta:
+                respostas.append(resposta)
+        except Exception as erro:  # a exceção de thread não sobe sozinha
+            erros.append(erro)
+            fila_frases.put(None)
+
+    def falar():
+        voz.falar_stream(
+            fila_frases,
+            lambda frase: janela.atualizar_status("falando", frase),
+            on_progresso=janela.progresso_evento,
+        )
+
+    discord_bot.atualizar_status_discord("falando")
+    thread_gerar = threading.Thread(target=gerar, daemon=True)
+    thread_falar = threading.Thread(target=falar, daemon=True)
+    thread_gerar.start()
+    thread_falar.start()
+    thread_gerar.join()
+    thread_falar.join()
+
+    if erros:
+        raise erros[0]
+
+    resposta_final = respostas[0] if respostas else ""
+    if resposta_final:
+        # Fonte da verdade da bolha e do histórico: preserva markdown e permite
+        # retirar os comentários intermediários registrados em fase="fala".
+        janela.progresso_evento("resposta", {"texto": resposta_final})
+        if not modelo._memoria_unificada_ativa():
+            memoria.processar_conversa_async(texto, resposta_final)
+    return resposta_final
+
+
+def _executar_turno_voz_rapido(texto: str) -> str:
+    """Luna na frente; player local e delegação forte sem bloquear o próximo PTT."""
+    fila_frases = queue.Queue()
+    respostas = []
+    erros = []
+    janela.progresso_evento("inicio", {})
+
+    def gerar():
+        try:
+            resposta = _orquestrador_voz.responder(
+                texto,
+                fila_frases=fila_frases,
+                on_delta=lambda pedaco: janela.progresso_evento(
+                    "delta", {"texto": pedaco, "acompanhar_fala": True}),
+                on_progresso=janela.progresso_evento,
+            )
+            if resposta:
+                respostas.append(resposta)
+        except Exception as erro:  # exceção de thread precisa atravessar manualmente
+            erros.append(erro)
+            fila_frases.put(None)
+
+    def falar():
+        voz.falar_stream(
+            fila_frases,
+            lambda frase: janela.atualizar_status("falando", frase),
+            on_progresso=janela.progresso_evento,
+        )
+
+    discord_bot.atualizar_status_discord("falando")
+    thread_gerar = threading.Thread(target=gerar, daemon=True)
+    thread_falar = threading.Thread(target=falar, daemon=True)
+    thread_gerar.start()
+    thread_falar.start()
+    thread_gerar.join()
+    thread_falar.join()
+
+    if erros:
+        raise erros[0]
+
+    resposta_final = respostas[0] if respostas else ""
+    if resposta_final:
+        janela.progresso_evento("resposta", {"texto": resposta_final})
+        if not modelo._memoria_unificada_ativa():
+            memoria.processar_conversa_async(texto, resposta_final)
+    return resposta_final
+
+
+def _registrar_entrada_voz_no_chat(texto: str) -> None:
+    """Mostra e persiste a transcrição de voz como uma mensagem normal."""
+    texto = (texto or "").strip()
+    if not texto:
+        return
+    try:
+        if hasattr(janela, "add_mensagem_usuario"):
+            janela.add_mensagem_usuario(texto)
+        if hasattr(janela, "_registrar_na_conversa"):
+            janela._registrar_na_conversa("user", texto)
+            if hasattr(janela, "_titular"):
+                threading.Thread(
+                    target=janela._titular, args=(texto,), daemon=True
+                ).start()
+    except Exception as erro_registro:
+        print(f"[VOZ] registro na conversa falhou: {erro_registro}")
 
 
 def processar_texto_digitado(texto):
@@ -507,10 +899,27 @@ def processar_texto_digitado(texto):
     # Silencia a voz por todo o turno escrito. No finally, sempre — se sair por
     # exceção e o mudo ficar preso, a Emily emudece pro resto da sessão, e um
     # bug de enfeite viraria um bug de "ela não fala mais".
-    if not FALAR_TEXTO_DIGITADO:
+    silenciar_turno = not _falar_texto_digitado()
+    mudo_antes = voz.mudo.is_set()
+    if silenciar_turno:
         voz.mudo.set()
     try:
         texto_norm = texto.lower().strip()
+
+        # A confirmação destrutiva também pode chegar pelo chat digitado quando
+        # o agente foi iniciado fora do modo UI. Ela deve ser consumida pela
+        # sessão pendente, nunca virar um novo turno de conversa.
+        if agente_ui.estado_agente_ui().get("estado") == "aguardando_confirmacao":
+            agente_ui.enviar_mensagem_ao_vivo(texto)
+            janela.atualizar_status("falando", "Confirmação recebida para a ação pendente.")
+            return
+
+        # ─── TOOL CALLING (caminho novo, texto digitado) ───
+        if modelo.TOOL_CALLING_ATIVO:
+            _executar_turno_com_ferramentas(texto, canal="web")
+            restaurar_status()
+            emily_ocupada.clear()
+            return
 
         # Ativar modo UI por texto
         if not modo_ui_ativo and any(frase in texto_norm for frase in FRASES_ATIVAR_UI):
@@ -531,30 +940,6 @@ def processar_texto_digitado(texto):
             return
 
         janela.atualizar_status("ouvindo", f'Você escreveu: "{texto}"')
-        
-        if modelo.precisa_gerar_imagem(texto):
-            janela.atualizar_status("gerando", "Gerando imagem...")
-            discord_bot.atualizar_status_discord("gerando")
-            frase_img = modelo.gerar_frase_acao("gerar_imagem", texto) or "Um segundo, deixa eu criar essa imagem!"
-            voz.falar(frase_img)
-
-            prompt_otimizado = modelo.extrair_prompt_imagem(texto)
-            caminho = imagem.gerar_imagem(prompt_otimizado)
-
-            if caminho:
-                janela.add_imagem_chat_safe(caminho, "emily")
-                janela.mostrar_opcao_salvar(caminho)
-                resposta = "Pronto Vitor, criada! Apareceu ali no chat. Quer salvar?"
-                modelo.registrar_acao_no_historico(f"Gerou imagem para: {texto}", "imagem criada com sucesso")
-            else:
-                resposta = "Eita, não consegui gerar a imagem agora. Tenta de novo!"
-
-            janela.atualizar_status("falando", resposta)
-            discord_bot.atualizar_status_discord("falando")
-            voz.falar(resposta)
-            restaurar_status()
-            emily_ocupada.clear()
-            return
         
         # ─── DOWNLOAD PENDENTE ───
         if automacao.obter_download_pendente():
@@ -583,44 +968,6 @@ def processar_texto_digitado(texto):
             emily_ocupada.clear()
             return
 
-        # ─── TOOL CALLING (caminho novo, texto digitado) ───
-        if modelo.TOOL_CALLING_ATIVO:
-            _fila_tc = queue.Queue()
-            _buf_tc = []
-
-            # Liga o indicador no chat ANTES da primeira ida ao modelo — a
-            # espera que ninguém vê acontecer é justamente essa.
-            janela.progresso_evento("inicio", {})
-
-            def _gerar_tc():
-                r = modelo.conversar_com_ferramentas(
-                    texto,
-                    callback=lambda f: janela.atualizar_status("falando", f),
-                    fila_frases=_fila_tc,
-                    on_progresso=janela.progresso_evento,
-                )
-                if r:
-                    _buf_tc.append(r)
-
-            def _falar_tc():
-                voz.falar_stream(
-                    _fila_tc,
-                    lambda f: janela.atualizar_status("falando", f),
-                )
-
-            discord_bot.atualizar_status_discord("falando")
-            _t_g = threading.Thread(target=_gerar_tc, daemon=True)
-            _t_f = threading.Thread(target=_falar_tc, daemon=True)
-            _t_g.start()
-            _t_f.start()
-            _t_g.join()
-            _t_f.join()
-
-            if _buf_tc:
-                memoria.processar_conversa_async(texto, _buf_tc[0])
-            restaurar_status()
-            emily_ocupada.clear()
-            return
 
         resposta_automacao = automacao.executar_comando(texto, callback_falar=voz.falar)
         if resposta_automacao is not None:
@@ -700,8 +1047,9 @@ def processar_texto_digitado(texto):
                 return
 
             elif acao_fb == "ouvir_discord":
-                discord_bot.ativar_escuta_discord()
-                resposta = "Tô de olho no Discord agora, Vitor!"
+                resposta = ("Tô de olho no Discord agora, Vitor!"
+                            if discord_bot.ativar_escuta_discord()
+                            else "Não consegui transferir a escuta do Discord para este PC agora.")
                 janela.atualizar_status("falando", resposta)
                 voz.falar(resposta)
                 restaurar_status()
@@ -709,8 +1057,9 @@ def processar_texto_digitado(texto):
                 return
 
             elif acao_fb == "parar_discord":
-                discord_bot.desativar_escuta_discord()
-                resposta = "Parei de ouvir o Discord!"
+                resposta = ("Parei de ouvir o Discord!"
+                            if discord_bot.desativar_escuta_discord()
+                            else "Não consegui desligar a escuta do Discord agora.")
                 janela.atualizar_status("falando", resposta)
                 voz.falar(resposta)
                 restaurar_status()
@@ -743,25 +1092,6 @@ def processar_texto_digitado(texto):
                     restaurar_status()
                     emily_ocupada.clear()
                     return
-
-            elif acao_fb == "gerar_imagem":
-                janela.atualizar_status("gerando", "Gerando imagem...")
-                discord_bot.atualizar_status_discord("gerando")
-                voz.falar("Um segundo, deixa eu criar essa imagem pra você!")
-                prompt_otimizado = modelo.extrair_prompt_imagem(param_fb or texto)
-                caminho = imagem.gerar_imagem(prompt_otimizado)
-                if caminho:
-                    janela.add_imagem_chat_safe(caminho, "emily")
-                    janela.mostrar_opcao_salvar(caminho)
-                    resposta = "Pronto Vitor, criada! Apareceu ali no chat. Quer salvar?"
-                else:
-                    resposta = "Eita, não consegui gerar a imagem agora. Tenta de novo!"
-                janela.atualizar_status("falando", resposta)
-                discord_bot.atualizar_status_discord("falando")
-                voz.falar(resposta)
-                restaurar_status()
-                emily_ocupada.clear()
-                return
 
             elif acao_fb == "ver_tela":
                 # ── Verifica primeiro se é "ler página do navegador" ──
@@ -838,6 +1168,7 @@ def processar_texto_digitado(texto):
                 )
                 print(f"[PESQUISA] Mensagem enviada pra LLM ({len(mensagem_com_pesquisa)} chars)")
                 fila_frases_pesq = queue.Queue()
+                respostas_pesq = []
                 janela.atualizar_status("ouvindo", "Analisando resultados...")
                 discord_bot.atualizar_status_discord("ouvindo")
 
@@ -849,7 +1180,10 @@ def processar_texto_digitado(texto):
                         fila_frases_pesq,
                         instrucao_extra="NÃO faça pesquisa. Os dados já foram fornecidos acima. Apenas resuma e responda com base neles.",
                         skip_pesquisa=True,
+                        on_delta=lambda p: janela.progresso_evento("delta", {"texto": p}),
                     )
+                    if r:
+                        respostas_pesq.append(r)
                     print(f"[PESQUISA] Resposta da LLM ({len(r or '')} chars): {(r or '')[:200]}")
 
                 def _falar_pesq():
@@ -865,6 +1199,11 @@ def processar_texto_digitado(texto):
                 t_fp.start()
                 t_gp.join()
                 t_fp.join()
+                if respostas_pesq:
+                    janela.progresso_evento("resposta", {
+                        "texto": respostas_pesq[0],
+                        "fontes": pesquisa.extrair_fontes_do_resultado(resultado_pesquisa),
+                    })
                 restaurar_status()
                 emily_ocupada.clear()
                 return
@@ -892,6 +1231,8 @@ def processar_texto_digitado(texto):
                 texto,
                 lambda f: janela.atualizar_status("falando", f),
                 fila_frases,
+                canal="web",
+                on_delta=lambda p: janela.progresso_evento("delta", {"texto": p}),
             )
             if r:
                 _resp_buf.append(r)
@@ -912,7 +1253,10 @@ def processar_texto_digitado(texto):
 
         # ─── MEMÓRIA: processa conversa em background ───
         if _resp_buf:
-            memoria.processar_conversa_async(texto, _resp_buf[0])
+            # Resposta crua pra interface (código e quebras de linha intactos).
+            janela.progresso_evento("resposta", {"texto": _resp_buf[0], "fontes": []})
+            if not modelo._memoria_unificada_ativa():
+                memoria.processar_conversa_async(texto, _resp_buf[0])
 
         restaurar_status()
     except Exception as erro:
@@ -922,14 +1266,60 @@ def processar_texto_digitado(texto):
         emily_ocupada.clear()
         # Solta a voz de volta SEMPRE, inclusive se estourou exceção no meio.
         # Mudo preso emudeceria a Emily até reiniciar.
-        voz.mudo.clear()
+        if silenciar_turno and not mudo_antes:
+            voz.mudo.clear()
+        janela.progresso_evento("fim", {})
+
+
+def processar_arquivos_chat(caminhos, texto=""):
+    """Lê anexos e mantém o protocolo visual/tool calling da conversa normal."""
+    caminhos = [str(caminho) for caminho in caminhos if os.path.isfile(str(caminho))]
+    if not caminhos:
+        janela.atualizar_status("falando", "Não encontrei nenhum arquivo válido para enviar.")
+        restaurar_status()
+        return
+
+    if emily_ocupada.is_set():
+        janela.atualizar_status("falando", "Espera só um pouquinho, ainda tô ocupada 😅")
+        restaurar_status()
+        return
+
+    emily_ocupada.set()
+    janela.progresso_evento("inicio", {})
+    try:
+        janela.atualizar_status("pensando", "Analisando anexos...")
+        resposta = modelo.conversar_com_anexos(
+            texto or "Analise os anexos que eu acabei de enviar.",
+            caminhos,
+            callback=lambda frase: janela.atualizar_status("falando", frase),
+            on_progresso=janela.progresso_evento,
+            canal="web",
+        )
+        if resposta:
+            janela.progresso_evento("resposta", {"texto": resposta})
+    except Exception as erro:
+        print(f"[ANEXOS] Erro ao processar arquivos: {erro}")
+        janela.atualizar_status("falando", f"Não consegui analisar esses anexos: {erro}")
+    finally:
+        restaurar_status()
+        emily_ocupada.clear()
         janela.progresso_evento("fim", {})
 
 
 janela.callback_texto = processar_texto_digitado
+janela.callback_arquivos = processar_arquivos_chat
 janela.callback_trocar_monitor = visao.trocar_monitor
 
 servidor.definir_callback(processar_texto_digitado)
+servidor.definir_callbacks_remota(_remota_inicio, _remota_fim)
+# Passos das ferramentas do CELULAR durante um comando remoto: retransmitidos
+# pro painel de progresso da interface (mesma animação dos turnos locais).
+servidor.definir_callback_progresso_remota(janela.progresso_evento)
+
+# ── Resposta do comando remoto (PC → celular): a interface_web já cuida disso
+#    sozinha (_rodar_remota → enviar_comando_remoto_ao_celular), então aqui não
+#    precisa mais de callback — a versão antiga do servidor exigia um
+#    definir_callback_resposta_remota(), que não existe mais.
 
 # Conecta a voz da Emily ao servidor web: toda fala vira áudio no celular também
 voz.definir_callback_audio(servidor.receber_fala)
@@ -940,63 +1330,49 @@ voz.definir_callback_audio(servidor.receber_fala)
 # ─────────────────────────────────────────────────────────────────
 
 def iniciar_ngrok(porta: int = 5000) -> None:
-    """
-    Sobe o ngrok em background e exibe a URL pública no terminal.
-    Se o ngrok não estiver instalado ou falhar, loga o aviso e segue normalmente.
-    """
-    import subprocess
-    import urllib.request
-    import json as _json
-
-    try:
-        # Sobe o ngrok em background (sem travar o terminal)
-        subprocess.Popen(
-            ["ngrok", "http", str(porta)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-        )
-        print("[NGROK] Aguardando o ngrok estabilizar...")
-
-        # Aguarda até 10 segundos para o ngrok subir
-        url_publica = None
-        for _ in range(10):
-            time.sleep(1)
-            try:
-                with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as resp:
-                    dados = _json.loads(resp.read().decode())
-                    tunnels = dados.get("tunnels", [])
-                    for t in tunnels:
-                        if t.get("proto") == "https":
-                            url_publica = t["public_url"]
-                            break
-                    if url_publica:
-                        break
-            except Exception:
-                # ngrok ainda não subiu, tenta de novo
-                continue
-
-        if url_publica:
-            print(f"\n{'='*55}")
-            print(f"  [NGROK] URL pública: {url_publica}")
-            print(f"{'='*55}\n")
-        else:
-            print("[NGROK] Aviso: não foi possível obter a URL pública. Verifique se o ngrok está instalado e autenticado.")
-
-    except FileNotFoundError:
-        print("[NGROK] Aviso: ngrok não encontrado. Instale em https://ngrok.com e adicione ao PATH.")
-    except Exception as erro_ngrok:
-        print(f"[NGROK] Aviso: falha ao iniciar o ngrok — {erro_ngrok}")
+    """Compatibilidade para chamadas antigas; o trabalho real é assíncrono."""
+    from emily_remote import ambiente_fedora
+    if ambiente_fedora():
+        _servicos_runtime.iniciar_ngrok(porta)
 
 
-# Inicia o ngrok antes das threads principais
-iniciar_ngrok()
-
+# O servidor local precisa existir ANTES do túnel. O inicializador do ngrok
+# espera a porta responder sem bloquear o restante do boot.
 thread_servidor = threading.Thread(target=servidor.iniciar_servidor, daemon=True)
-thread_servidor.start()
+if not _MODO_PUBLICO:
+    thread_servidor.start()
+    iniciar_ngrok()
+
+# No notebook Windows, mantém o acervo local alinhado ao gateway Fedora que
+# também atende o Android. O primeiro ciclo roda em segundo plano.
+if os.name == "nt" and not _MODO_PUBLICO:
+    try:
+        import sincronizacao_desktop
+        sincronizacao_desktop.iniciar()
+    except Exception as _erro_sync:
+        print(f"[SYNC-DESKTOP] indisponível: {_erro_sync}")
+
+# Servidor SEPARADO e exclusivamente loopback. Nunca passa pelo gateway/ngrok.
+if hollow_knight_ponte is not None and not _MODO_PUBLICO:
+    try:
+        hollow_knight_ponte.iniciar()
+    except Exception as _erro_hk_boot:
+        print(f"[HOLLOW-KNIGHT] ponte não subiu (Emily segue normal): {_erro_hk_boot}")
 
 # ─── NAVEGADOR (WebSocket extensão Chrome/Brave) ───
-navegador.iniciar_servidor_websocket()
+if not _MODO_PUBLICO:
+    navegador.iniciar_servidor_websocket()
+
+# ─── ESPIADINHA (comentário espontâneo, bem de vez em quando) ───
+# Thread daemon própria: dorme um intervalo aleatório e, se o modo estiver
+# ligado nas preferências e a Emily estiver ociosa, olha a aba em foco e
+# comenta por voz. Desligável nas configurações da interface.
+try:
+    import espiadinha
+    if not _MODO_PUBLICO:
+        espiadinha.iniciar()
+except Exception as _e_esp:
+    print(f"[MAIN] espiadinha não subiu (a Emily funciona sem ela): {_e_esp}")
 
 # ─────────────────────────────────────────────────────────────────
 # CALLBACK DO DISCORD
@@ -1129,6 +1505,18 @@ def executar_leitura_de_tela():
 
 def rodar_emily():
     global modo_escrito_ativo
+    try:
+        import audio_preprocessing
+        audio_preprocessing.warmup_async()
+    except Exception as erro_audio:
+        print(f"[AUDIO-PRE] aquecimento indisponível: {erro_audio}")
+    # Abre a conexão com o provedor de LLM ANTES do primeiro turno: sem isto
+    # a primeira fala depois de abrir a Emily paga o handshake frio junto com
+    # a resposta (4,8–10,6s medidos contra 1,8–2,4s com o socket quente).
+    try:
+        _aquecer_provedor_llm_no_boot()
+    except Exception as erro_llm:
+        print(f"[LLM] aquecimento indisponível: {erro_llm}")
     janela.atualizar_status("aguardando")
 
     while True:
@@ -1149,10 +1537,42 @@ def rodar_emily():
             print("[IGNORADO] Emily ainda falando")
             continue
 
+        # O tabuleiro tem histórico próprio. Não registrar a mesma fala também
+        # no chat geral nem chamar a delegação de tarefas durante a partida.
+        import interface_web
+        if interface_web.encaminhar_voz_xadrez(entrada):
+            restaurar_status()
+            continue
+
         emily_ocupada.set()
+        # Toda transcrição válida vira uma mensagem normal antes de qualquer
+        # atalho, modo ou ferramenta poder encerrar o turno antecipadamente.
+        _registrar_entrada_voz_no_chat(entrada)
+        estilo_vitor.coletar(entrada, "fala", "ptt_pc")
 
         try:
             entrada_lower = entrada.lower()
+
+            # ─── TOOL CALLING (caminho novo) ───
+            # O modelo lê a conversa inteira e decide sozinho se responde ou
+            # age, sem palavra-chave e sem classificador de confiança. Isso
+            # substitui de uma vez o executar_comando por keyword, o fallback
+            # de intenção e o conversar_stream.
+            # Desligue com EMILY_TOOL_CALLING=0 pra voltar ao caminho antigo.
+            if modelo.TOOL_CALLING_ATIVO:
+                try:
+                    _executar_turno_voz_pc(entrada)
+                except Exception as e:
+                    print(f"[VOZ] Erro no turno: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
+                finally:
+                    janela.progresso_evento("fim", {})
+                    restaurar_status()
+                    emily_ocupada.clear()
+                continue
+
 
             if intencoes.pede_encerramento(entrada):
                 voz.falar("Você quer mesmo que eu feche?")
@@ -1224,8 +1644,9 @@ def rodar_emily():
 
             # ─── CONTROLE DE ESCUTA DO DISCORD ───
             if "ouve o discord" in entrada_lower:
-                discord_bot.ativar_escuta_discord()
-                resposta = "Tô de olho no Discord agora, Vitor!"
+                resposta = ("Tô de olho no Discord agora, Vitor!"
+                            if discord_bot.ativar_escuta_discord()
+                            else "Não consegui transferir a escuta do Discord para este PC agora.")
                 janela.atualizar_status("falando", resposta)
                 voz.falar(resposta)
                 restaurar_status()
@@ -1233,8 +1654,9 @@ def rodar_emily():
                 continue
 
             if "para de ouvir o discord" in entrada_lower or "para o discord" in entrada_lower:
-                discord_bot.desativar_escuta_discord()
-                resposta = "Parei de ouvir o Discord!"
+                resposta = ("Parei de ouvir o Discord!"
+                            if discord_bot.desativar_escuta_discord()
+                            else "Não consegui desligar a escuta do Discord agora.")
                 janela.atualizar_status("falando", resposta)
                 voz.falar(resposta)
                 restaurar_status()
@@ -1309,30 +1731,6 @@ def rodar_emily():
                 emily_ocupada.clear()
                 continue
             
-            if modelo.precisa_gerar_imagem(entrada):
-                janela.atualizar_status("gerando", "Gerando imagem...")
-                discord_bot.atualizar_status_discord("gerando")
-                frase_img = modelo.gerar_frase_acao("gerar_imagem", entrada) or "Um segundo, deixa eu criar essa imagem!"
-                voz.falar(frase_img)
-
-                prompt_otimizado = modelo.extrair_prompt_imagem(entrada)
-                caminho = imagem.gerar_imagem(prompt_otimizado)
-
-                if caminho:
-                    janela.add_imagem_chat_safe(caminho, "emily")
-                    janela.mostrar_opcao_salvar(caminho)
-                    resposta = "Pronto Vitor, criada! Apareceu ali no chat. Quer salvar?"
-                    modelo.registrar_acao_no_historico(f"Gerou imagem para: {entrada}", "imagem criada com sucesso")
-                else:
-                    resposta = "Eita, não consegui gerar a imagem agora. Tenta de novo!"
-
-                janela.atualizar_status("falando", resposta)
-                discord_bot.atualizar_status_discord("falando")
-                voz.falar(resposta)
-                restaurar_status()
-                emily_ocupada.clear()
-                continue
-
             # ─── MODO JOGO (monitoramento de tela pra reagir) ───
             if not modo_jogo_ativo.is_set() and any(frase in entrada_lower for frase in FRASES_ATIVAR_JOGO):
                 if modo_assistir_tela_ativo.is_set():
@@ -1378,44 +1776,6 @@ def rodar_emily():
                 emily_ocupada.clear()
                 continue
 
-            # ─── TOOL CALLING (caminho novo) ───
-            # O modelo lê a conversa inteira e decide sozinho se responde ou
-            # age, sem palavra-chave e sem classificador de confiança. Isso
-            # substitui de uma vez o executar_comando por keyword, o fallback
-            # de intenção e o conversar_stream.
-            # Desligue com EMILY_TOOL_CALLING=0 pra voltar ao caminho antigo.
-            if modelo.TOOL_CALLING_ATIVO:
-                _fila_tc = queue.Queue()
-                _buf_tc = []
-
-                def _gerar_tc():
-                    r = modelo.conversar_com_ferramentas(
-                        entrada,
-                        callback=lambda f: janela.atualizar_status("falando", f),
-                        fila_frases=_fila_tc,
-                    )
-                    if r:
-                        _buf_tc.append(r)
-
-                def _falar_tc():
-                    voz.falar_stream(
-                        _fila_tc,
-                        lambda f: janela.atualizar_status("falando", f),
-                    )
-
-                discord_bot.atualizar_status_discord("falando")
-                _t_g = threading.Thread(target=_gerar_tc, daemon=True)
-                _t_f = threading.Thread(target=_falar_tc, daemon=True)
-                _t_g.start()
-                _t_f.start()
-                _t_g.join()
-                _t_f.join()
-
-                if _buf_tc:
-                    memoria.processar_conversa_async(entrada, _buf_tc[0])
-                restaurar_status()
-                emily_ocupada.clear()
-                continue
 
             resposta_automacao = automacao.executar_comando(entrada, callback_falar=voz.falar)
             if resposta_automacao is not None:
@@ -1505,8 +1865,9 @@ def rodar_emily():
                     continue
 
                 elif acao_fb == "ouvir_discord":
-                    discord_bot.ativar_escuta_discord()
-                    resposta = "Tô de olho no Discord agora, Vitor!"
+                    resposta = ("Tô de olho no Discord agora, Vitor!"
+                                if discord_bot.ativar_escuta_discord()
+                                else "Não consegui transferir a escuta do Discord para este PC agora.")
                     janela.atualizar_status("falando", resposta)
                     voz.falar(resposta)
                     restaurar_status()
@@ -1514,8 +1875,9 @@ def rodar_emily():
                     continue
 
                 elif acao_fb == "parar_discord":
-                    discord_bot.desativar_escuta_discord()
-                    resposta = "Parei de ouvir o Discord!"
+                    resposta = ("Parei de ouvir o Discord!"
+                                if discord_bot.desativar_escuta_discord()
+                                else "Não consegui desligar a escuta do Discord agora.")
                     janela.atualizar_status("falando", resposta)
                     voz.falar(resposta)
                     restaurar_status()
@@ -1548,26 +1910,6 @@ def rodar_emily():
                         restaurar_status()
                         emily_ocupada.clear()
                         continue
-
-                elif acao_fb == "gerar_imagem":
-                    janela.atualizar_status("gerando", "Gerando imagem...")
-                    discord_bot.atualizar_status_discord("gerando")
-                    voz.falar("Um segundo, deixa eu criar essa imagem pra você!")
-                    prompt_otimizado = modelo.extrair_prompt_imagem(param_fb or entrada)
-                    import gerador_imagem as imagem_fb
-                    caminho = imagem_fb.gerar_imagem(prompt_otimizado)
-                    if caminho:
-                        janela.add_imagem_chat_safe(caminho, "emily")
-                        janela.mostrar_opcao_salvar(caminho)
-                        resposta = "Pronto Vitor, criada! Apareceu ali no chat. Quer salvar?"
-                    else:
-                        resposta = "Eita, não consegui gerar a imagem agora. Tenta de novo!"
-                    janela.atualizar_status("falando", resposta)
-                    discord_bot.atualizar_status_discord("falando")
-                    voz.falar(resposta)
-                    restaurar_status()
-                    emily_ocupada.clear()
-                    continue
 
                 elif acao_fb == "ver_tela":
                     # ── Ver/analisar a tela — NÃO usa agente_ui, só captura e descreve ──
@@ -1615,6 +1957,8 @@ def rodar_emily():
                             fila_frases_pesq,
                             instrucao_extra="NÃO faça pesquisa. Os dados já foram fornecidos acima. Apenas resuma e responda com base neles.",
                             skip_pesquisa=True,
+                            canal="voz",
+                            on_delta=lambda p: janela.progresso_evento("delta", {"texto": p}),
                         )
 
                     def _falar_pesq_voz():
@@ -1658,6 +2002,14 @@ def rodar_emily():
             discord_bot.atualizar_status_discord("ouvindo")
             time.sleep(0.2)
 
+            # ─── CONVERSA: registra a fala do Vitor e titula o chat ───
+            # Antes, só a RESPOSTA dela era gravada (_salvar_resposta_emily,
+            # no fim do turno) — então o chat de voz nascia criado pela
+            # Emily com título vazio ("Conversa nova") e SEM mensagem do
+            # usuário, e o auto-título do acrescentar() nunca disparava
+            # (ele só titula quando o papel é 'user'). Registrando a fala
+            # aqui e chamando o mesmo _titular do chat digitado, o chat de
+            # voz aparece na barra lateral com nome descritivo igualzinho.
             fila_frases = queue.Queue()
             _voz_resp_buf = []
 
@@ -1666,6 +2018,8 @@ def rodar_emily():
                     entrada,
                     lambda f: janela.atualizar_status("falando", f),
                     fila_frases,
+                    canal="voz",
+                    on_delta=lambda p: janela.progresso_evento("delta", {"texto": p}),
                 )
                 if r:
                     _voz_resp_buf.append(r)
@@ -1686,7 +2040,8 @@ def rodar_emily():
 
             # ─── MEMÓRIA: processa conversa de voz em background ───
             if _voz_resp_buf:
-                memoria.processar_conversa_async(entrada, _voz_resp_buf[0])
+                if not modelo._memoria_unificada_ativa():
+                    memoria.processar_conversa_async(entrada, _voz_resp_buf[0])
 
             restaurar_status()
 
@@ -1732,66 +2087,68 @@ def loop_visao():
             assinatura_atual = visao.assinatura_frame(frame_triagem)
             
             # Checa se a tela mudou o suficiente
-            mudou = visao.tela_mudou(assinatura_anterior, assinatura_atual)
-            
-            # Se a gente tá assistindo a tela (modo assistir), queremos logar
-            # se o frame passou no filtro ou se foi barrado
-            if modo_assistir_tela_ativo.is_set():
-                if not mudou:
-                    print("[VIDEO] frame descartado pelo pré-filtro (sem mudança suficiente)")
-                else:
-                    print("[VIDEO] frame enviado para Live API")
-            
-            if not mudou:
+            if not visao.tela_mudou(assinatura_anterior, assinatura_atual):
                 assinatura_anterior = assinatura_atual
                 time.sleep(2)
                 continue
             assinatura_anterior = assinatura_atual
 
-            # No modo Vertex Gemini com Live API, o streaming de vídeo do modo jogo
-            # acontece pela mesma sessão contínua do áudio.
-            # Se for modo_jogo ou assistir_tela, não chama o analisar_tela_jogo, apenas empurra o frame 
-            # de triagem pro websocket da Live API!
-            if modo_jogo_ativo.is_set() or modo_assistir_tela_ativo.is_set():
-                if hasattr(voz, "_enviar_frame_live"):
-                    # Empurra o frame de baixa resolução para a Live API 
-                    voz._enviar_frame_live.put(frame_triagem)
-                    # Não gera fala local aqui, a Live API vai falar sozinha caso aconteça algo
-                time.sleep(1.0) # Taxa de atualização ~1 FPS no modo jogo Live
-                continue
+            # A triagem roda no frame de baixa resolução (~307 tokens em vez
+            # de ~1229). A análise de verdade continua em resolução cheia.
+            #
+            # O modo_assistir_tela usa a triagem comum de propósito: ele é o
+            # "fica de olho na minha tela por X segundos", e o critério de
+            # relevância é o mesmo do monitoramento normal. O modo jogo tem
+            # triagem própria porque ali o que importa é evento de jogo
+            # (morte, boss, conquista), não mudança de janela.
+            if modo_jogo_ativo.is_set():
+                vale_comentar = modelo.triar_tela_jogo(frame_triagem)
             else:
                 vale_comentar = modelo.triar_tela(frame_triagem)
 
-                if not vale_comentar:
-                    time.sleep(3)
-                    continue
+            if not vale_comentar:
+                time.sleep(3)
+                continue
 
-                # Só agora paga a captura em resolução cheia
-                imagens = visao.capturar_sequencia_telas_rapida(quantidade=2, intervalo=0.3)
-                frame_atual = imagens[0] if imagens else None
-                if not frame_atual:
-                    time.sleep(2)
-                    continue
+            # Só agora paga a captura em resolução cheia
+            imagens = visao.capturar_sequencia_telas_rapida(quantidade=2, intervalo=0.3)
+            frame_atual = imagens[0] if imagens else None
+            if not frame_atual:
+                time.sleep(2)
+                continue
 
+            if modo_jogo_ativo.is_set():
+                comentario = modelo.analisar_tela_jogo(frame_atual, contexto=[ultimo_evento_jogo])
+            else:
                 comentario = modelo.analisar_sequencia_telas(imagens)
 
-                if not comentario:
-                    time.sleep(3)
-                    continue
-
-                if not emily_ocupada.is_set() and not voz.falar_ativo.is_set():
-                    emily_ocupada.set()
-                    ultimo_comentario = time.time()
-                    try:
-                        janela.atualizar_status("falando", comentario)
-                        discord_bot.atualizar_status_discord("falando")
-                        voz.falar(comentario)
-                    finally:
-                        emily_ocupada.clear()
-                        janela.atualizar_status("aguardando")
-                        discord_bot.atualizar_status_discord("aguardando")
-
+            if not comentario:
                 time.sleep(3)
+                continue
+
+            # Evita repetir o mesmo comentário de jogo em sequência
+            if modo_jogo_ativo.is_set() and comentario == ultimo_evento_jogo:
+                time.sleep(3)
+                continue
+            if modo_jogo_ativo.is_set():
+                ultimo_evento_jogo = comentario
+
+            if not emily_ocupada.is_set() and not voz.falar_ativo.is_set():
+                emily_ocupada.set()
+                ultimo_comentario = time.time()
+                try:
+                    janela.atualizar_status("falando", comentario)
+                    discord_bot.atualizar_status_discord("falando")
+                    voz.falar(comentario)
+                finally:
+                    emily_ocupada.clear()
+                    if modo_jogo_ativo.is_set() or modo_assistir_tela_ativo.is_set():
+                        janela.atualizar_status("monitorando")
+                    else:
+                        janela.atualizar_status("aguardando")
+                    discord_bot.atualizar_status_discord("aguardando")
+
+            time.sleep(3)
         except Exception as erro:
             print(f"Erro no loop de visão: {erro}")
             time.sleep(5)
@@ -1815,6 +2172,22 @@ import sys
 
 def encerrar_tudo():
     try:
+        _orquestrador_voz.parar_monitor()
+    except Exception:
+        pass
+    try:
+        if hollow_knight_ponte is not None:
+            hollow_knight_ponte.encerrar()
+    except Exception:
+        pass
+    try:
+        # Não espera novas extrações por LLM durante a saída. Eventos e lotes já
+        # estão persistidos e o worker os recupera no próximo início.
+        import memoria_unificada
+        memoria_unificada.ponte().encerrar(aguardar=False, timeout=2.0)
+    except Exception:
+        pass
+    try:
         notificacoes.parar_monitor()
     except:
         pass
@@ -1836,12 +2209,19 @@ def ao_encerrar(sig, frame):
 
 
 signal.signal(signal.SIGTERM, ao_encerrar)
-signal.signal(signal.SIGBREAK, ao_encerrar)  # Windows
+if hasattr(signal, "SIGBREAK"):  # sinal só existe no Windows
+    signal.signal(signal.SIGBREAK, ao_encerrar)  # Windows
 
 atexit.register(encerrar_tudo)
 
 if modelo.TOOL_CALLING_ATIVO:
     _registrar_ferramentas_de_modo()
+    if not _MODO_PUBLICO:
+        _orquestrador_voz.aquecer_async()
+        _orquestrador_voz.iniciar_monitor(
+            pode_falar=_pc_livre_para_aviso_delegacao,
+            falar=_falar_aviso_delegacao,
+        )
 else:
     print("[MAIN] Tool calling desligado (EMILY_TOOL_CALLING=0). "
           "Usando o caminho antigo de palavra-chave.")
@@ -1850,5 +2230,6 @@ thread_visao = threading.Thread(target=loop_visao, daemon=True)
 thread_visao.start()
 
 thread = threading.Thread(target=rodar_emily, daemon=True)
-thread.start()
+if not _MODO_PUBLICO or (os.getenv("EMILY_PUBLIC_MICROFONE") == "1" and os.getenv("GROQ_API_KEY")):
+    thread.start()
 janela.iniciar()

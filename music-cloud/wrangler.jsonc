@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "emily-music-search",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-02",
+  "workers_dev": true,
+  "vars": {
+    "FIREBASE_PROJECT_ID": "emily-assistente",
+    "ACCOUNT_MODE": "google"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "emily-music-search",
+      "database_id": "802b0f19-919c-48d1-ae2e-d1cc1b6b4223"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "17 * * * *"
+    ]
+  },
+  "observability": {
+    "enabled": false
+  }
+}

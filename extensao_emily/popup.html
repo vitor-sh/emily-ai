@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Emily — Navegador</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root { color-scheme: dark; }
+    body {
+      width: 360px;
+      min-height: 420px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+      background:
+        radial-gradient(circle at 85% -10%, rgba(160, 102, 255, .30), transparent 42%),
+        linear-gradient(160deg, #11101d 0%, #19162b 100%);
+      color: #f3efff;
+      padding: 20px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }
+
+    .header img {
+      width: 44px;
+      height: 44px;
+      border-radius: 13px;
+      box-shadow: 0 8px 22px rgba(123, 81, 190, .32);
+    }
+
+    .header h1 {
+      font-size: 17px;
+      font-weight: 700;
+      color: #f4eaff;
+      letter-spacing: -.2px;
+    }
+
+    .header p { color: #aaa2bf; font-size: 11px; margin-top: 2px; }
+
+    .status-card {
+      background: rgba(35, 30, 58, .78);
+      border-radius: 14px;
+      padding: 15px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid rgba(202, 171, 255, .14);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, .15);
+    }
+
+    .indicator {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      flex-shrink: 0;
+      transition: background 0.3s ease;
+    }
+
+    .indicator.conectado {
+      background: #55dfa0;
+      box-shadow: 0 0 10px rgba(85, 223, 160, .55);
+    }
+
+    .indicator.desconectado {
+      background: #ff6b81;
+      box-shadow: 0 0 10px rgba(255, 107, 129, .48);
+    }
+
+    .status-texto {
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    .status-label {
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .status-label.conectado { color: #73edb3; }
+    .status-label.desconectado { color: #ff8b9d; }
+
+    .status-sub {
+      color: #9a92ae;
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .section-title { color: #9e95b3; font-size: 10px; font-weight: 700; letter-spacing: .9px; text-transform: uppercase; margin: 17px 2px 8px; }
+    .page-card { background: rgba(28, 25, 46, .72); border: 1px solid rgba(255,255,255,.07); border-radius: 14px; padding: 14px; }
+    .page-head { display: flex; align-items: flex-start; gap: 10px; }
+    .favicon { width: 30px; height: 30px; border-radius: 8px; background: #2b2742; padding: 5px; flex-shrink: 0; }
+    .page-copy { min-width: 0; flex: 1; }
+    .page-title { font-size: 13px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .page-domain { font-size: 10px; color: #968da9; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+    .stat { background: rgba(125, 91, 178, .10); border-radius: 10px; padding: 9px 10px; }
+    .stat strong { display: block; font-size: 15px; color: #dfc9ff; }
+    .stat span { font-size: 9px; color: #9188a4; text-transform: uppercase; letter-spacing: .5px; }
+    .notice { margin-top: 10px; color: #aea6bd; font-size: 10px; line-height: 1.45; }
+    .notice.warning { color: #ffd28a; }
+    .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 15px; }
+    .config { margin-top: 12px; display: grid; gap: 8px; }
+    .config input { width: 100%; border: 1px solid rgba(255,255,255,.10); border-radius: 9px; background: #201c33; color: #f3efff; padding: 9px 10px; font: inherit; font-size: 10px; outline: none; }
+    .config input:focus { border-color: rgba(157,107,234,.75); }
+    button { border: 0; border-radius: 11px; padding: 10px 11px; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; transition: transform .12s ease, background .12s ease; }
+    button:active { transform: scale(.98); }
+    .primary { background: linear-gradient(135deg, #9d6bea, #7c4dcc); color: white; }
+    .secondary { background: #29243e; color: #d8cce9; border: 1px solid rgba(255,255,255,.07); }
+    button:disabled { opacity: .55; cursor: wait; }
+    .footer { margin-top: 16px; display: flex; justify-content: space-between; color: #6f687f; font-size: 9px; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icon.png" alt="Emily" />
+    <div><h1>Emily no navegador</h1><p>Leitura, ações e mídia na aba atual</p></div>
+  </div>
+
+  <div class="status-card">
+    <div class="indicator" id="indicator"></div>
+    <div class="status-texto">
+      <div class="status-label" id="status-label">Verificando conexão...</div>
+      <div class="status-sub" id="status-sub">Conectando ao serviço local</div>
+    </div>
+  </div>
+
+  <div class="section-title">Aba atual</div>
+  <div class="page-card">
+    <div class="page-head">
+      <img class="favicon" id="favicon" alt="" />
+      <div class="page-copy">
+        <div class="page-title" id="page-title">Carregando página...</div>
+        <div class="page-domain" id="page-domain">—</div>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><strong id="media-count">—</strong><span>mídias detectadas</span></div>
+      <div class="stat"><strong id="access-status">—</strong><span>acesso à página</span></div>
+    </div>
+    <div class="notice" id="notice">A Emily só age quando você pede. CAPTCHA, login e conteúdo protegido continuam sob seu controle.</div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="refresh">Analisar novamente</button>
+    <button class="secondary" id="downloads">Abrir Downloads</button>
+  </div>
+
+  <div class="section-title">Ponte local autenticada</div>
+  <div class="page-card config">
+    <input id="bridge-url" type="url" spellcheck="false" value="ws://127.0.0.1:8765" aria-label="URL da ponte local" />
+    <input id="bridge-token" type="password" autocomplete="off" placeholder="Mesmo EMILY_PONTE_TOKEN do gateway" aria-label="Token da ponte" />
+    <button class="secondary" id="save-config">Salvar e reconectar</button>
+    <div class="notice" id="config-status">A ponte aceita somente localhost/127.0.0.1.</div>
+  </div>
+
+  <div class="footer"><span id="version">Emily</span><span>Gateway permanente · loopback</span></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
