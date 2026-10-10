@@ -31,14 +31,20 @@ from flask import Flask, Response, jsonify, request, stream_with_context, send_f
 PASTA_SERVICO = Path(__file__).resolve().parent
 if str(PASTA_SERVICO) not in sys.path:
     sys.path.insert(0, str(PASTA_SERVICO))
+# O executor usa módulos da raiz do projeto (diagnostico_execucao). Sem a raiz no
+# path ANTES deste import, o PCController falhava calado e o celular via o PC
+# "offline" em toda ação (o /pc/status respondia 503), mesmo com o túnel de pé.
+if str(PASTA_SERVICO.parent) not in sys.path:
+    sys.path.append(str(PASTA_SERVICO.parent))
 
 try:
     if os.name == "nt":
         from pc_control_windows import WindowsPCController as PCController
     else:
         from pc_control import PCController
-except ImportError:  # import por caminho em testes/IDE
+except ImportError as _erro_import_executor:  # import por caminho em testes/IDE
     PCController = None  # type: ignore[assignment,misc]
+    print(f"[EMILY-GATEWAY] executor do PC não importou: {_erro_import_executor}", flush=True)
 
 try:
     from browser_bridge import BrowserBridge, guardar_download_da_extensao
