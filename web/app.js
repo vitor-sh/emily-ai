@@ -7258,6 +7258,14 @@ window.EmilyUsage = (() => {
     data.context=c;
   }
   const panel=()=>document.getElementById('painel-uso-contexto');
+  // 61800 -> "61,8k"; 1000000 -> "1M". Uma casa decimal só quando ajuda.
+  const fmtTokens=n=>{
+    n=Number(n);if(!Number.isFinite(n)||n<0)n=0;
+    const f=v=>v.toLocaleString('pt-BR',{maximumFractionDigits:v>=100?0:1});
+    if(n>=1e6)return f(n/1e6)+'M';
+    if(n>=1e3)return f(n/1e3)+'k';
+    return String(Math.round(n));
+  };
   function render() {
     const button=document.getElementById('btn-uso-contexto'), root=panel(); if(!button||!root)return;
     const context=data.context || {}, usage=data.usage || {};
@@ -7268,11 +7276,19 @@ window.EmilyUsage = (() => {
     button.style.setProperty('--contexto-progresso', String(clamped));
     button.setAttribute('aria-label',valid ? `Uso do contexto: aproximadamente ${percent.toFixed(1)}%` : 'Uso do contexto: aguardando medição');
     root.replaceChildren();
-    const title=document.createElement('h3');title.textContent='Contexto da conversa';root.appendChild(title);
-    const value=document.createElement('p');value.className='contexto-valor';
-    value.textContent=valid ? `${percent.toFixed(1)}%` : 'Aguardando medição';root.appendChild(value);
-    const details=document.createElement('small');details.textContent=context.limit ? `≈ ${Number(context.used||0).toLocaleString('pt-BR')} tokens · janela ${Number(context.limit).toLocaleString('pt-BR')} · ${context.model||''}` : '';root.appendChild(details);
-    const source=document.createElement('small');source.textContent=context.source||'';root.appendChild(source);
+    // Cartão compacto: título à esquerda, "usado / janela (%)" à direita e a barra embaixo.
+    const head=document.createElement('div');head.className='contexto-cab';
+    const title=document.createElement('span');title.className='contexto-titulo';title.textContent='Janela de contexto';head.appendChild(title);
+    const value=document.createElement('span');value.className='contexto-valor';
+    const pct=valid ? (percent>0 && percent<1 ? '<1%' : `${Math.round(percent)}%`) : '';
+    value.textContent=!valid ? 'Aguardando medição'
+      : context.limit ? `${fmtTokens(context.used)} / ${fmtTokens(context.limit)} (${pct})` : pct;
+    head.appendChild(value);root.appendChild(head);
+    const track=document.createElement('div');track.className='contexto-barra';
+    track.setAttribute('role','progressbar');track.setAttribute('aria-label','Janela de contexto');
+    track.setAttribute('aria-valuemin','0');track.setAttribute('aria-valuemax','100');
+    track.setAttribute('aria-valuenow',String(Math.round(clamped)));
+    const fill=document.createElement('i');fill.style.width=clamped+'%';track.appendChild(fill);root.appendChild(track);
     if(!root.hidden){
       const rect=button.getBoundingClientRect();
       root.style.left=`${Math.max(8,Math.min(rect.left,innerWidth-root.offsetWidth-8))}px`;

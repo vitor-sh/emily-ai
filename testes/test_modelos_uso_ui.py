@@ -24,8 +24,9 @@ def test_contexto_e_cotas_em_telas_separadas():
             assert button.locator('svg circle').count() == 2
             button.click()
             assert page.locator('#painel-uso-contexto').is_visible()
-            assert '37.5%' in page.locator('#painel-uso-contexto').inner_text()
-            assert 'tokens' not in page.locator('#painel-uso-contexto').inner_text()
+            assert '38%' in page.locator('#painel-uso-contexto').inner_text()
+            assert 'Janela de contexto' in page.locator('#painel-uso-contexto').inner_text()
+            assert page.locator('#painel-uso-contexto button').count() == 0  # sem detalhamento
             assert 'Codex' not in page.locator('#painel-uso-contexto').inner_text()
             page.keyboard.press('Escape')
             assert not page.locator('#painel-uso-contexto').is_visible()

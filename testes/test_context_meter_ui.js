@@ -12,7 +12,8 @@ const latest={conversation_key:'chat-a',model:'claude-sonnet-5',updated_at:200,p
 w.EmilyUsage.setContext(latest);
 w.EmilyUsage.setContext({...latest,updated_at:100,percent:4});
 assert.match(w.document.querySelector('.contexto-valor').textContent,/21/);
-assert.match(w.document.querySelector('small').textContent,/1.000.000/);
+assert.match(w.document.querySelector('.contexto-valor').textContent,/210k \/ 1M \(21%\)/);
+assert.equal(w.document.querySelector('.contexto-barra i').style.width,'21%');
 async function test(){
  w.EmilyUsage.refresh();
  resolve({context:{...latest,updated_at:100,percent:4},usage:{}});

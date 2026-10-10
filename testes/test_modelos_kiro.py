@@ -206,3 +206,26 @@ def test_seletor_do_chat_ordena_do_mais_novo_para_o_mais_antigo():
     assert json.loads(saida) == [
         "kr/claude-opus-5.5", "kr/claude-sonnet-5.5", "kr/claude-opus-5", "kr/claude-sonnet-5",
         "kr/claude-opus-4.8", "kr/claude-sonnet-4.6", "kr/claude-sonnet-4.5", "kr/claude-haiku-4.5"]
+
+
+def test_painel_de_contexto_formata_tokens_e_barra():
+    import json
+    import shutil
+    import subprocess
+    if not shutil.which("node"):
+        return
+    texto = (RAIZ / "web" / "app.js").read_text(encoding="utf-8")
+    ini = texto.index("const fmtTokens=n=>{")
+    fim = texto.index("};\n", ini) + 3
+    casos = [0, 950, 4000, 61800, 210000, 1000000, 1400000, 200000]
+    script = (texto[ini:fim] + f"console.log(JSON.stringify({json.dumps(casos)}.map(fmtTokens)));")
+    saida = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30).stdout
+    assert json.loads(saida) == ["0", "950", "4k", "61,8k", "210k", "1M", "1,4M", "200k"]
+
+
+def test_painel_de_contexto_nao_tem_mais_detalhamento_nem_seta():
+    texto = (RAIZ / "web" / "app.js").read_text(encoding="utf-8")
+    bloco = texto[texto.index("window.EmilyUsage = (() => {"):]
+    for resto in ("Contexto da conversa", "Ver detalhamento", "context.source", "≈ "):
+        assert resto not in bloco, resto
+    assert "Janela de contexto" in bloco and "contexto-barra" in bloco
