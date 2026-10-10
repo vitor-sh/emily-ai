@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, '.')
 import platform_compat
 import compat_imports
-import automacao_linux
+import terminal
 print('✓ Módulos de compatibilidade OK')
 " || {
     echo "❌ Erro ao carregar módulos de compatibilidade"

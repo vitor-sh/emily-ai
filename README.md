@@ -130,15 +130,19 @@ minha-ia/
 ├── main.py               # Orquestra todos os módulos, threads e modos
 ├── llm.py                # Camada ÚNICA de acesso a LLM: provedores, rotas, rate limit
 ├── modelo.py             # Personalidade, visão, decisões — adaptador sobre o llm.py
+├── fala_stream.py        # Fatia a resposta em frases faladas durante o streaming
+├── frases_acao.py        # Frases curtas ditas enquanto uma ação executa
 ├── ferramentas.py        # Catálogo de ferramentas que o modelo pode chamar
+├── busca_pc.py           # Varredura dos discos da ferramenta procurar_no_pc
 ├── laco_ferramentas.py   # Motor que executa as ferramentas pedidas pelo modelo
 ├── interface_web.py      # A interface: janela nativa hospedando HTML/CSS/JS
 ├── web/                  # A tela em si (index.html, estilo.css, app.js)
 ├── interface.py          # Interface ANTIGA em PyQt6, volta com EMILY_UI=qt
 ├── voz.py                # TTS (Fish Audio), transcrição (Groq), captura PTT
 ├── automacao.py          # Interpretação e execução de comandos no PC
+├── busca_jogos.py        # Normalização de nomes e busca de jogos (Steam, Epic, GOG)
+├── desfazer.py           # Desfazer operações de arquivo e envio à lixeira
 ├── visao.py              # Captura de tela, grade de precisão e troca de monitor
-├── interface.py          # Janela gráfica, chat, controles
 ├── memoria.py            # Persistência de memória com deduplicação semântica
 ├── pesquisa.py           # Pesquisa real via Brave Search API + scraping
 ├── discord_bot.py        # Integração completa com Discord (texto + voz)
@@ -150,6 +154,7 @@ minha-ia/
 ├── build_emily.py        # Script de build para gerar o executável (.exe)
 ├── diagnostico_whatsapp.py # Ferramenta de diagnóstico do monitor WhatsApp
 ├── testes/               # Suíte de testes de propriedade (pytest + hypothesis)
+├── testes_manuais/       # Scripts de verificação manual (_teste_*.py)
 ├── static/
 │   └── index.html        # Interface web PWA para controle pelo celular
 └── img/                  # GIFs do sprite (não incluídos no repositório)

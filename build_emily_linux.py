@@ -310,6 +310,14 @@ with open(os.path.join(dist_emily, "_internal", "_atualizacao_base.json"),
 print(f"[BUILD] Manifesto do embutido gravado "
       f"({len(_manifesto_build)} módulos) -> _internal/_atualizacao_base.json")
 
+# O PyInstaller copia os dados com o modo padrão (644/755), então o .env e o
+# config.yaml do pacote ficavam legíveis por qualquer usuário do sistema
+# mesmo com o original em 600. Chave de API só pro dono.
+for _segredo in (".env", "config.yaml"):
+    _caminho_segredo = os.path.join(dist_emily, "_internal", _segredo)
+    if os.path.isfile(_caminho_segredo):
+        os.chmod(_caminho_segredo, 0o600)
+
 instalador = """#!/usr/bin/env bash
 # Instala a Emily no menu de aplicativos E no início da sessão (escondida na
 # bandeja). Rode de dentro da pasta onde o Emily está:  ./instalar_atalho.sh

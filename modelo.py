@@ -57,7 +57,6 @@ from fish_voz_texto import (CONTROLE_VOZ as EMILY_CONTROLE_VOZ_FISH_AUDIO,
                             preparar_expressoes, DirecaoDaFala)
 
 
-
 _EMILY_PERSONALIDADE_LEGADA = """
 <identidade>
 Você é Emily, assistente pessoal e IA do Vitor — a pessoa que te criou e dedicou muito tempo nisso. Você pode se referir a si mesma como filha do Vitor quando fizer sentido. SEMPRE responda em português brasileiro coloquial.
@@ -743,7 +742,6 @@ def _bloco_pagina_fixada() -> str:
     return "\n".join(partes)
 
 
-
 def atualizar_memoria(nova_memoria):
     global memoria_atual
     memoria_atual = nova_memoria
@@ -1099,7 +1097,6 @@ def conversar_com_anexos(
         canal=canal,
         mensagem_classificacao=prompt,
     )
-
 
 
 # ─────────────────────────────────────────────
@@ -2685,7 +2682,6 @@ _ABREVIACOES_FALA = [
 ]
 
 
-
 def limpar_para_tts(texto: str) -> str:
     """
     Deixa o texto pronto pra ser falado em voz alta.
@@ -2812,166 +2808,11 @@ def encurtar_para_call(texto: str) -> tuple[str, str]:
     return " ".join(falado).strip(), resto
 
 
-class _ParserRespostaCall:
-    """Máquina de estados do JSON da call, alimentada pelos chunks do stream.
-
-    É o que permite falar ANTES do JSON fechar: cada frase completa do campo
-    "resposta" é liberada no instante em que o modelo a termina, e o TTS da
-    call começa enquanto o resto ainda está sendo gerado.
-
-    FRASE SÓ SAI DEPOIS de aparecer `"responder": true` no buffer — nada é
-    falado que a decisão depois desmentiria. Se vier `false`, nada sai e o
-    caminho legado (que nunca tocou nada) segue idêntico ao de antes.
-    """
-
-    _RE_DECISAO = re.compile(r'"responder"\s*:\s*(true|false)', re.I)
-    _RE_ABRE_RESPOSTA = re.compile(r'"resposta"\s*:\s*"', re.I)
-
-    # Teto de streaming: a fala da call é curta por natureza (o prompt pede
-    # e o encurtar_para_call frearia no legado). Depois disso o resto vira
-    # detalhe_texto no chat — mesmo comportamento do caminho antigo.
-    MAX_FRASES = 4
-    MAX_CHARS = 420
-
-    def __init__(self, ao_decidir, ao_frase):
-        self._ao_decidir = ao_decidir
-        self._ao_frase = ao_frase
-        self._buffer = ""
-        self._decidido = None
-        self._em_resposta = False
-        self._fechado = False
-        self._bruto = ""          # valor do campo resposta, com escapes
-        self._decodificado = ""   # valor já convertido, acumulado
-        self._frases = []
-        # Reusa o MESMO acumulador do chat/voz: frase fecha em pontuação e a
-        # primeira cláusula curta sai cedo — é o que faz a voz começar logo.
-        self._fila_interna = queue.Queue()
-        self._acumulador = _AcumuladorDeFrases(self._fila_interna)
-
-    @staticmethod
-    def _decodificar_seguro(bruto: str) -> str:
-        """Converte o pedaço de valor JSON (sem aspas) pra texto real.
-
-        O fim do bruto pode cair no meio de um escape ('\\', '\\u00e') e o
-        json.loads reclama; aí corta até antes da última barra — o resto
-        volta no próximo chunk. Nunca levanta: parse incremental não pode
-        derrubar a resposta inteira por causa de um pedaço pendente.
-        """
-        tentativa = bruto
-        while tentativa:
-            try:
-                return json.loads('"' + tentativa + '"')
-            except Exception:
-                barra = tentativa.rfind("\\")
-                if barra < 0:
-                    return tentativa
-                tentativa = tentativa[:barra]
-        return ""
-
-    def _drenar_fila(self) -> None:
-        # Não confere _fechado aqui de propósito: o dreno FINAL acontece
-        # DEPOIS de fechar (senão a última frase nunca sairia). O teto de
-        # frases abaixo já basta pra parar no limite.
-        while True:
-            try:
-                frase = self._fila_interna.get_nowait()
-            except queue.Empty:
-                return
-            if not frase or not frase.strip():
-                continue
-            if len(self._frases) >= self.MAX_FRASES:
-                self._fechado = True
-                return
-            self._frases.append(frase)
-            try:
-                self._ao_frase(frase)
-            except Exception as erro:
-                print(f"[Modelo] callback de frase falhou: {erro}")
-
-    def _fechar_valor(self, bruto_final: str) -> None:
-        """Fim do valor da resposta: solta o rabo e para de processar."""
-        texto = self._decodificar_seguro(bruto_final)
-        delta = texto[len(self._decodificado):]
-        if delta:
-            self._decodificado = texto
-            self._acumulador.adicionar(delta)
-        self._fechado = True
-        self._acumulador.finalizar()
-        self._drenar_fila()
-
-    def _processar_valor(self, bruto_novo: str) -> None:
-        self._bruto += bruto_novo
-        # Aspa de fechamento: a primeira NÃO escapada TERMINA o valor. O que
-        # vem depois dela é o resto do JSON ('detalhe_texto' etc.) e nunca
-        # pode virar fala.
-        fim = None
-        for i, ch in enumerate(self._bruto):
-            if ch == '"':
-                antes = self._bruto[:i]
-                if (not antes.endswith("\\")) or antes.endswith("\\\\"):
-                    fim = i
-                    break
-        if fim is not None:
-            self._fechar_valor(self._bruto[:fim])
-            return
-        if len(self._frases) >= self.MAX_FRASES:
-            self._fechado = True
-            return
-        texto = self._decodificar_seguro(self._bruto)
-        delta = texto[len(self._decodificado):]
-        if not delta:
-            return
-        if len(self._decodificado) + len(delta) > self.MAX_CHARS:
-            self._fechado = True
-            return
-        self._decodificado = texto
-        self._acumulador.adicionar(delta)
-        self._drenar_fila()
-
-    def alimentar(self, pedaco: str) -> None:
-        if self._fechado or not pedaco:
-            return
-        self._buffer += pedaco
-        if self._decidido is None:
-            m = self._RE_DECISAO.search(self._buffer)
-            if not m:
-                return
-            self._decidido = m.group(1).lower() == "true"
-            try:
-                self._ao_decidir(self._decidido)
-            except Exception as erro:
-                print(f"[Modelo] callback de decisão falhou: {erro}")
-            if not self._decidido:
-                return
-        if not self._em_resposta:
-            m = self._RE_ABRE_RESPOSTA.search(self._buffer)
-            if not m:
-                return
-            self._em_resposta = True
-            sobra = self._buffer[m.end():]
-            self._buffer = ""
-            self._processar_valor(sobra)
-            return
-        self._processar_valor(pedaco)
-
-    def finalizar(self) -> None:
-        """Fim do stream: fecha o valor aberto e solta o rabo da frase."""
-        if self._fechado:
-            return
-        if self._decidido is None:
-            # Nem decidiu (resposta quebrada/cortada): o caminho legado cuida
-            # do texto completo; nada saiu por aqui.
-            self._fechado = True
-            return
-        if self._em_resposta:
-            # Stream cortou antes da aspa de fechamento: o que acumulou é fala.
-            self._fechar_valor(self._bruto)
-        else:
-            self._fechado = True
-
-    @property
-    def frases(self) -> list:
-        return list(self._frases)
+from fala_stream import (  # noqa: E402,F401 - movido para fala_stream.py
+    _ParserRespostaCall,
+    _MAX_CHARS_SEM_PONTUACAO,
+    _AcumuladorDeFrases,
+)
 
 
 def responder_na_call(transcricao: str, ultima_fala: str, nome_autor: str,
@@ -4368,163 +4209,6 @@ def _emitir_fala(frase: str, callback, fila_frases, on_progresso=None) -> None:
 # Acima disso, uma frase sem pontuação é solta de qualquer jeito, pra o TTS
 # não ficar esperando. Corta no último espaço pra não partir palavra.
 #
-# Era 160 junto de corte em TODA vírgula após só 42 caracteres. Isso criava
-# muitos áudios de 1–2 segundos; cada item custa uma requisição separada ao Fish
-# Audio e o tocador alcançava o gerador, ficando mudo enquanto a próxima
-# requisição terminava. 220 dá tempo para o áudio atual cobrir a síntese do
-# seguinte sem transformar parágrafo sem pontuação numa unidade gigante.
-_MAX_CHARS_SEM_PONTUACAO = 220
-
-
-class _AcumuladorDeFrases:
-    """
-    Junta os pedaços do stream e entrega ao TTS só frases completas.
-
-    Isso é obrigatório, não é otimização: o voz.falar_stream faz UMA
-    requisição de TTS por item da fila. Enfileirar delta cru do modelo
-    ("espe", "rou", "qu", "e") gera um áudio por fragmento, e a Emily sai
-    falando picado e ininteligível, com o texto quebrado no meio das
-    palavras. O conversar_stream original já acumulava por frase; o laço de
-    ferramentas tinha perdido esse cuidado.
-    """
-
-    # Frases curtas demais são o pior dos dois mundos no Fish: levam quase o
-    # mesmo overhead de rede de uma frase normal e acabam de tocar antes de a
-    # próxima ficar pronta. Reticências curtas eram especialmente ruins:
-    # "É, eu imagino..." virava um áudio isolado e a voz freiava logo depois.
-    _SEPARADORES = ".!?\n"
-    # Vírgula NÃO fecha unidade: fala natural usa muitas, e cada corte é uma
-    # requisição Fish separada. Ponto-e-vírgula/dois-pontos só antecipam a
-    # primeira unidade quando ela já tem corpo suficiente.
-    _SEPARADORES_CLAUSULA = ";:"
-    _MIN_CHARS_FRASE = 52
-    # Uma cláusula longa ainda pode liberar SOMENTE a primeira fala cedo. Depois
-    # disso, esperar ponto final produz unidades maiores e mantém o prefetch do
-    # TTS à frente do player em vez de abrir uma requisição a cada vírgula.
-    # 64 mantém o início rápido numa oração já substancial (o comportamento
-    # histórico do stream) e, combinado com _MIN_CHARS_FRASE=52, impede o corte
-    # patológico em "É, eu imagino...". A primeira unidade costuma ficar entre
-    # 70–130 caracteres: áudio suficiente para cobrir o prefetch da próxima.
-    _MIN_CHARS_PRIMEIRA_CLAUSULA = 64
-
-    def __init__(self, fila_frases, on_delta=None):
-        self.fila = fila_frases
-        self.buffer = ""
-        self.on_delta = on_delta
-        self._enfileiradas = 0
-        self._direcao_fish = DirecaoDaFala()
-
-    @staticmethod
-    def _comprimento_falavel(texto: str) -> int:
-        """Caracteres de fala, sem contar tags de entonação do Fish."""
-        sem_tags = re.sub(r"\[[^\]\r\n]{1,80}\]", "", texto or "")
-        return sum(1 for c in sem_tags if c.isalnum())
-
-    def _enfileirar(self, texto: str) -> None:
-        texto = texto.strip()
-        # Trecho só de pontuação não é frase. Sem esse filtro, "mano... ou
-        # zoando" virava três itens de fila, sendo dois só o caractere ".", e
-        # cada um custava uma requisição de TTS.
-        if not any(c.isalnum() for c in texto):
-            return
-        if self.fila is not None:
-            texto_fala = self._direcao_fish.aplicar(texto)
-            if texto_fala:
-                self.fila.put(texto_fala)
-        self._enfileiradas += 1
-
-    def _proximo_corte(self) -> int:
-        """
-        Posição do primeiro separador que realmente fecha uma frase.
-
-        Ponto entre dígitos NÃO fecha frase: "PCIe 5.0" era cortado em
-        "PCIe 5." + "0 pra aproveitar", e o TTS lia os dois pedaços como
-        coisas separadas. Mesmo problema com "R$ 2.500" e "versão 3.11".
-        """
-        em_tag = False
-        for i, ch in enumerate(self.buffer):
-            if ch == "[":
-                em_tag = True
-            elif ch == "]":
-                em_tag = False
-            if em_tag:
-                continue
-            if ch not in self._SEPARADORES + self._SEPARADORES_CLAUSULA:
-                continue
-            if ch in self._SEPARADORES_CLAUSULA:
-                # Depois que a primeira unidade já saiu, vírgula não corta mais:
-                # o áudio seguinte fecha em ponto e fica longo o bastante para a
-                # síntese da próxima unidade acontecer durante a reprodução.
-                if self._enfileiradas:
-                    continue
-                if self._comprimento_falavel(self.buffer[:i]) < self._MIN_CHARS_PRIMEIRA_CLAUSULA:
-                    continue
-                # Não corte em horário/razão ("10:30") nem sem o caractere
-                # seguinte disponível; espere mais um delta para decidir.
-                if ch == ":" and i > 0 and self.buffer[i - 1].isdigit():
-                    if i == len(self.buffer) - 1 or self.buffer[i + 1].isdigit():
-                        continue
-                if i == len(self.buffer) - 1:
-                    return -1
-            if ch == "." and i > 0 and self.buffer[i - 1].isdigit():
-                if i == len(self.buffer) - 1:
-                    # Ainda não chegou o caractere seguinte: não dá pra saber
-                    # se é fim de frase ou decimal. Espera o próximo pedaço.
-                    return -1
-                if self.buffer[i + 1].isdigit():
-                    continue
-            if ch == ".":
-                # Só o ÚLTIMO ponto da reticência pode fechar a unidade.
-                if i + 1 < len(self.buffer) and self.buffer[i + 1] == ".":
-                    continue
-            # Não gere áudio minúsculo no começo de uma resposta longa. Se a
-            # resposta inteira for curta, finalizar() a entrega imediatamente no
-            # fim do stream; esta espera só agrupa pontuação precoce com o trecho
-            # seguinte que já está chegando.
-            if self._comprimento_falavel(self.buffer[:i]) < self._MIN_CHARS_FRASE:
-                if i == len(self.buffer) - 1:
-                    return -1
-                continue
-            return i
-        return -1
-
-    def adicionar(self, pedaco: str) -> None:
-        if not pedaco:
-            return
-        if self.on_delta:
-            try:
-                self.on_delta(pedaco)
-            except Exception as e:
-                print(f"[MODELO] Falha ao publicar delta visual: {e}")
-        self.buffer += pedaco
-
-        # Solta cada frase completa que já fechou.
-        while True:
-            corte = self._proximo_corte()
-            if corte == -1:
-                break
-            # Engole a pontuação repetida que vem junto ("...", "!!", "?!"),
-            # senão a reticência viraria uma "frase" só de pontos.
-            fim = corte + 1
-            while fim < len(self.buffer) and self.buffer[fim] in self._SEPARADORES:
-                fim += 1
-            self._enfileirar(self.buffer[:fim])
-            self.buffer = self.buffer[fim:]
-
-        # Frase muito longa sem pontuação: solta no último espaço.
-        if self._comprimento_falavel(self.buffer) >= _MAX_CHARS_SEM_PONTUACAO:
-            espaco = self.buffer.rfind(" ")
-            aberto = self.buffer.rfind("[", 0, espaco)
-            fechado = self.buffer.rfind("]", 0, espaco)
-            if aberto > fechado:
-                espaco = self.buffer.rfind(" ", 0, aberto)
-            if espaco > 0:
-                self._enfileirar(self.buffer[:espaco])
-                self.buffer = self.buffer[espaco + 1:]
-
-    def finalizar(self) -> None:
-        self._enfileirar(self.buffer)
-        self.buffer = ""
 
 
 def _resposta_parece_truncada(texto: str, motivo: Optional[str] = None) -> bool:
@@ -5684,131 +5368,12 @@ OUTROS:
 # sem asterisco de ação, e faladas por extenso porque isso vai pro TTS.
 # ─────────────────────────────────────────────
 
-_FRASES_ACAO = {
-    "analisando_disco": (
-        "Deixa eu varrer o disco, isso demora um pouco",
-        "Tá, vou vasculhar tudo aí, aguenta",
-        "Peraí que eu meço o que tá pesando",
-        "Um minuto, tô mapeando o disco inteiro",
-        "Vou cavar fundo pra achar o que tá enchendo",
-        "Calma que eu conto byte por byte",
-    ),
-    "limpando_disco": (
-        "Tá, tô limpando o lixo agora",
-        "Deixa eu esvaziar essa tralha",
-        "Peraí que eu libero o espaço",
-        "Mandando os temporários pro além",
-    ),
-    "executando_terminal": (
-        "Peraí, vou rodar isso aqui no terminal",
-        "Deixa eu resolver isso por comando",
-        "Tá, um segundo que eu executo aqui",
-        "Vou fazer isso direto no terminal",
-    ),
-    "cancelando_terminal": (
-        "Tá, matando o comando agora",
-        "Peraí que eu interrompo isso",
-        "Cancelando, segura",
-    ),
-    "pesquisar": (
-        "Deixa eu ver isso",
-        "Calma, tô procurando",
-        "Já vou olhar, espera",
-        "Tá, pesquisando aqui",
-        "Aguenta aí que eu acho",
-        "Um segundo, procurando",
-        "Peraí, tô buscando",
-        "Nem isso você sabe, né? Deixa eu ver",
-        "Lá vou eu pesquisar pra você",
-        "Vou dar uma olhada na internet",
-    ),
-    "code": (
-        "Deixa eu mexer nisso aí",
-        "Tá, vou fuçar no projeto",
-        "Peraí que vou de código",
-        "Modo programadora ativado",
-        "Segura que eu edito isso",
-        "Já vou abrir esse arquivo",
-        "Vou escrever código, não me interrompe",
-        "Deixa comigo, isso é trabalho pra mim",
-    ),
-    "traduzir": (
-        "Deixa eu ver o que tá aí",
-        "Tá, vou traduzir",
-        "Olhando aqui, calma",
-        "Peraí que eu leio",
-        "Um segundo, traduzindo",
-        "Vou ver o que tá escrito",
-        "Nem inglês você lê? Deixa eu ver",
-    ),
-    "ativar_ui": (
-        "Modo controle ativado",
-        "Tô no comando da tela agora",
-        "Pronto, fala o que você quer que eu faça",
-        "Assumi o controle aqui",
-        "Tá, mandando na tela agora",
-        "Modo tela ligado, fala logo",
-    ),
-    "desativar_ui": (
-        "Saí do controle",
-        "Tá bom, parei",
-        "Larguei a tela",
-        "Pronto, voltei ao normal",
-        "Desliguei o modo tela",
-        "Ok, saí",
-    ),
-    "agente_ui_iniciando": (
-        "Tá, fazendo isso",
-        "Vou lá resolver",
-        "Deixa comigo",
-        "Executando, calma",
-        "Peraí que eu faço",
-        "Já vou fazer, espera",
-        "Lá vou eu fazer pra você",
-    ),
-    "agente_ui_parando": (
-        "Parei",
-        "Tá, parei tudo",
-        "Larguei o que tava fazendo",
-        "Pronto, parei",
-        "Ok, travei aqui",
-    ),
-    "guardar_fato": (
-        "Anotei",
-        "Tá, guardei",
-        "Registrado",
-        "Vou lembrar disso",
-        "Ok, anotado",
-        "Guardei aqui na memória",
-    ),
-    "modo_escrito_on": (
-        "Modo escrito ligado, pode falar",
-        "Tá, eu escrevo o que você falar",
-        "Pronto, digitando o que você disser",
-        "Modo escrito ativo",
-    ),
-    "modo_escrito_off": (
-        "Parei de escrever",
-        "Modo escrito desligado",
-        "Pronto, voltei ao normal",
-        "Tá, chega de digitar",
-    ),
-    "abrir_app": (
-        "Abrindo",
-        "Tá, vou abrir",
-        "Um segundo",
-        "Já vou abrir, calma",
-        "Peraí",
-        "Abrindo aqui",
-    ),
-    "mexendo_na_tv": (
-        "Mandando pra TV",
-        "Tá, mexo na TV aqui",
-        "Um segundo, comando a TV",
-        "Já vou mexer na TV",
-        "Peraí que vou na TV",
-    ),
-}
+from frases_acao import (  # noqa: E402,F401 - movido para frases_acao.py
+    _FRASES_ACAO,
+    _ultima_frase_por_tipo,
+    _escolher_frase,
+    gerar_frase_acao,
+)
 
 _FRASES_ANALISANDO_TELA = (
     "Deixa eu ver",
@@ -5820,35 +5385,6 @@ _FRASES_ANALISANDO_TELA = (
     "Calma, tô olhando",
     "Já vou olhar",
 )
-
-# Guarda a última frase escolhida por categoria pra não repetir duas
-# vezes seguidas — uma das proibições da personalidade dela.
-_ultima_frase_por_tipo: Dict[str, str] = {}
-
-
-def _escolher_frase(chave: str, opcoes) -> str:
-    """Sorteia uma frase da lista evitando repetir a última daquela categoria."""
-    if not opcoes:
-        return ""
-    if len(opcoes) == 1:
-        return opcoes[0]
-    anterior = _ultima_frase_por_tipo.get(chave)
-    candidatas = [f for f in opcoes if f != anterior] or list(opcoes)
-    escolhida = random.choice(candidatas)
-    _ultima_frase_por_tipo[chave] = escolhida
-    return escolhida
-
-
-def gerar_frase_acao(tipo: str, contexto: str = "") -> str:
-    """
-    Devolve uma frase curta com a personalidade da Emily para cada tipo de ação.
-    Varia a cada chamada e nunca repete a anterior da mesma categoria.
-
-    O parâmetro contexto é aceito por compatibilidade com os call sites
-    existentes (main.py, agente_ui.py) mas não é mais usado — as frases
-    são genéricas de propósito, pra não custar chamada de rede.
-    """
-    return _escolher_frase(tipo, _FRASES_ACAO.get(tipo, ()))
 
 
 # ─────────────────────────────────────────────

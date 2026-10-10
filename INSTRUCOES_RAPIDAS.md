@@ -1,3 +1,8 @@
+> **Documento histórico (01/09/2026).** Descreve a primeira migração para o Linux.
+> Vários arquivos citados aqui (`automacao_linux.py`, `terminal_linux.py`,
+> `automacao_compat.py`, `main_bootstrap.py`) não existem mais. O guia atual é o
+> [LINUX_README.md](LINUX_README.md).
+
 # Instruções Rápidas - Inicializar Emily no Linux
 
 ## 1. Instalar Dependências do Sistema
