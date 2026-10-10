@@ -27,7 +27,7 @@ def run():
         timeout=httpx.Timeout(45,connect=10),headers={'Authorization':'Bearer '+key}) as client:
         for case in bench.CASES:
             body=bench.payload(case,'low');body.pop('provider');body.pop('reasoning')
-            body['model']='cx/gpt-6-luna';body['reasoning_effort']='low'
+            body['model']='kr/claude-haiku-4.5';body['reasoning_effort']='low'
             result=bench.measure(client,body)
             row={'case':case[0],**result}
             rows.append(row)

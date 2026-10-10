@@ -30,9 +30,12 @@ import politica_agente
 
 ESTADOS_FINAIS = frozenset({"completed", "failed"})
 
-MODELO_LUNA = os.getenv("EMILY_VOZ_MODELO_RAPIDO", "cx/gpt-5.6-luna").strip()
-MODELO_FORTE = os.getenv("EMILY_VOZ_MODELO_FORTE", "cx/gpt-5.6-terra").strip()
-PROVEDOR_VOZ = os.getenv("EMILY_VOZ_PROVEDOR", "openai").strip().lower()
+# Medido em 10/10/2026 no Kiro (Oracle) com contexto real (~30 mil caracteres
+# de system prompt + ferramentas): Haiku 4.5 1,37 s e Opus 4.8 1,42 s até o
+# primeiro texto. O nome MODELO_LUNA ficou do GPT-6 Luna, que fazia este papel.
+MODELO_LUNA = os.getenv("EMILY_VOZ_MODELO_RAPIDO", "kr/claude-haiku-4.5").strip()
+MODELO_FORTE = os.getenv("EMILY_VOZ_MODELO_FORTE", "kr/claude-opus-4.8").strip()
+PROVEDOR_VOZ = os.getenv("EMILY_VOZ_PROVEDOR", "omniroute").strip().lower()
 
 MAX_HISTORICO = max(2, int(os.getenv("EMILY_VOZ_MAX_HISTORICO", "8")))
 MAX_VOLTAS_LUNA = max(2, int(os.getenv("EMILY_VOZ_MAX_VOLTAS_LUNA", "12")))
@@ -827,7 +830,7 @@ class OrquestradorVoz:
         self._monitor_thread.start()
 
     def aquecer_async(self) -> None:
-        """Aquece pool e backend do Luna sem atrasar o boot da interface."""
+        """Aquece pool e backend do modelo rápido sem atrasar o boot da interface."""
         def rodar() -> None:
             try:
                 llm.chamar(
@@ -840,11 +843,11 @@ class OrquestradorVoz:
                     max_tokens=1,
                 )
                 print(
-                    f"[VOZ-RAPIDA] Luna aquecido: "
+                    f"[VOZ-RAPIDA] modelo rápido aquecido: "
                     f"{self.provedor_luna}/{self.modelo_luna}"
                 )
             except Exception as erro:  # aquecimento é só otimização
-                print(f"[VOZ-RAPIDA] aquecimento do Luna falhou: {erro}")
+                print(f"[VOZ-RAPIDA] aquecimento do modelo rápido falhou: {erro}")
 
         threading.Thread(
             target=rodar, name="emily-aquecimento-luna", daemon=True).start()

@@ -5410,7 +5410,7 @@ def _xadrez_abrir():
         return ResultadoFerramenta(resultado.get("erro", "Não consegui abrir o tabuleiro."), ok=False)
     return ResultadoFerramenta("Tabuleiro aberto dentro da Emily. A partida anterior, se existir, foi preservada. "
         "O jogador pode escolher a cor e começar uma nova partida pelos controles. "
-        "O Sol escolhe os lances e também conversa no painel da partida, em chamadas independentes.", ok=True, mudou=True)
+        "A Emily escolhe os lances e também conversa no painel da partida, em chamadas independentes.", ok=True, mudou=True)
 
 registrar(Ferramenta(
     nome="xadrez_abrir", grupo="geral", aviso="abrir_app",

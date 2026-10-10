@@ -122,7 +122,10 @@ def test_property5_raciocinio_e_valor_conhecido(tabela_nome):
 
 
 @pytest.mark.parametrize("tabela_nome,provedor_esperado", sorted(
-    (nome, nome) for nome in llm.TABELAS
+    # A tabela padrão ("claude") serve o provedor das rotas internas
+    # (PROVEDOR_ROTAS: o Kiro desde 10/10/2026); as demais, o próprio nome.
+    (nome, llm.PROVEDOR_ROTAS if nome == llm.TABELA_PADRAO else nome)
+    for nome in llm.TABELAS
 ))
 def test_property5_tabela_toda_no_proprio_provedor(tabela_nome, provedor_esperado):
     """
@@ -325,6 +328,7 @@ def test_property7_modelo_do_provedor_atual_vale_pra_tabela_toda():
     with recarregado_com({
         # Valor vazio impede load_dotenv() de repor o valor real do .env e
         # exercita deliberadamente a variável legada abaixo.
+        "EMILY_ROTAS_PROVEDOR": "claude",
         "EMILY_PROVEDOR_CLAUDE_MODELO": "",
         "EMILY_CLAUDE_MODELO": marcador,
     }) as novo:
@@ -354,6 +358,7 @@ def test_property7_qualquer_nome_de_modelo_e_aceito(modelo):
     esse caso já aconteceu neste projeto.
     """
     with recarregado_com({
+        "EMILY_ROTAS_PROVEDOR": "claude",
         "EMILY_PROVEDOR_CLAUDE_MODELO": "",
         "EMILY_CLAUDE_MODELO": modelo,
     }) as novo:
@@ -362,6 +367,7 @@ def test_property7_qualquer_nome_de_modelo_e_aceito(modelo):
 
 def test_property7_sem_variavel_usa_o_default_documentado():
     with recarregado_com({
+        "EMILY_ROTAS_PROVEDOR": "claude",
         "EMILY_PROVEDOR_CLAUDE_MODELO": "",
         "EMILY_CLAUDE_MODELO": "",
     }) as novo:
@@ -370,9 +376,8 @@ def test_property7_sem_variavel_usa_o_default_documentado():
 
 def test_property7_plano_b_por_uma_linha_de_env():
     """
-    Uma variável troca o cérebro. O plano B agora é o OMNIROUTE LOCAL: é o
-    único dos três que não depende de internet nem de chave nova, então é
-    ele que segura a Emily de pé quando o provedor externo cai.
+    Uma variável troca o cérebro. Desde 10/10/2026 o OmniRoute (Kiro na
+    Oracle) é o provedor principal, e o Claude externo virou a reserva.
     """
     with recarregado_com({"EMILY_PROVEDOR_LLM": "omniroute"}) as novo:
         assert novo.TABELA_ATIVA == "omniroute"
@@ -514,12 +519,22 @@ def test_property13_provedores_e_config_alinhados():
 
 
 def test_property13_listar_provedores_tem_um_item_por_provedor():
-    """listar_provedores() devolve exatamente um item por provedor registrado."""
+    """Um item por provedor registrado, menos os ocultos e os sem modelo.
+
+    Ocultos (EMILY_PROVEDOR_<X>_OCULTO=1) e seções sem modelos ficam fora do
+    seletor de propósito, mas continuam em PROVEDORES (servem de fallback).
+    """
     saida = llm.listar_provedores()
     ids = {p["id"] for p in saida}
-    assert ids == set(llm.PROVEDORES), (
-        f"listar_provedores()={ids} != PROVEDORES={set(llm.PROVEDORES)}"
+    esperados = {
+        pid for pid in llm.PROVEDORES
+        if not (llm.PROVEDORES_CONFIG.get(pid) and (
+            llm.PROVEDORES_CONFIG[pid].oculto or not llm._modelos_provedor(pid)))
+    }
+    assert ids == esperados, (
+        f"listar_provedores()={ids} != esperados={esperados}"
     )
+    assert len(saida) == len(ids), "provedor repetido no seletor"
     for p in saida:
         assert isinstance(p.get("modelos"), list)
         assert p.get("nome")

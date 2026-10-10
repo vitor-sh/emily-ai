@@ -81,7 +81,7 @@ def test_fixed_model_override_does_not_change_global_route(monkeypatch):
     calls=[]
     monkeypatch.setattr(llm,'chamar_com_ferramentas',lambda *a,**kw:calls.append(kw))
     editor_assistant.call_model([{'role':'user','content':'teste'}])
-    assert calls[0]['modelo']=='cx/gpt-6-sol' and calls[0]['raciocinio']=='medio' and calls[0]['provedor']=='openai'
+    assert calls[0]['modelo']=='kr/claude-opus-5' and calls[0]['raciocinio']=='medio' and calls[0]['provedor']=='omniroute'
 
 def test_restart_requires_saved_editor_and_idle_app(monkeypatch,tmp_path):
     import interface_web,sys,subprocess

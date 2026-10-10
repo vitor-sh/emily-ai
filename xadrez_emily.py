@@ -1,4 +1,4 @@
-"""Partida local de xadrez: Sol escolhe lances e conversa em chamadas paralelas.
+"""Partida local de xadrez: o modelo escolhe lances e conversa em chamadas paralelas.
 
 As regras são do chess.js empacotado na interface. A ponte recebe somente
 posições já validadas por esse motor; sugestões nunca são aplicadas sem nova
@@ -21,7 +21,7 @@ UCI = re.compile(r"[a-h][1-8][a-h][1-8][qrbn]?")
 def chamar_modelo(mensagens, *, lance=False, retry=None):
     import llm
     return llm.chamar(
-        mensagens, provedor="openai", modelo="cx/gpt-6-sol",
+        mensagens, provedor="omniroute", modelo="kr/claude-opus-5",
         raciocinio="medio" if lance else "baixo", max_tokens=8192 if lance else 2048,
         stream=False, on_retry=retry,
     )
@@ -235,7 +235,7 @@ class Partida:
                 mensagens[-1]['content'] = json.dumps(posicao, ensure_ascii=False)
                 with self.lock:
                     if not self._atual(token): return
-                    self.dados['lance'].update(estado='pensando',detalhe='Sol escolhendo entre as opções verificadas…')
+                    self.dados['lance'].update(estado='pensando',detalhe='Emily escolhendo entre as opções verificadas…')
                     if apoio.get('avaliacao'):
                         self.dados['posicao']['fatos']['avaliacao_ultimo_lance']=apoio['avaliacao']
             escolhido = None
@@ -255,7 +255,7 @@ class Partida:
                 mensagens.extend([{"role": "assistant", "content": texto[:2000]},
                     {"role": "user", "content": "Resposta inválida. Escolha um UCI da lista e devolva somente o JSON solicitado."}])
             if not escolhido:
-                raise ValueError("O Sol não devolveu um lance legal após duas tentativas. O tabuleiro foi preservado.")
+                raise ValueError("O modelo não devolveu um lance legal após duas tentativas. O tabuleiro foi preservado.")
             with self.lock:
                 if self._atual(token):
                     self.dados["lance"] = {"estado": "escolhido", "uci": escolhido,
@@ -364,9 +364,9 @@ class Partida:
             if m.get('xeque'):
                 evento += ' Deu xeque-mate.' if m.get('mate') else ' Deu xeque.'
         sistema = EMILY_PERSONALIDADE + "\nVocê está jogando uma partida casual de xadrez com o usuário. "
-        sistema += ("Converse naturalmente, com sua personalidade habitual. O Sol calcula os lances "
+        sistema += ("Converse naturalmente, com sua personalidade habitual. Outra chamada calcula os lances "
             "em outra chamada independente. Nesta conversa você NÃO escolhe nem executa lances. Comente apenas fatos verificáveis "
-            "da posição; não invente planos ou justificativas do Sol, avaliações numéricas ou rating. "
+            "da posição; não invente planos ou justificativas desse cálculo, avaliações numéricas ou rating. "
             "Use fatos.tatico para responder sobre capturas e promoções: só sugira capturar com uma peça "
             "se de/para/peça corresponderem a uma captura legal listada. Não invente um bispo defensor. "
             "A vez é explicitamente fatos.tatico.vez: Você significa o humano, Emily significa você. "

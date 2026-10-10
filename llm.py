@@ -1453,6 +1453,8 @@ URL_CLAUDE = _url_com_v1(os.getenv("EMILY_CLAUDE_URL", ""))
 #                                  | "openai_anthropic" (OpenAI para ferramentas,
 #                                    Anthropic nativo para imagens)
 #   EMILY_PROVEDOR_<NOME>_SEM_CHAVE se "1", não exige API key (Ollama local)
+#   EMILY_PROVEDOR_<NOME>_OCULTO   se "1", fica fora dos seletores da interface
+#                                  (continua valendo como fallback)
 #
 # Se nenhuma seção nova for achada no .env, cai no modo legado (PROVEDORES
 # hardcoded abaixo) com aviso único no log. Assim .envs antigos continuam
@@ -1473,6 +1475,7 @@ class ProvedorConfig:
     timeout: float
     rpm: int
     tipo: str   # "openai" | "ollama" | "anthropic" | "openai_anthropic"
+    oculto: bool = False   # fora dos seletores; segue disponível como fallback
 
 
 def _parsear_secoes_provedor(caminho_env: str) -> Dict[str, ProvedorConfig]:
@@ -1573,6 +1576,7 @@ def _parsear_secoes_provedor(caminho_env: str) -> Dict[str, ProvedorConfig]:
             timeout=timeout,
             rpm=rpm,
             tipo=tipo,
+            oculto=v("OCULTO", "0").strip() == "1",
         )
     return resultado
 
@@ -1671,6 +1675,10 @@ def _construir_tabela_provedor(pid: str) -> Dict[str, "Rota"]:
     timeout = cfg.timeout if cfg else 90.0
 
     fallbacks: Tuple[Tuple[str, str], ...] = tuple(_fallbacks_para(pid))
+    if pid == PROVEDOR_ROTAS and pid != "claude":
+        # Mesmo provedor das rotas internas: herda a cadeia delas (degrau
+        # rápido do Kiro e o Claude externo por último), sem repetir o primário.
+        fallbacks = tuple(fb for fb in _cadeia_fallbacks_claude if fb != (pid, modelo))
 
     return {
         "conversa": Rota(
@@ -1923,49 +1931,77 @@ MODELO_CLAUDE_HAIKU = next(
     "kr/claude-haiku-4.5",
 )
 
+# ── Provedor das rotas internas ───────────────────────────────────
+# Desde 10/10/2026 o provedor externo "claude" ficou instável (falhas e 4–10 s
+# por resposta) e a assinatura Codex acabou. As rotas internas passam a usar o
+# Kiro do OmniRoute na Oracle, medido em ~1,1 s até o primeiro texto. Sem a
+# seção omniroute no .env (outra instalação), tudo continua no "claude".
+#
+#   EMILY_ROTAS_PROVEDOR       provedor das rotas internas (padrão: omniroute)
+#   EMILY_ROTAS_MODELO         modelo forte (padrão: o MODELO da seção)
+#   EMILY_ROTAS_MODELO_RAPIDO  modelo das rotas baratas (padrão: um Haiku da lista)
+def _provedor_rotas_internas() -> str:
+    pedido = os.getenv("EMILY_ROTAS_PROVEDOR", "").strip().lower()
+    if pedido and pedido in PROVEDORES:
+        return pedido
+    return "omniroute" if "omniroute" in PROVEDORES and _modelos_de_secao("omniroute") else "claude"
+
+
+PROVEDOR_ROTAS = _provedor_rotas_internas()
+if PROVEDOR_ROTAS == "claude":
+    MODELO_ROTAS = MODELO_CLAUDE
+    MODELO_ROTAS_RAPIDO = MODELO_CLAUDE_HAIKU
+else:
+    _modelos_rotas = _modelos_de_secao(PROVEDOR_ROTAS)
+    MODELO_ROTAS = (os.getenv("EMILY_ROTAS_MODELO", "").strip()
+                    or os.getenv(f"EMILY_PROVEDOR_{PROVEDOR_ROTAS.upper()}_MODELO", "").strip()
+                    or _modelos_rotas[0])
+    MODELO_ROTAS_RAPIDO = (os.getenv("EMILY_ROTAS_MODELO_RAPIDO", "").strip()
+                           or next((m for m in _modelos_rotas if "haiku" in m.lower()), MODELO_ROTAS))
+
 ROTAS_CLAUDE: Dict[str, Rota] = {
     "conversa": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.85,
         rpm=RPM_CLAUDE,
     ),
     "classificador": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
     "comando": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=512, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
         rpm=RPM_CLAUDE,
     ),
     "extracao": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=300, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.2,
         rpm=RPM_CLAUDE,
     ),
     "visao": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.7,
         rpm=RPM_CLAUDE,
     ),
     "triagem_visual": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
     "agente_ui": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
         rpm=RPM_CLAUDE,
     ),
     "agente_jogo": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
         rpm=RPM_CLAUDE,
     ),
     "discord": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=200, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.9,
         rpm=RPM_CLAUDE,
     ),
@@ -1975,7 +2011,7 @@ ROTAS_CLAUDE: Dict[str, Rota] = {
     # rápido, barato, já provado pelo celular, e herda a cadeia de fallback
     # das rotas claude (se o haiku cair, o sonnet assume sozinho).
     "titulo": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS_RAPIDO,
         max_tokens=40, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
@@ -1984,7 +2020,7 @@ ROTAS_CLAUDE: Dict[str, Rota] = {
     # várias chamadas ao modelo principal. O extrator pede JSON estruturado e
     # valida tudo localmente antes de persistir.
     "memoria_extracao": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS_RAPIDO,
         max_tokens=900, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
@@ -1995,27 +2031,27 @@ ROTAS_CLAUDE: Dict[str, Rota] = {
     # tarefas baratas/determinísticas. Os nomes '_gmi' ficam para não quebrar
     # quem chama por eles.
     "comando_interpreta": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=256, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
     "visao_gmi": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=1024, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.7,
         rpm=RPM_CLAUDE,
     ),
     "triagem_visual_gmi": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=16, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.0,
         rpm=RPM_CLAUDE,
     ),
     "agente_ui_gmi": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
         rpm=RPM_CLAUDE,
     ),
     "agente_jogo_gmi": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=2048, raciocinio=RACIOCINIO_DESLIGADO, temperatura=0.1,
         rpm=RPM_CLAUDE,
     ),
@@ -2024,24 +2060,24 @@ ROTAS_CLAUDE: Dict[str, Rota] = {
     # independente de qual provedor está ativo no EMILY_PROVEDOR_LLM (o
     # rota() cai aqui quando a rota não existe na tabela ativa).
     "code_implementador": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.5,
         rpm=RPM_CLAUDE,
     ),
     "code_revisor": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE_HAIKU,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS_RAPIDO,
         max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.3,
         rpm=RPM_CLAUDE,
     ),
     "code_debatedor": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=4096, raciocinio=RACIOCINIO_NORMAL, temperatura=0.5,
         rpm=RPM_CLAUDE,
     ),
     # Planejador do Emily Code multi-modelo: raciocínio alto de verdade, que
     # o modelo novo sustenta.
     "code_planejador": Rota(
-        provedor="claude", modelo=MODELO_CLAUDE,
+        provedor=PROVEDOR_ROTAS, modelo=MODELO_ROTAS,
         max_tokens=2048, raciocinio=RACIOCINIO_NORMAL, temperatura=0.7,
         rpm=RPM_CLAUDE,
     ),
@@ -2065,16 +2101,29 @@ def _fallbacks_para(pid: str) -> List[Tuple[str, str]]:
     return [("omniroute", m) for m in _modelos_de_secao("omniroute")]
 
 
-_cadeia_fallbacks_claude: List[Tuple[str, str]] = [
-    ("claude", m) for m in _modelos_de_secao("claude") if m != MODELO_CLAUDE
-]
-_cadeia_fallbacks_claude += _fallbacks_para("claude")
+if PROVEDOR_ROTAS == "claude":
+    _cadeia_fallbacks_claude: List[Tuple[str, str]] = [
+        ("claude", m) for m in _modelos_de_secao("claude") if m != MODELO_CLAUDE
+    ]
+    _cadeia_fallbacks_claude += _fallbacks_para("claude")
+else:
+    # Um degrau rápido do mesmo provedor e, por último, o Claude externo, que
+    # serve de reserva se o Kiro cair. Poucos degraus de propósito: cada um
+    # gasta tentativas e tempo antes de desistir.
+    _cadeia_fallbacks_claude = [
+        (PROVEDOR_ROTAS, m) for m in dict.fromkeys((MODELO_ROTAS_RAPIDO, "kr/claude-sonnet-4.6"))
+        if m != MODELO_ROTAS and m in _modelos_de_secao(PROVEDOR_ROTAS)
+    ]
+    if "claude" in PROVEDORES and MODELO_CLAUDE:
+        _cadeia_fallbacks_claude.append(("claude", MODELO_CLAUDE))
 if _cadeia_fallbacks_claude:
-    _log("claude: fallbacks de modelo: "
+    _log(f"rotas internas em '{PROVEDOR_ROTAS}' ({MODELO_ROTAS}); fallbacks: "
          + ", ".join(f"{p}:{m}" for p, m in _cadeia_fallbacks_claude))
     for _nome_rota_claude, _rota_claude in ROTAS_CLAUDE.items():
-        if _rota_claude.provedor == "claude" and not _rota_claude.fallbacks:
-            _rota_claude.fallbacks = tuple(_cadeia_fallbacks_claude)
+        if not _rota_claude.fallbacks:
+            _rota_claude.fallbacks = tuple(
+                fb for fb in _cadeia_fallbacks_claude
+                if fb != (_rota_claude.provedor, _rota_claude.modelo))
 
 # ═══════════════════════════════════════════════════════════════
 # TABELA OPENROUTER — REMOVIDA
@@ -2467,11 +2516,18 @@ def listar_provedores() -> list:
     saida = []
     for pid in PROVEDORES:
         cfg = PROVEDORES_CONFIG.get(pid)
+        if cfg is not None and cfg.oculto:
+            continue
+        modelos = _modelos_provedor(pid)
+        # Seção sem modelo nenhum (ex.: assinatura encerrada) não é opção:
+        # mostrar "sem modelos" no seletor só convidava a um clique inútil.
+        if cfg is not None and not modelos:
+            continue
         nome = cfg.nome_exibicao if cfg else pid.capitalize()
         saida.append({
             "id": pid,
             "nome": nome,
-            "modelos": _modelos_provedor(pid),
+            "modelos": modelos,
         })
     return saida
 

@@ -26,19 +26,35 @@ from .hollow_knight_cerebro import CerebroHollowKnight, SYSTEM_HOLLOW_KNIGHT
 Cfg = Callable[[str, str], str]
 
 
+def _secao(cfg: Cfg) -> str:
+    """Seção do .env que serve o mod: OPENAI se tiver modelos, senão OMNIROUTE.
+
+    A assinatura do Codex (seção openai) acabou em 10/10/2026 e a seção ficou
+    vazia; a Emily passou a usar o Kiro pelo OmniRoute (seção omniroute).
+    """
+    for nome in ("OPENAI", "OMNIROUTE"):
+        if (cfg(f"EMILY_PROVEDOR_{nome}_BASE", "").strip()
+                and (cfg(f"EMILY_PROVEDOR_{nome}_MODELOS", "").strip()
+                     or cfg(f"EMILY_PROVEDOR_{nome}_MODELO", "").strip())):
+            return nome
+    return "OPENAI"
+
+
 def _modelo_padrao(cfg: Cfg) -> str:
     modelos = _lista_modelos(cfg)
+    secao = _secao(cfg)
     luna = next((modelo for modelo in modelos if modelo.lower().endswith("gpt-5.6-luna")), "")
-    return luna or cfg("EMILY_PROVEDOR_OPENAI_MODELO", "").strip() or (modelos[0] if modelos else "")
+    return luna or cfg(f"EMILY_PROVEDOR_{secao}_MODELO", "").strip() or (modelos[0] if modelos else "")
 
 
 def _lista_modelos(cfg: Cfg) -> list[str]:
+    secao = _secao(cfg)
     modelos = [
         item.strip()
-        for item in cfg("EMILY_PROVEDOR_OPENAI_MODELOS", "").split(",")
+        for item in cfg(f"EMILY_PROVEDOR_{secao}_MODELOS", "").split(",")
         if item.strip()
     ]
-    padrao = cfg("EMILY_PROVEDOR_OPENAI_MODELO", "").strip()
+    padrao = cfg(f"EMILY_PROVEDOR_{secao}_MODELO", "").strip()
     if padrao and padrao not in modelos:
         modelos.insert(0, padrao)
     return list(dict.fromkeys(modelos))
@@ -56,8 +72,8 @@ def gravador_catalogo(cfg: Cfg) -> Callable[..., dict]:
     def gravar(*destinos: Path) -> dict:
         modelos = _lista_modelos(cfg)
         catalogo = {
-            "provedor": "openai",
-            "nome_provedor": cfg("EMILY_PROVEDOR_OPENAI_NOME", "OpenAI"),
+            "provedor": _secao(cfg).lower(),
+            "nome_provedor": cfg(f"EMILY_PROVEDOR_{_secao(cfg)}_NOME", "OpenAI"),
             "padrao": _modelo_padrao(cfg),
             "modelos": [
                 {"id": modelo, "nome": _rotulo_modelo(modelo)} for modelo in modelos
@@ -106,8 +122,9 @@ class SaudeOmniRoute:
             ttl = max(0.5, float(self._cfg("EMILY_HK_SAUDE_TTL", ttl_padrao)))
             if not forcar and agora - self._quando < ttl:
                 return self._valor
-        base = self._cfg("EMILY_PROVEDOR_OPENAI_BASE", "").rstrip("/")
-        chave = self._cfg("EMILY_PROVEDOR_OPENAI_CHAVE", "")
+        secao = _secao(self._cfg)
+        base = self._cfg(f"EMILY_PROVEDOR_{secao}_BASE", "").rstrip("/")
+        chave = self._cfg(f"EMILY_PROVEDOR_{secao}_CHAVE", "")
         valor = False
         if base and chave:
             try:
@@ -177,10 +194,11 @@ class CerebroHollowKnightPermanente:
         permitidos = _lista_modelos(self._cfg)
         if not modelo or modelo not in permitidos:
             modelo = _modelo_padrao(self._cfg)
-        base = self._cfg("EMILY_PROVEDOR_OPENAI_BASE", "").rstrip("/")
-        chave = self._cfg("EMILY_PROVEDOR_OPENAI_CHAVE", "")
+        secao = _secao(self._cfg)
+        base = self._cfg(f"EMILY_PROVEDOR_{secao}_BASE", "").rstrip("/")
+        chave = self._cfg(f"EMILY_PROVEDOR_{secao}_CHAVE", "")
         if not base or not chave or not modelo:
-            raise RuntimeError("OpenAI não configurada para Hollow Knight no .env")
+            raise RuntimeError("Nenhum provedor (openai/omniroute) configurado para Hollow Knight no .env")
         try:
             resposta = self._sessao.post(
                 f"{base}/chat/completions",

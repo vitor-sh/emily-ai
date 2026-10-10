@@ -820,7 +820,7 @@ def test_decisao_visual_configurada_sem_mudar_rota_global(monkeypatch):
     import config_agente_visual
     # Independente da preferência pessoal salva no PC onde pytest roda.
     monkeypatch.setattr(config_agente_visual, "configuracao", lambda: {
-        "provedor": "openai", "modelo": "cx/gpt-6-sol", "raciocinio": "medio"})
+        "provedor": "omniroute", "modelo": "kr/claude-opus-5", "raciocinio": "medio"})
 
     chamadas = []
     rota_antes = llm.rota(modelo.ROTA_AGENTE_UI_GMI)
@@ -841,8 +841,8 @@ def test_decisao_visual_configurada_sem_mudar_rota_global(monkeypatch):
     assert mensagens[0]["images"] == [
         {"media_type": "image/jpeg", "data": "base64-falso"},
     ]
-    assert kwargs["provedor"] == "openai"
-    assert kwargs["modelo"] == "cx/gpt-6-sol"
+    assert kwargs["provedor"] == "omniroute"
+    assert kwargs["modelo"] == "kr/claude-opus-5"
     assert kwargs["raciocinio"] == "medio"
     assert kwargs["max_tokens"] == 8192
     assert kwargs["stream"] is False

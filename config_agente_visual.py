@@ -6,8 +6,8 @@ import preferencias
 
 def configuracao():
     return {
-        "provedor": preferencias.obter("visual_provedor") or "openai",
-        "modelo": preferencias.obter("visual_modelo") or os.getenv("EMILY_AGENTE_UI_MODELO", "cx/gpt-6-sol"),
+        "provedor": preferencias.obter("visual_provedor") or os.getenv("EMILY_AGENTE_UI_PROVEDOR", "omniroute"),
+        "modelo": preferencias.obter("visual_modelo") or os.getenv("EMILY_AGENTE_UI_MODELO", "kr/claude-opus-5"),
         "raciocinio": preferencias.obter("visual_raciocinio") or os.getenv("EMILY_AGENTE_UI_RACIOCINIO", "medio"),
     }
 

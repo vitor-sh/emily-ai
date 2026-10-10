@@ -132,14 +132,14 @@ def test_journal_append_only_idempotente_e_persistente(tmp_path):
 def test_rota_de_extracao_e_dedicada_ao_haiku():
     rota = llm.rota("memoria_extracao")
 
-    assert rota.provedor == "claude"
+    assert rota.provedor == llm.PROVEDOR_ROTAS
     assert "haiku" in rota.modelo.lower()
     assert rota.raciocinio == llm.RACIOCINIO_DESLIGADO
     assert rota.temperatura == 0.0
     # Dedicada de verdade: trocar o cérebro (rota 'conversa') não pode
     # arrastar a extração de memória junto.
     assert rota.modelo != llm.rota("conversa").modelo or (
-        llm.rota("conversa").modelo == llm.MODELO_CLAUDE_HAIKU
+        llm.rota("conversa").modelo == llm.MODELO_ROTAS_RAPIDO
     )
 
 

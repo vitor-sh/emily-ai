@@ -77,7 +77,7 @@ def main():
         'Em português e em até 35 palavras, sugira uma pausa rápida para relaxar após estudar.',
     ]
     rows = []
-    for model in ['cx/gpt-6-sol', 'cx/gpt-6-luna', 'cx/gpt-6-astra']:
+    for model in ['kr/claude-sonnet-5.5', 'kr/claude-haiku-4.5', 'kr/claude-opus-4.8']:
         for index, prompt in enumerate(prompts):
             order = ['local', 'nuvem'] if index % 2 == 0 else ['nuvem', 'local']
             for target in order:

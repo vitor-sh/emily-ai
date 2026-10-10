@@ -123,44 +123,31 @@ function oficina() {
     },
     set_toggle: () => true, organizar_downloads: () => 'Separei 23 arquivos por tipo.',
     estado_modelo: () => ({
-      provedor: 'gmi', modelo: 'MiniMaxAI/MiniMax-M3', raciocinio: 'baixo',
+      provedor: 'omniroute', modelo: 'kr/claude-sonnet-5.5', raciocinio: 'baixo',
       modelos: [
-        { id: 'MiniMaxAI/MiniMax-M3', nome: 'MiniMaxAI/MiniMax-M3', sobre: 'GMI' },
+        { id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5', sobre: 'Kiro (Oracle)' },
+        { id: 'kr/claude-opus-5.5', nome: 'Claude Opus 5.5', sobre: 'Kiro (Oracle) · 2º' },
+        { id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5', sobre: 'Kiro (Oracle) · 3º' },
       ],
       provedores: [
-        { id: 'claude', nome: 'Claude',
+        { id: 'omniroute', nome: 'Kiro (Oracle)',
           modelos: [
-            { id: 'claude-opus-5', nome: 'claude-opus-5', sobre: 'Claude' },
-            { id: 'claude-opus-4-8', nome: 'claude-opus-4-8', sobre: 'Claude' },
-          ] },
-        { id: 'openrouter', nome: 'OpenRouter',
-          modelos: [
-            { id: 'qwen/qwen3.8-max-free', nome: 'qwen/qwen3.8-max-free', sobre: 'OpenRouter' },
-          ] },
-        { id: 'nvidia', nome: 'NVIDIA NIM',
-          modelos: [
-            { id: 'z-ai/glm-5.2', nome: 'z-ai/glm-5.2', sobre: 'NVIDIA NIM' },
-          ] },
-        { id: 'gmi', nome: 'GMI',
-          modelos: [
-            { id: 'MiniMaxAI/MiniMax-M3', nome: 'MiniMaxAI/MiniMax-M3', sobre: 'GMI' },
-          ] },
-        { id: 'ollama', nome: 'Ollama (local)',
-          modelos: [
-            { id: 'qwen3.5:9b', nome: 'qwen3.5:9b', sobre: 'Ollama (local)' },
+            { id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5', sobre: 'Kiro (Oracle)' },
+            { id: 'kr/claude-opus-5.5', nome: 'Claude Opus 5.5', sobre: 'Kiro (Oracle) · 2º' },
+            { id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5', sobre: 'Kiro (Oracle) · 3º' },
           ] },
       ],
       niveis: [
         { id: 'baixo', nome: 'Baixo' }, { id: 'medio', nome: 'Médio' }, { id: 'alto', nome: 'Alto' },
       ],
     }),
-    visual_modelo_estado: () => ({provedor: 'openai', modelo: 'cx/gpt-6-sol', raciocinio: 'medio',
-      provedores: [{id: 'openai', nome: 'Codex', modelos: [
-        {id: 'cx/gpt-6-sol', nome: 'Sol'}, {id: 'cx/gpt-6-luna', nome: 'Luna'}, {id: 'cx/gpt-6-astra', nome: 'Astra'},
+    visual_modelo_estado: () => ({provedor: 'omniroute', modelo: 'kr/claude-opus-5', raciocinio: 'medio',
+      provedores: [{id: 'omniroute', nome: 'Kiro (Oracle)', modelos: [
+        {id: 'kr/claude-opus-5', nome: 'Claude Opus 5'}, {id: 'kr/claude-sonnet-5.5', nome: 'Claude Sonnet 5.5'},
+        {id: 'kr/claude-haiku-4.5', nome: 'Claude Haiku 4.5'},
       ]}]}),
     visual_modelo_niveis: () => [
-      {id: 'desligado', nome: 'Sem raciocínio'}, {id: 'baixo', nome: 'Baixo'}, {id: 'medio', nome: 'Médio'},
-      {id: 'alto', nome: 'Alto'}, {id: 'extra_alto', nome: 'Extra alto'}, {id: 'maximo', nome: 'Máximo'},
+      {id: 'baixo', nome: 'Baixo'}, {id: 'medio', nome: 'Médio'}, {id: 'alto', nome: 'Alto'},
     ],
     visual_modelo_definir: () => true,
     definir_provedor_e_modelo: () => true,
@@ -4337,7 +4324,7 @@ async function montarConfig() {
            </button>
          </div>
          ${linhaChave('voz_delegacao_rapida', ICO.raio, 'Delegação rápida (voz no PC)',
-           'Ligado: Luna responde e delega tarefas. Desligado: o modelo selecionado responde diretamente e pode usar todas as ferramentas. Não afeta o Android nem o chat escrito.',
+           'Ligado: o Claude Haiku 4.5 responde rápido e delega tarefas ao Claude Opus 4.8. Desligado: o modelo selecionado responde diretamente e pode usar todas as ferramentas. Não afeta o Android nem o chat escrito.',
            a.voz_delegacao_rapida ?? true)}
          ${linhaChave('audio_preprocess_denoise', ICO.voz, 'Redução de ruído (RNNoise)',
            'Limpa ruído de fundo antes de enviar o áudio ao Whisper', a.audio_preprocess_denoise)}
@@ -5598,13 +5585,12 @@ async function carregarSeletores() {
 const marcaProvedorChat = p => p && (p.id === 'omniroute' || p.id === 'anthropic' || p.id === 'claude') ? 'anthropic'
   : p && p.id === 'openai' ? 'openai' : '';
 const ehClaudeChat = m => /(?:^|\/)claude-/i.test(m.id || '');
+// Versão mais nova primeiro (5.5 > 5 > 4.8...). O sort é estável, então
+// empates de versão mantêm a ordem do .env (EMILY_PROVEDOR_*_MODELOS).
 const ordemModeloChat = m => {
   const texto = `${m.id || ''} ${m.nome || ''}`.toLowerCase();
-  if (/\bluna\b/.test(texto)) return 0;
-  if (/\bsol\b/.test(texto)) return 1;
-  if (/\bastra\b/.test(texto)) return 2;
   const versao = texto.match(/(?:claude[-\s]*(?:opus|sonnet|haiku|fable)?[-\s]*)(\d+)(?:[.\-](\d+))?/);
-  return versao ? Number(versao[1]) * 100 + Number(versao[2] || 0) : 10000;
+  return versao ? 10000 - (Number(versao[1]) * 100 + Number(versao[2] || 0)) : 20000;
 };
 function provedoresChat(provedores = _provedoresDisp) {
   const grupos = [];

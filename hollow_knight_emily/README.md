@@ -73,7 +73,7 @@ Abra **Opções → Mods → EmilyCompanion**. A versão 0.5.4 oferece:
 
 - nível de comentários: Silenciosa, Discreta, Normal ou Tagarela;
 - cérebro/modelo usado somente pelo Hollow Knight: modelos OpenAI da seção
-  `EMILY_PROVEDOR_OPENAI_*` do `.env`, com GPT 5.6 Luna como padrão se disponível;
+  `EMILY_PROVEDOR_OPENAI_*` do `.env` (ou `EMILY_PROVEDOR_OMNIROUTE_*` quando a seção openai está vazia), com GPT 5.6 Luna como padrão se disponível;
 - integração com IA, voz, volume de 0% a 200%, legendas e HUD;
 - **Foco na voz da Emily**: abaixa o áudio do jogo (música e efeitos) só enquanto
   ela fala, com opções Desligado, Leve e Forte;

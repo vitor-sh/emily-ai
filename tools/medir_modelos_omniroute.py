@@ -6,6 +6,8 @@ um pouco de cota do provedor.
 
 Uso: python3 tools/medir_modelos_omniroute.py [--secao NOME] [rodadas] modelo1 modelo2 ...
 --secao NOME usa EMILY_PROVEDOR_<NOME>_BASE/CHAVE (padrão: OMNIROUTE).
+--contexto N simula o turno real: system prompt de ~N caracteres (personalidade
+da Emily repetida) e 12 ferramentas declaradas, como no chat com ferramentas.
 """
 import json
 import statistics
@@ -25,6 +27,11 @@ if "--secao" in _ARGS:
     _i = _ARGS.index("--secao")
     SECAO = _ARGS[_i + 1].upper()
     del _ARGS[_i:_i + 2]
+CONTEXTO = 0
+if "--contexto" in _ARGS:
+    _i = _ARGS.index("--contexto")
+    CONTEXTO = int(_ARGS[_i + 1])
+    del _ARGS[_i:_i + 2]
 BASE = (env.get(f"EMILY_PROVEDOR_{SECAO}_BASE") or "").rstrip("/")
 # Igual a llm._url_com_v1: a base pode vir com ou sem /v1.
 if BASE and not BASE.endswith("/v1"):
@@ -33,10 +40,28 @@ CHAVE = env.get(f"EMILY_PROVEDOR_{SECAO}_CHAVE") or ""
 PERGUNTA = "Responda em uma frase curta, em português: qual a capital do Brasil?"
 
 
+def _contexto_real() -> tuple:
+    """System prompt longo e catálogo de ferramentas, sem dados pessoais."""
+    sys.path.insert(0, str(RAIZ))
+    from personalidade_emily import EMILY_PERSONALIDADE
+    sistema = (EMILY_PERSONALIDADE * (CONTEXTO // max(1, len(EMILY_PERSONALIDADE)) + 1))[:CONTEXTO]
+    ferramentas = [{"type": "function", "function": {
+        "name": f"ferramenta_{i}", "description": f"Ferramenta de teste número {i}, não use.",
+        "parameters": {"type": "object", "properties": {"valor": {"type": "string"}}}}}
+        for i in range(12)]
+    return sistema, ferramentas
+
+
 def medir(modelo: str) -> dict:
+    mensagens = [{"role": "user", "content": PERGUNTA}]
+    extra = {}
+    if CONTEXTO:
+        sistema, ferramentas = _contexto_real()
+        mensagens.insert(0, {"role": "system", "content": sistema})
+        extra = {"tools": ferramentas, "tool_choice": "auto"}
     corpo = json.dumps({
         "model": modelo, "stream": True, "max_tokens": 64,
-        "messages": [{"role": "user", "content": PERGUNTA}],
+        "messages": mensagens, **extra,
     }).encode()
     pedido = urllib.request.Request(
         f"{BASE}/chat/completions", data=corpo, method="POST",

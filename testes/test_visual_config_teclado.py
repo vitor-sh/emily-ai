@@ -55,13 +55,13 @@ def test_preferencia_visual_persistida_separada_do_chat(monkeypatch,tmp_path):
     monkeypatch.setattr(config.llm,'listar_provedores',lambda: [{'id':'teste','modelos':[{'id':'outro'}]}])
     monkeypatch.setattr(config.llm,'niveis_raciocinio',lambda _: [{'id':'maximo'}])
     try:
-        preferencias.definir(modelo='cx/gpt-6-luna',raciocinio='baixo')
+        preferencias.definir(modelo='kr/claude-sonnet-5.5',raciocinio='baixo')
         assert not config.definir('teste','inexistente','maximo')
         assert not config.definir('teste','outro','medio')
         assert config.definir('teste','outro','maximo')
         preferencias.recarregar()
         assert config.configuracao() == {'provedor':'teste','modelo':'outro','raciocinio':'maximo'}
-        assert preferencias.obter('modelo') == 'cx/gpt-6-luna'
+        assert preferencias.obter('modelo') == 'kr/claude-sonnet-5.5'
         assert preferencias.obter('raciocinio') == 'baixo'
     finally:
         preferencias.recarregar()
@@ -69,7 +69,7 @@ def test_preferencia_visual_persistida_separada_do_chat(monkeypatch,tmp_path):
 
 def test_decisao_e_auditoria_usam_modelo_visual_escolhido(monkeypatch):
     import modelo
-    escolhido = {'provedor':'openai','modelo':'cx/gpt-6-astra','raciocinio':'maximo'}
+    escolhido = {'provedor':'omniroute','modelo':'kr/claude-opus-5.5','raciocinio':'alto'}
     monkeypatch.setattr(config, 'configuracao', lambda: escolhido.copy())
     calls=[]
     def chamar(*args,**kw):

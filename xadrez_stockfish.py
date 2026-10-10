@@ -37,7 +37,7 @@ def pasta():
 def preparar(avisar=lambda s: None, cancelado=lambda: False):
     sistema = platform.system()
     if sistema not in PACOTES or platform.machine().lower() not in {'amd64', 'x86_64'}:
-        raise ValueError('O apoio do Stockfish requer Linux ou Windows de 64 bits. Escolha “Só Sol” neste PC.')
+        raise ValueError('O apoio do Stockfish requer Linux ou Windows de 64 bits. Escolha “Sem apoio do Stockfish” neste PC.')
     raiz = pasta(); exe = raiz / ('stockfish.exe' if sistema == 'Windows' else 'stockfish')
     with _lock_download:
         if exe.is_file():

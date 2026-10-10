@@ -18,7 +18,7 @@ import requests
 from flask import Flask, Response, jsonify, request, send_file, stream_with_context
 
 CONFIG_FILE = Path(os.getenv('EMILY_RELAY_CONFIG', str(Path.home()/'.config/emily-relay/config.json')))
-MODELS = ['cx/gpt-6-luna','cx/gpt-6-sol','cx/gpt-6-astra','kr/claude-sonnet-4.5','kr/claude-haiku-4.5']
+MODELS = ['kr/claude-sonnet-5.5','kr/claude-opus-5.5','kr/claude-opus-5','kr/claude-haiku-4.5']
 
 def load_config():
     return json.loads(CONFIG_FILE.read_text())

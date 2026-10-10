@@ -120,7 +120,7 @@
           <div class="xe-board-area"><div class="xe-board" id="xe-board" role="group" aria-label="Tabuleiro de xadrez"></div><div id="xe-fim" class="xe-fim" hidden></div></div>
           <div class="xe-jogador" id="xe-jogador-voce"><span class="xe-avatar xe-voce">V</span><div class="xe-identidade"><div class="xe-nome"><strong>Você</strong><span class="xe-turno" id="xe-turno-voce"></span></div><small id="xe-cor">Brancas</small><div class="xe-material" id="xe-material-voce"></div></div><span class="xe-badge">Casual · sem relógio</span></div>
           <p id="xe-status" class="xe-status" role="status" aria-live="polite"></p>
-          <div class="xe-nivel"><span>Desafio da Emily</span><div class="xe-dificuldade-wrap"><button id="xe-dificuldade" class="xe-button" type="button" aria-label="Dificuldade da partida" aria-haspopup="listbox" aria-expanded="false" aria-controls="xe-niveis">Casual ▾</button><div id="xe-niveis" role="listbox" aria-label="Desafio da Emily" hidden><button type="button" role="option" data-nivel="casual">Casual</button><button type="button" role="option" data-nivel="equilibrado">Equilibrado</button><button type="button" role="option" data-nivel="desafiador">Desafiador</button><button type="button" role="option" data-nivel="sol">Só Sol · sem apoio</button></div></div><small>Perfis de dificuldade, sem equivalência garantida com rating.</small></div><div class="xe-controls"><button id="xe-nova" class="xe-button acento">Nova partida</button><button id="xe-voltar" class="xe-button">Voltar lance</button><button id="xe-inverter" class="xe-button" title="Inverter tabuleiro">⇅</button><button id="xe-desistir" class="xe-button">Desistir</button><button id="xe-ver-resultado" class="xe-button" hidden>Ver resultado</button><button id="xe-pgn" class="xe-button">Salvar PGN</button><button id="xe-som" class="xe-button xe-som" aria-pressed="true" title="Silenciar sons do tabuleiro"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14"/></svg><span>Som</span></button><button id="xe-sons-locais" class="xe-button" aria-pressed="false" title="Alternar entre os sons padrão e os seus arquivos locais">Sons locais</button><button id="xe-config-som" class="xe-button" title="Importar efeitos de áudio deste PC">♫ Personalizar</button><button id="xe-retry" class="xe-button acento" hidden>Tentar lance novamente</button></div>
+          <div class="xe-nivel"><span>Desafio da Emily</span><div class="xe-dificuldade-wrap"><button id="xe-dificuldade" class="xe-button" type="button" aria-label="Dificuldade da partida" aria-haspopup="listbox" aria-expanded="false" aria-controls="xe-niveis">Casual ▾</button><div id="xe-niveis" role="listbox" aria-label="Desafio da Emily" hidden><button type="button" role="option" data-nivel="casual">Casual</button><button type="button" role="option" data-nivel="equilibrado">Equilibrado</button><button type="button" role="option" data-nivel="desafiador">Desafiador</button><button type="button" role="option" data-nivel="sol">Sem apoio do Stockfish</button></div></div><small>Perfis de dificuldade, sem equivalência garantida com rating.</small></div><div class="xe-controls"><button id="xe-nova" class="xe-button acento">Nova partida</button><button id="xe-voltar" class="xe-button">Voltar lance</button><button id="xe-inverter" class="xe-button" title="Inverter tabuleiro">⇅</button><button id="xe-desistir" class="xe-button">Desistir</button><button id="xe-ver-resultado" class="xe-button" hidden>Ver resultado</button><button id="xe-pgn" class="xe-button">Salvar PGN</button><button id="xe-som" class="xe-button xe-som" aria-pressed="true" title="Silenciar sons do tabuleiro"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4zM16 8a6 6 0 0 1 0 8M19 5a10 10 0 0 1 0 14"/></svg><span>Som</span></button><button id="xe-sons-locais" class="xe-button" aria-pressed="false" title="Alternar entre os sons padrão e os seus arquivos locais">Sons locais</button><button id="xe-config-som" class="xe-button" title="Importar efeitos de áudio deste PC">♫ Personalizar</button><button id="xe-retry" class="xe-button acento" hidden>Tentar lance novamente</button></div>
           <details class="xe-historico" open><summary>Lances da partida <span id="xe-tempo"></span></summary><div id="xe-lances"></div></details>
           <small class="xe-hint">Arraste para jogar ou preparar um pré-lance. Clique esquerdo marca casas; arraste com o direito para desenhar setas. Clique direito limpa as marcações e cancela o pré-lance. Esc limpa as marcações.</small>
         </div>
@@ -228,7 +228,7 @@
     const l=state.lance;
     if(l.estado==='preparando') return l.detalhe || 'Preparando apoio tático…';
     if(l.estado==='erro') return l.erro;
-    if(l.estado==='reconectando') return 'Reconectando ao Sol… Seu tabuleiro está preservado.';
+    if(l.estado==='reconectando') return 'Reconectando ao modelo… Seu tabuleiro está preservado.';
     if(premove) return `Pré-lance ${premove.from} → ${premove.to} preparado. Clique direito para cancelar.`;
     if(game.turn() !== state.posicao.cor) return 'A Emily está pensando no próximo lance…';
     return game.isCheck() ? 'Você está em xeque. Sua vez.' : 'Sua vez. Escolha um lance.';
@@ -238,7 +238,7 @@
     board();renderPlayers();renderFim(); $('xe-cor').textContent=state.posicao?.cor==='b' ? 'Pretas' : 'Brancas';
     $('xe-status').textContent=status();
     const nivel=state.dificuldade || 'casual';
-    $('xe-dificuldade').textContent=({casual:'Casual',equilibrado:'Equilibrado',desafiador:'Desafiador',sol:'Só Sol · sem apoio'}[nivel])+' ▾';
+    $('xe-dificuldade').textContent=({casual:'Casual',equilibrado:'Equilibrado',desafiador:'Desafiador',sol:'Sem apoio do Stockfish'}[nivel])+' ▾';
     $('xe-niveis').querySelectorAll('[data-nivel]').forEach(b=>b.setAttribute('aria-selected',String(b.dataset.nivel===nivel)));
     $('xe-dificuldade').disabled=saving;
     $('xe-retry').hidden=state.lance.estado!=='erro' || Boolean(stopped) || game.isGameOver();
@@ -499,7 +499,7 @@
       if(state.lance.estado==='escolhido' && state.lance.revisao===state.revisao){
         const u=state.lance.uci, move={from:u.slice(0,2),to:u.slice(2,4),...(u[4]?{promotion:u[4]}:{})};
         const valid=game.moves({verbose:true}).some(m=>m.from+m.to+(m.promotion||'')===u);
-        if(!valid){message('A sugestão do Sol não corresponde ao tabuleiro. Volte um lance ou comece uma nova partida.');return;}
+        if(!valid){message('A sugestão da Emily não corresponde ao tabuleiro. Volte um lance ou comece uma nova partida.');return;}
         lastTime=String(state.lance.segundos);
         // Saving acknowledges this suggestion so polling cannot play it twice.
         const committed=game.move(move); selected=null;clearAnnotations();

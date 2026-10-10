@@ -652,7 +652,7 @@ ROTA_COMANDO_INTERPRETA = "comando_interpreta"
 ROTA_VISAO_GMI = "visao"
 ROTA_TRIAGEM_VISUAL_GMI = "triagem_visual"
 ROTA_AGENTE_UI_GMI = "agente_ui"
-MODELO_AGENTE_UI_VISUAL = os.getenv("EMILY_AGENTE_UI_MODELO", "cx/gpt-6-sol").strip() or "cx/gpt-6-sol"
+MODELO_AGENTE_UI_VISUAL = os.getenv("EMILY_AGENTE_UI_MODELO", "kr/claude-opus-5").strip() or "kr/claude-opus-5"
 RACIOCINIO_AGENTE_UI_VISUAL = os.getenv("EMILY_AGENTE_UI_RACIOCINIO", "medio").strip().lower() or "medio"
 ROTA_AGENTE_JOGO_GMI = "agente_jogo"
 
@@ -3525,7 +3525,7 @@ def _abrir_dominio_no_turno(argumentos: dict) -> str:
 # o modelo foi treinado pra ler — não em prosa no system prompt.
 _INSTRUCOES_FERRAMENTAS = """
 Você pode jogar xadrez com o usuário no tabuleiro integrado da Emily. Quando ele
-convidar para uma partida, use xadrez_abrir. O Sol escolhe os lances e o Luna
+convidar para uma partida, use xadrez_abrir. O modelo forte escolhe os lances e o rápido
 conversa na própria partida. Não invente lances no chat nem abra chess.com.
 
 Você tem ferramentas de verdade e decide sozinha quando usar, sem depender de

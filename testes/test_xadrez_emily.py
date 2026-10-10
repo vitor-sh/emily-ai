@@ -94,13 +94,13 @@ def test_erro_rede_preserva_partida_e_permite_nova_tentativa(tmp_path):
     assert p.estado()['lance']['uci']=='d2d4'
 
 
-def test_rota_sol_luna_sem_alterar_selecao_global(monkeypatch):
+def test_rota_fixa_do_xadrez_sem_alterar_selecao_global(monkeypatch):
     import llm
     chamadas=[]
     monkeypatch.setattr(llm,'chamar',lambda msgs,**kw:chamadas.append(kw) or 'oi')
     chamar_modelo([],lance=True);chamar_modelo([])
-    assert [(c['modelo'],c['raciocinio']) for c in chamadas]==[('cx/gpt-6-sol','medio'),('cx/gpt-6-sol','baixo')]
-    assert all(c['provedor']=='openai' for c in chamadas)
+    assert [(c['modelo'],c['raciocinio']) for c in chamadas]==[('kr/claude-opus-5','medio'),('kr/claude-opus-5','baixo')]
+    assert all(c['provedor']=='omniroute' for c in chamadas)
 
 
 def test_convite_abre_xadrez_mas_conversa_nao_e_obrigatoria():

@@ -115,6 +115,15 @@ def _modelos_validos_para(provedor: str) -> set:
         return set()
 
 
+def _tem_modelos_proprios(provedor: str) -> bool:
+    """False só quando o llm carregou e o provedor não tem modelo nenhum."""
+    try:
+        import llm
+        return bool(llm._modelos_provedor(provedor))  # noqa: SLF001
+    except Exception:
+        return True
+
+
 def _validar_provedor_e_modelo(provedor: Optional[str], modelo: str) -> Tuple[Optional[str], str]:
     """
     Devolve (provedor, modelo) válidos a partir do que veio das prefs.
@@ -127,8 +136,9 @@ def _validar_provedor_e_modelo(provedor: Optional[str], modelo: str) -> Tuple[Op
     """
     ativos = _provedores_validos()
     pid = (provedor or "").strip().lower() or None
-    if pid is not None and pid not in ativos:
-        # provedor salvo é de uma sessão anterior com .env diferente
+    if pid is not None and (pid not in ativos or not _tem_modelos_proprios(pid)):
+        # provedor salvo é de uma sessão anterior com .env diferente, ou
+        # ficou sem modelos (ex.: assinatura encerrada)
         pid = _provedor_padrao()
 
     if pid is None:
