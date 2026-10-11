@@ -527,6 +527,19 @@ const ICO = {
   nuvem:   '<path d="M7 18h10a4 4 0 00.7-7.9A6.5 6.5 0 005.7 8.7 4.8 4.8 0 007 18z"/>',
   tv:      '<rect x="3" y="5" width="18" height="13" rx="2"/><path d="M8 21h8M12 18v3"/>',
   jogo:    '<path d="M7 9h10a4 4 0 013.8 2.7l1.1 4.1a2 2 0 01-3 2.2L16 16H8l-2.9 2a2 2 0 01-3-2.2l1.1-4.1A4 4 0 017 9z"/><path d="M7 12v4M5 14h4M16 13h.01M19 15h.01"/>',
+  // Ícones das configurações: cada página e ajuste com silhueta própria.
+  engrenagem: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/>',
+  faisca:  '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z"/>',
+  ondas:   '<path d="M3 12h1.5M7 8v8M11 4v16M15 7v10M19 10v4M21 12h.01"/>',
+  cursor:  '<path d="M4 4l7 17 2.5-7.5L21 11 4 4z"/><path d="M13.5 13.5L19 19"/>',
+  robo:    '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4M9 13h.01M15 13h.01M9.5 17h5M2 13v2M22 13v2"/><circle cx="12" cy="3.5" r="1"/>',
+  celular: '<rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  chip:    '<rect x="6" y="6" width="12" height="12" rx="2"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/>',
+  baixar:  '<path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/>',
+  filtro:  '<path d="M3 12c2-4 4-4 6 0s4 4 6 0 4-4 6 0"/><path d="M3 7h3M18 17h3"/>',
+  nivel:   '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1.5 14h5M9.5 8h5M17.5 16h5"/>',
+  corte:   '<path d="M3 12h2M8 9v6M11 6v12M14 12h7"/><path d="M17 9l3 3-3 3"/>',
+  mudo:    '<path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M22 9l-6 6M16 9l6 6"/>',
 };
 
 // Cada intensidade tem uma silhueta própria, inclusive na pílula fechada.
@@ -4065,21 +4078,21 @@ window.Emily = {
 
 const CONFIG_GRUPOS = [
   { nome: 'Emily', paginas: [
-    { id: 'automacao', titulo: 'Automação', ico: 'raio', busca: 'discord autonomia espiadinha voz muda' },
-    { id: 'voz', titulo: 'Voz e áudio', ico: 'voz', busca: 'volume microfone ruído silero delegação' },
-    { id: 'visual', titulo: 'Agente visual', ico: 'monitor', busca: 'modelo thinking raciocínio tela teclado' },
-    { id: 'discord', titulo: 'Modelo do Discord', ico: 'chat', busca: 'respostas cérebro modelo' },
+    { id: 'automacao', titulo: 'Automação', ico: 'faisca', tom: 'ambar', sobre: 'O que ela faz sozinha', busca: 'discord autonomia espiadinha voz muda' },
+    { id: 'voz', titulo: 'Voz e áudio', ico: 'ondas', tom: 'coral', sobre: 'Fala, microfone e limpeza do áudio', busca: 'volume microfone ruído silero delegação' },
+    { id: 'visual', titulo: 'Agente visual', ico: 'cursor', tom: 'areia', sobre: 'Modelo que vê e controla a tela', busca: 'modelo thinking raciocínio tela teclado' },
+    { id: 'discord', titulo: 'Modelo do Discord', ico: 'robo', tom: 'rosa', sobre: 'Quem responde no servidor', busca: 'respostas cérebro modelo' },
   ] },
   { nome: 'Dados', paginas: [
-    { id: 'memoria', titulo: 'Memória', ico: 'cerebro', busca: 'você pessoas discord unificada fatos' },
+    { id: 'memoria', titulo: 'Memória', ico: 'cerebro', tom: 'coral', sobre: 'O que ela lembra de você e dos outros', busca: 'você pessoas discord unificada fatos' },
   ] },
   { nome: 'Dispositivos', paginas: [
-    { id: 'tv', titulo: 'TV', ico: 'monitor', busca: 'parear conectar dispositivo' },
-    { id: 'gateway', titulo: 'Conexão do celular', ico: 'monitor', busca: 'gateway ngrok endpoint android url túnel' },
-    { id: 'sistema', titulo: 'Este computador', ico: 'disco', busca: 'processador memória uso sistema' },
+    { id: 'tv', titulo: 'TV', ico: 'tv', tom: 'areia', sobre: 'Android TV pela rede de casa', busca: 'parear conectar dispositivo' },
+    { id: 'gateway', titulo: 'Conexão do celular', ico: 'celular', tom: 'ambar', sobre: 'Ponte entre o PC e o Android', busca: 'gateway ngrok endpoint android url túnel' },
+    { id: 'sistema', titulo: 'Este computador', ico: 'chip', tom: 'oliva', sobre: 'Uso do processador e da memória', busca: 'processador memória uso sistema' },
   ] },
   { nome: 'Aplicativo', paginas: [
-    { id: 'atualizacao', titulo: 'Atualização', ico: 'refazer', busca: 'versão instalar recursos' },
+    { id: 'atualizacao', titulo: 'Atualização', ico: 'baixar', tom: 'oliva', sobre: 'Versão e atualizações da Emily', busca: 'versão instalar recursos' },
   ] },
 ];
 
@@ -4133,10 +4146,11 @@ function montarNavegacaoConfig() {
   nav.innerHTML = CONFIG_GRUPOS.map(grupo => `
     <div class="cfg-nav-grupo">
       <p class="cfg-nav-grupo-titulo">${esc(grupo.nome)}</p>
-      ${grupo.paginas.map(p => `<button class="cfg-nav-item" type="button"
+      ${grupo.paginas.map(p => `<button class="cfg-nav-item" type="button" data-tom="${p.tom || 'coral'}"
         data-cfg-abrir="${p.id}" data-cfg-busca="${esc((p.titulo + ' ' + p.busca)
           .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())}">
-        ${svg(ICO[p.ico], 'cfg-nav-ico')}<span>${esc(p.titulo)}</span></button>`).join('')}
+        <span class="cfg-nav-tile" aria-hidden="true">${svg(ICO[p.ico], 'cfg-nav-ico')}</span>
+        <span class="cfg-nav-txt">${esc(p.titulo)}</span></button>`).join('')}
     </div>`).join('');
   $$('.cfg-nav-item', nav).forEach(b => b.onclick = () => selecionarConfig(b.dataset.cfgAbrir));
   const busca = $('#cfg-busca');
@@ -4178,8 +4192,15 @@ function telaConfig() {
 }
 
 function secao(titulo, corpoHtml, nota = '', extra = '', id = '') {
-  return `<section class="secao"${id ? ` data-cfg-secao="${esc(id)}"` : ''}>
-    <div class="secao-cab"><h2>${esc(titulo)}</h2>${extra}</div>
+  // Páginas das configurações ganham cabeçalho com o ícone e a cor da página.
+  const pagina = id && CONFIG_GRUPOS.flatMap(g => g.paginas).find(p => p.id === id);
+  const cab = pagina
+    ? `<div class="secao-cab cfg-cab" data-tom="${pagina.tom || 'coral'}">
+        <span class="cfg-cab-tile" aria-hidden="true">${svg(ICO[pagina.ico])}</span>
+        <div class="cfg-cab-txt"><h2>${esc(titulo)}</h2><small>${esc(pagina.sobre || '')}</small></div>${extra}</div>`
+    : `<div class="secao-cab"><h2>${esc(titulo)}</h2>${extra}</div>`;
+  return `<section class="secao"${id ? ` data-cfg-secao="${esc(id)}"` : ''}${pagina ? ` data-tom="${pagina.tom || 'coral'}"` : ''}>
+    ${cab}
     ${nota ? `<p class="secao-nota">${esc(nota)}</p>` : ''}
     ${corpoHtml}
   </section>`;
@@ -4298,7 +4319,7 @@ async function montarConfig() {
          ${linhaChave('espiadinha', ICO.olho, 'Espiadinha',
            'De vez em quando ela dá uma olhadinha na sua aba e comenta algo',
            a.espiadinha)}
-         ${linhaChave('mudo', ICO.voz, 'Voz muda',
+         ${linhaChave('mudo', ICO.mudo, 'Voz muda',
            'Ela continua respondendo por texto, sem falar', a.mudo)}
          ${a.pet_desktop_disponivel ? linhaChave('pet_desktop_ativo', ICO.pessoa,
            'Emily na área de trabalho',
@@ -4325,11 +4346,11 @@ async function montarConfig() {
          ${linhaChave('voz_delegacao_rapida', ICO.raio, 'Delegação rápida (voz no PC)',
            'Ligado: o Claude Haiku 4.5 responde rápido e delega tarefas ao Claude Opus 4.8. Desligado: o modelo selecionado responde diretamente e pode usar todas as ferramentas. Não afeta o Android nem o chat escrito.',
            a.voz_delegacao_rapida ?? true)}
-         ${linhaChave('audio_preprocess_denoise', ICO.voz, 'Redução de ruído (RNNoise)',
+         ${linhaChave('audio_preprocess_denoise', ICO.filtro, 'Redução de ruído (RNNoise)',
            'Limpa ruído de fundo antes de enviar o áudio ao Whisper', a.audio_preprocess_denoise)}
-         ${linhaChave('audio_preprocess_normalize', ICO.voz, 'Normalizar volume',
+         ${linhaChave('audio_preprocess_normalize', ICO.nivel, 'Normalizar volume',
            'Equilibra falantes baixos e altos com loudnorm', a.audio_preprocess_normalize)}
-         ${linhaChave('audio_preprocess_vad', ICO.voz, 'Cortar silêncio (Silero VAD)',
+         ${linhaChave('audio_preprocess_vad', ICO.corte, 'Cortar silêncio (Silero VAD)',
            'Remove trechos sem fala e reduz alucinações do Whisper', a.audio_preprocess_vad)}
          <div class="item">
            ${svg(ICO.voz, 'item-ico')}
@@ -5148,11 +5169,11 @@ function medidores(s) {
   };
   const cpu = Math.round(s.cpu || 0), ram = Math.round(s.ram || 0);
   return `<div class="medidores">
-    <div class="medidor"><div class="medidor-rot">Processador</div>
+    <div class="medidor"><div class="medidor-rot">${svg(ICO.chip, 'medidor-ico')}Processador</div>
       <div class="medidor-val" id="med-cpu">${cpu}%</div>${barra(cpu)}</div>
-    <div class="medidor"><div class="medidor-rot">Memória</div>
+    <div class="medidor"><div class="medidor-rot">${svg(ICO.disco, 'medidor-ico')}Memória</div>
       <div class="medidor-val" id="med-ram">${ram}%</div>${barra(ram)}</div>
-    <div class="medidor"><div class="medidor-rot">Agora</div>
+    <div class="medidor"><div class="medidor-rot">${svg('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>', 'medidor-ico')}Agora</div>
       <div class="medidor-val" id="med-hora">${esc(s.hora || '--:--')}</div>
       <div style="font-size:11.5px;color:var(--txt-3)">${esc(s.data || '')}</div></div>
   </div>`;

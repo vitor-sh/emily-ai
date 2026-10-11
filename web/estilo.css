@@ -3724,3 +3724,381 @@ input[type=checkbox], input[type=radio], input[type=range] { accent-color: var(-
 .av-progresso svg { width:14px; height:14px; }
 .task-result-actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
 @media(prefers-reduced-motion:reduce) { .grupo-ferramentas.trabalhando > .grupo-linha .progresso-rot { animation:none; background:none; color:var(--txt-2); } }
+
+/* ════════════════════════════════════════════════════════════════
+   CONFIGURAÇÕES — visual reformulado (2026-10-11)
+   Mesma paleta quente; cada página ganha um tom próprio dentro dela
+   (âmbar, coral, areia, rosa, oliva), usado no ícone do índice, no
+   cabeçalho e nos ícones dos ajustes. Fica por último pra vencer as
+   regras antigas de body.modo-config sem precisar mexer nelas.
+   ════════════════════════════════════════════════════════════════ */
+body.modo-config { --tom: var(--acento-mo); }
+body.modo-config [data-tom="ambar"] { --tom: #d8a65e; }
+body.modo-config [data-tom="coral"] { --tom: #dd7d5c; }
+body.modo-config [data-tom="areia"] { --tom: #cfa784; }
+body.modo-config [data-tom="rosa"]  { --tom: #d98a80; }
+body.modo-config [data-tom="oliva"] { --tom: #b3a86c; }
+body.modo-config [data-tom] {
+  --tom-fu: color-mix(in srgb, var(--tom) 15%, transparent);
+  --tom-borda: color-mix(in srgb, var(--tom) 30%, transparent);
+}
+
+/* ── Índice lateral ─────────────────────────────────────────── */
+body.modo-config .lateral {
+  background:
+    radial-gradient(120% 40% at 0% 0%, rgba(201,100,66,.07), transparent 70%),
+    var(--bg-side);
+}
+body.modo-config .cfg-side-topo strong {
+  font-family: var(--serif); font-size: 21px; font-weight: 400; letter-spacing: -.01em;
+}
+body.modo-config .cfg-side-voltar {
+  display: grid; place-items: center;
+  border: 1px solid var(--line); background: var(--bg-raise);
+  transition: background var(--rapido), color var(--rapido), transform var(--medio), border-color var(--rapido);
+}
+body.modo-config .cfg-side-voltar:hover { transform: translateX(-2px); border-color: var(--line-forte); }
+body.modo-config .cfg-side-busca {
+  height: 38px; border-radius: 11px;
+  background: rgba(255,255,255,.025);
+  transition: border-color var(--rapido), color var(--rapido), box-shadow var(--medio), background var(--rapido);
+}
+body.modo-config .cfg-side-busca:focus-within {
+  border-color: color-mix(in srgb, var(--acento) 55%, transparent);
+  background: var(--bg-raise);
+  box-shadow: 0 0 0 3px var(--acento-fu);
+}
+body.modo-config .cfg-nav-grupo { margin-bottom: 16px; }
+body.modo-config .cfg-nav-grupo-titulo { padding: 0 12px 7px; font-size: 10px; letter-spacing: .1em; }
+body.modo-config .cfg-nav-item {
+  position: relative; gap: 11px; min-height: 40px; padding: 5px 10px 5px 6px;
+  border-radius: 10px; margin-bottom: 2px;
+  transition: background var(--rapido), color var(--rapido);
+}
+body.modo-config .cfg-nav-tile {
+  display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px;
+  border-radius: 8px; color: var(--txt-3);
+  background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.04);
+  transition: color var(--medio), background var(--medio), border-color var(--medio), transform var(--medio);
+}
+body.modo-config .cfg-nav-ico { width: 15px; height: 15px; flex: 0 0 15px; color: inherit; }
+body.modo-config .cfg-nav-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body.modo-config .cfg-nav-item:hover { background: rgba(255,255,255,.035); }
+body.modo-config .cfg-nav-item:hover .cfg-nav-tile {
+  color: var(--tom); background: var(--tom-fu); border-color: var(--tom-borda); transform: scale(1.06);
+}
+body.modo-config .cfg-nav-item.ativa {
+  background: linear-gradient(90deg, var(--tom-fu), rgba(255,255,255,.02) 85%);
+  color: var(--txt); font-weight: 580;
+}
+body.modo-config .cfg-nav-item.ativa::before {
+  content: ""; position: absolute; left: -5px; top: 10px; bottom: 10px; width: 3px;
+  border-radius: 0 3px 3px 0; background: var(--tom);
+  animation: cfg-marca-entra 260ms var(--mola) both;
+}
+body.modo-config .cfg-nav-item.ativa .cfg-nav-tile {
+  color: #1c1b19; border-color: transparent;
+  background: linear-gradient(140deg, color-mix(in srgb, var(--tom) 100%, #fff 12%), var(--tom));
+  box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--tom) 60%, transparent);
+}
+body.modo-config .cfg-nav-item.ativa .cfg-nav-ico { color: inherit; }
+body.modo-config .cfg-nav-item:focus-visible { outline: 2px solid var(--acento); outline-offset: -2px; }
+@keyframes cfg-marca-entra { from { transform: scaleY(0); opacity: 0; } }
+
+/* ── Topo da página e cabeçalho da seção ───────────────────── */
+body.modo-config .config {
+  background: radial-gradient(70% 45% at 85% -5%, rgba(201,100,66,.06), transparent 70%);
+}
+body.modo-config .config-topo { border-bottom-color: transparent; padding-bottom: 0; margin-bottom: 26px; }
+body.modo-config .cfg-local {
+  padding: 5px 11px; border-radius: 99px;
+  border: 1px solid var(--line); background: rgba(255,255,255,.02);
+  font-size: 11px; letter-spacing: .02em;
+}
+body.modo-config .config .cfg-cab {
+  display: flex; align-items: center; gap: 16px; margin-bottom: 18px;
+}
+body.modo-config .cfg-cab-tile {
+  display: grid; place-items: center; flex: 0 0 52px; width: 52px; height: 52px;
+  border-radius: 15px; color: var(--tom);
+  background:
+    linear-gradient(150deg, color-mix(in srgb, var(--tom) 24%, transparent), color-mix(in srgb, var(--tom) 6%, transparent));
+  border: 1px solid var(--tom-borda);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), 0 10px 26px -14px var(--tom);
+  animation: cfg-tile-entra 420ms var(--mola) both;
+}
+body.modo-config .cfg-cab-tile svg { width: 24px; height: 24px; }
+body.modo-config .cfg-cab-txt { flex: 1; min-width: 0; }
+body.modo-config .config .cfg-cab h2 {
+  font-family: var(--serif); font-weight: 400; letter-spacing: -.015em;
+  font-size: clamp(24px, 2.5vw, 30px); line-height: 1.15;
+}
+body.modo-config .cfg-cab-txt small {
+  display: block; margin-top: 4px; color: var(--txt-3); font-size: 12.5px;
+}
+@keyframes cfg-tile-entra { from { opacity: 0; transform: scale(.82) rotate(-8deg); } }
+body.modo-config .config .secao-nota {
+  position: relative; padding: 11px 14px 11px 38px;
+  border-radius: 11px; border: 1px solid var(--line);
+  background: rgba(255,255,255,.018); color: var(--txt-2);
+}
+body.modo-config .config .secao-nota::before {
+  content: "i"; position: absolute; left: 12px; top: 11px;
+  display: grid; place-items: center; width: 16px; height: 16px; border-radius: 99px;
+  font: italic 600 11px/1 var(--serif); color: var(--tom, var(--acento-mo));
+  background: var(--tom-fu, var(--acento-fu));
+}
+/* Notas de estado/contagem dentro dos blocos continuam texto simples. */
+body.modo-config .config .lista .secao-nota,
+body.modo-config .config #cfg-mem .secao-nota,
+body.modo-config .config #cfg-mem-pessoas .secao-nota,
+body.modo-config .config #cfg-tv-status,
+body.modo-config .config #cfg-gateway-aviso,
+body.modo-config .config #cfg-gateway-pair-code {
+  padding: 0; border: 0; background: none;
+}
+body.modo-config .config .lista .secao-nota::before,
+body.modo-config .config #cfg-mem .secao-nota::before,
+body.modo-config .config #cfg-mem-pessoas .secao-nota::before,
+body.modo-config .config #cfg-tv-status::before,
+body.modo-config .config #cfg-gateway-aviso::before,
+body.modo-config .config #cfg-gateway-pair-code::before { content: none; }
+body.modo-config .config #cfg-gateway-aviso:empty,
+body.modo-config .config #cfg-gateway-pair-code:empty { display: none; }
+
+/* ── Cartões e linhas de ajuste ────────────────────────────── */
+body.modo-config .config .lista,
+body.modo-config .config .tv-lista {
+  border: 1px solid var(--line); border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,.028), rgba(255,255,255,.012)), var(--bg);
+  box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -30px rgba(0,0,0,.8);
+}
+body.modo-config .config .item {
+  min-height: 70px; padding: 14px 18px; gap: 15px;
+  transition: background var(--rapido);
+}
+body.modo-config .config .item + .item { border-top-color: rgba(255,255,255,.045); }
+body.modo-config .config .item:hover { background: rgba(255,255,255,.022); }
+body.modo-config .config .item > .item-ico {
+  width: 36px; height: 36px; flex: 0 0 36px; padding: 9px;
+  border-radius: 11px; color: var(--tom);
+  background: var(--tom-fu); border: 1px solid color-mix(in srgb, var(--tom) 18%, transparent);
+  transition: transform var(--medio), background var(--medio);
+}
+body.modo-config .config .item:hover > .item-ico {
+  color: var(--tom); transform: translateY(-1px) scale(1.05);
+  background: color-mix(in srgb, var(--tom) 22%, transparent);
+}
+body.modo-config .config .item-txt strong { font-size: 13.5px; font-weight: 580; color: var(--txt); }
+body.modo-config .config .item-txt small { color: var(--txt-3); font-size: 12px; margin-top: 3px; }
+
+/* Entrada escalonada das linhas quando a página aparece. */
+body.modo-config .config .secao:not([hidden]) .lista > .item,
+body.modo-config .config .secao:not([hidden]) .tv-lista > .item,
+body.modo-config .config .secao:not([hidden]) .medidor {
+  animation: cfg-linha-entra 380ms var(--mola) both;
+}
+body.modo-config .config .secao .lista > .item:nth-child(2),
+body.modo-config .config .secao .tv-lista > .item:nth-child(2),
+body.modo-config .config .secao .medidor:nth-child(2) { animation-delay: 40ms; }
+body.modo-config .config .secao .lista > .item:nth-child(3),
+body.modo-config .config .secao .tv-lista > .item:nth-child(3),
+body.modo-config .config .secao .medidor:nth-child(3) { animation-delay: 80ms; }
+body.modo-config .config .secao .lista > .item:nth-child(4) { animation-delay: 120ms; }
+body.modo-config .config .secao .lista > .item:nth-child(5) { animation-delay: 160ms; }
+body.modo-config .config .secao .lista > .item:nth-child(n+6) { animation-delay: 200ms; }
+@keyframes cfg-linha-entra { from { opacity: 0; transform: translateY(8px); } }
+
+/* ── Interruptor ───────────────────────────────────────────── */
+body.modo-config .config .chave {
+  width: 44px; height: 26px; flex: 0 0 44px;
+  background: #34312d; border: 1px solid rgba(255,255,255,.06);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.35);
+  transition: background var(--medio), box-shadow var(--medio), border-color var(--medio);
+}
+body.modo-config .config .chave::after {
+  top: 3px; left: 3px; width: 18px; height: 18px; background: #a9a39b;
+  box-shadow: 0 1px 3px rgba(0,0,0,.45);
+  transition: transform 320ms cubic-bezier(.34,1.56,.64,1), background var(--medio), width var(--rapido);
+}
+body.modo-config .config .chave:active::after { width: 22px; }
+body.modo-config .config .chave[aria-checked="true"] {
+  background: linear-gradient(135deg, var(--acento-mo), var(--acento));
+  border-color: transparent;
+  box-shadow: 0 0 0 4px var(--acento-fu), 0 4px 14px -4px rgba(201,100,66,.7);
+}
+body.modo-config .config .chave[aria-checked="true"]::after { transform: translateX(18px); background: #fff; }
+body.modo-config .config .chave[aria-checked="true"]:active::after { transform: translateX(14px); }
+body.modo-config .config .chave:focus-visible { outline: 2px solid var(--acento-mo); outline-offset: 3px; }
+
+/* ── Controles: tecla, volume, seletores, botões ───────────── */
+body.modo-config .config .cfg-ptt-botao {
+  min-height: 36px; padding: 6px 12px; border-radius: 10px;
+  background: linear-gradient(180deg, #3a3631, #2e2b27);
+  border: 1px solid var(--line-forte); border-bottom-width: 2px;
+  transition: transform var(--rapido), border-color var(--rapido), background var(--rapido);
+}
+body.modo-config .config .cfg-ptt-botao:hover { border-color: var(--acento); transform: translateY(-1px); }
+body.modo-config .config .cfg-ptt-botao:active { transform: translateY(1px); border-bottom-width: 1px; }
+
+body.modo-config .config .vol-slider {
+  height: 6px; border-radius: 99px;
+  background: linear-gradient(90deg, var(--acento) var(--pct, 66%), rgba(237,235,231,.1) var(--pct, 66%));
+}
+body.modo-config .config .vol-slider::-webkit-slider-thumb {
+  width: 18px; height: 18px; background: #fff; border: 0;
+  box-shadow: 0 0 0 4px var(--acento-fu), 0 2px 6px rgba(0,0,0,.5);
+  transition: transform .2s cubic-bezier(.34,1.56,.64,1), box-shadow .2s ease;
+}
+body.modo-config .config .vol-slider:hover::-webkit-slider-thumb { box-shadow: 0 0 0 6px var(--acento-fu), 0 2px 6px rgba(0,0,0,.5); }
+body.modo-config .config .vol-slider:active::-webkit-slider-thumb { transform: scale(1.15); }
+body.modo-config .config .vol-slider::-moz-range-thumb { width: 16px; height: 16px; background: #fff; border: 0; }
+body.modo-config .config .vol-valor {
+  min-width: 50px; padding: 4px 8px; border-radius: 8px; text-align: center;
+  background: rgba(255,255,255,.04); color: var(--txt);
+}
+
+body.modo-config .config .sel-discord-modelo:not(.cfg-visual-selector) {
+  min-height: 54px; padding: 12px 18px; border-top-color: rgba(255,255,255,.045);
+  transition: background var(--rapido);
+}
+body.modo-config .config .sel-discord-modelo:not(.cfg-visual-selector):hover { background: rgba(255,255,255,.03); }
+body.modo-config .config .cfg-visual-selector.sel-discord-modelo {
+  min-height: 50px; padding: 12px 14px; border-radius: 13px;
+  background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.012)), var(--bg);
+  border-color: var(--line);
+  transition: border-color var(--rapido), box-shadow var(--medio), background var(--rapido);
+}
+body.modo-config .config .cfg-visual-selector.sel-discord-modelo:hover,
+body.modo-config .config .cfg-visual-selector.sel-discord-modelo:focus-visible {
+  border-color: color-mix(in srgb, var(--acento) 55%, transparent);
+  box-shadow: 0 0 0 3px var(--acento-fu);
+}
+body.modo-config .config .sel-discord-modelo .sel-chev { transition: transform var(--medio); }
+body.modo-config .config .sel-discord-modelo:hover .sel-chev { transform: rotate(90deg) translateX(2px); }
+body.modo-config .config .campo > span { color: var(--txt-2); font-size: 12px; letter-spacing: .01em; }
+body.modo-config .config .campo + .campo { margin-top: 16px; }
+body.modo-config .config .campo input,
+body.modo-config .config .campo textarea {
+  border-radius: 11px; transition: border-color var(--rapido), box-shadow var(--medio);
+}
+body.modo-config .config .campo input:focus,
+body.modo-config .config .campo textarea:focus {
+  border-color: color-mix(in srgb, var(--acento) 55%, transparent);
+  box-shadow: 0 0 0 3px var(--acento-fu);
+}
+
+body.modo-config .config .btn-linha {
+  min-height: 34px; padding: 7px 14px; border-radius: 10px;
+  font-weight: 550; border-color: var(--line-forte);
+  transition: background var(--rapido), color var(--rapido), transform var(--rapido), box-shadow var(--medio), border-color var(--rapido);
+}
+body.modo-config .config .btn-linha:hover:not(:disabled) { transform: translateY(-1px); border-color: color-mix(in srgb, var(--acento) 40%, var(--line-forte)); }
+body.modo-config .config .btn-linha:active:not(:disabled) { transform: translateY(0); }
+body.modo-config .config .btn-linha:disabled { opacity: .5; cursor: default; }
+body.modo-config .config .btn-linha.destaque {
+  background: linear-gradient(135deg, var(--acento-mo), var(--acento));
+  border-color: transparent; color: #fff;
+  box-shadow: 0 6px 18px -8px rgba(201,100,66,.85), inset 0 1px 0 rgba(255,255,255,.18);
+}
+body.modo-config .config .btn-linha.destaque:hover:not(:disabled) {
+  box-shadow: 0 10px 24px -8px rgba(201,100,66,.9), inset 0 1px 0 rgba(255,255,255,.22);
+}
+body.modo-config .config #cfg-atualizacao .btn-linha + .btn-linha { margin-left: 8px; }
+body.modo-config .config #cfg-atualizacao .secao-nota + .btn-linha { margin-top: 4px; }
+body.modo-config .config .tv-btn { width: 32px; height: 32px; min-height: 0; padding: 0; border-color: transparent; background: transparent; }
+body.modo-config .config .tv-btn:hover:not(:disabled) { transform: none; }
+body.modo-config .config .tv-card.tv-ativa { box-shadow: inset 3px 0 0 var(--tom); }
+
+/* ── Sistema: medidores ────────────────────────────────────── */
+body.modo-config .config .medidores { gap: 12px; }
+body.modo-config .config .medidor {
+  padding: 16px 18px 18px; border-radius: 16px; border-color: var(--line);
+  background: linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)), var(--bg);
+  transition: transform var(--medio), border-color var(--medio);
+}
+body.modo-config .config .medidor:hover { transform: translateY(-2px); border-color: var(--tom-borda); }
+body.modo-config .config .medidor-rot { display: flex; align-items: center; gap: 8px; font-size: 10.5px; letter-spacing: .09em; }
+body.modo-config .config .medidor-ico {
+  width: 26px; height: 26px; flex: 0 0 26px; padding: 6px; border-radius: 8px;
+  color: var(--tom); background: var(--tom-fu);
+}
+body.modo-config .config .medidor-val { font-size: 30px; font-weight: 300; margin: 12px 0 10px; letter-spacing: -.02em; }
+body.modo-config .config .barra-med { height: 6px; background: rgba(255,255,255,.06); }
+body.modo-config .config .barra-med i { background: linear-gradient(90deg, color-mix(in srgb, var(--tom) 60%, transparent), var(--tom)); }
+body.modo-config .config .barra-med i.alto { background: linear-gradient(90deg, #b9884a, var(--aviso)); }
+body.modo-config .config .barra-med i.critico { background: linear-gradient(90deg, #a9503f, var(--erro)); }
+
+/* ── Memória: abas segmentadas, fatos e pessoas ───────────── */
+body.modo-config .config .mem-abas {
+  display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 16px;
+  border: 1px solid var(--line); border-radius: 13px; background: rgba(255,255,255,.02);
+}
+body.modo-config .config .mem-aba {
+  border: 0; border-radius: 9px; padding: 7px 13px; color: var(--txt-3);
+  transition: background var(--medio), color var(--rapido), box-shadow var(--medio);
+}
+body.modo-config .config .mem-aba:hover { background: rgba(255,255,255,.04); color: var(--txt-2); }
+body.modo-config .config .mem-aba.ativa {
+  background: var(--bg-active); color: var(--txt);
+  box-shadow: 0 2px 8px -2px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.05);
+}
+body.modo-config .config .mem-aba.ativa svg { color: var(--tom); }
+body.modo-config .config .mem-aba.ativa .mem-conta { background: var(--tom-fu); color: var(--tom); }
+body.modo-config .config .fato {
+  gap: 13px; padding: 12px 16px; background: transparent; align-items: center;
+}
+body.modo-config .config .fato + .fato { border-top-color: rgba(255,255,255,.045); }
+body.modo-config .config .fato:hover { background: rgba(255,255,255,.022); }
+body.modo-config .config .fato > .item-ico {
+  width: 30px; height: 30px; flex: 0 0 30px; padding: 7px; border-radius: 9px;
+  color: var(--tom); background: var(--tom-fu); border: 0;
+}
+body.modo-config .config .fato:hover > .item-ico { color: var(--tom); background: color-mix(in srgb, var(--tom) 22%, transparent); }
+body.modo-config .config .add-fato {
+  gap: 12px; padding: 12px 16px; background: rgba(255,255,255,.015);
+  border-top-color: rgba(255,255,255,.06);
+}
+body.modo-config .config .add-fato > .item-ico { width: 18px; height: 18px; color: var(--tom); }
+body.modo-config .config .pessoa {
+  border-radius: 14px; margin-bottom: 8px;
+  background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,.01)), var(--bg);
+  transition: border-color var(--medio);
+}
+body.modo-config .config .pessoa:hover { border-color: var(--line-forte); }
+body.modo-config .config .pessoa-cab { padding: 11px 14px; }
+body.modo-config .config .pessoa-av {
+  width: 34px; height: 34px; flex-basis: 34px; color: var(--tom);
+  background: linear-gradient(150deg, color-mix(in srgb, var(--tom) 26%, transparent), var(--tom-fu));
+}
+body.modo-config .config .pessoa .lista { border: 0; border-radius: 0; box-shadow: none; background: transparent; }
+body.modo-config .config .pg-btn { border-radius: 10px; display: grid; place-items: center; transition: background var(--rapido), color var(--rapido), transform var(--rapido); }
+body.modo-config .config .pg-btn:hover:not(:disabled) { transform: translateY(-1px); color: var(--tom); }
+body.modo-config .config .memu-filtros input,
+body.modo-config .config .memu-filtros select { border-radius: 10px; }
+
+/* ── Janelas estreitas ─────────────────────────────────────── */
+@media (max-width: 760px) {
+  body.modo-config .cfg-nav-item { padding: 4px 11px 4px 4px; min-height: 36px; margin: 0; }
+  body.modo-config .cfg-nav-tile { width: 26px; height: 26px; flex-basis: 26px; }
+  body.modo-config .cfg-nav-item.ativa::before { left: 8px; right: 8px; top: auto; bottom: -1px; width: auto; height: 2px; border-radius: 2px; }
+  body.modo-config .cfg-cab-tile { width: 44px; height: 44px; flex-basis: 44px; border-radius: 13px; }
+  body.modo-config .cfg-cab-tile svg { width: 21px; height: 21px; }
+}
+@media (max-width: 520px) {
+  /* Ícone (32) + chave (44) + gaps: o texto reserva esse espaço para a
+     chave continuar na mesma linha em vez de cair para baixo. */
+  body.modo-config .config .item { gap: 12px; }
+  body.modo-config .config .item-txt { flex: 1 1 calc(100% - 124px); }
+  body.modo-config .config .item > .item-ico { width: 32px; height: 32px; flex-basis: 32px; padding: 8px; }
+  body.modo-config .config .mem-abas { display: flex; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.modo-config .cfg-nav-item.ativa::before,
+  body.modo-config .cfg-cab-tile,
+  body.modo-config .config .secao:not([hidden]) .lista > .item,
+  body.modo-config .config .secao:not([hidden]) .tv-lista > .item,
+  body.modo-config .config .secao:not([hidden]) .medidor { animation: none; }
+  body.modo-config .config .chave::after { transition: none; }
+}
