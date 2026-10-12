@@ -594,6 +594,8 @@ class Api:
         "tv_parear": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "tv_codigo": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "tv_dispositivos": [],
+        "casa_estado": {"ok": False, "configurada": False, "dispositivos": []},
+        "casa_luz": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "definir_provedor_e_modelo": False,
         "definir_modelo": False,
         "visual_modelo_definir": False,
@@ -3557,6 +3559,34 @@ class Api:
                 self._j._push("tv", {"tipo": "erro", "mensagem": str(e)})
         threading.Thread(target=trabalho, daemon=True).start()
         return {"ok": True, "mensagem": "Concluindo pareamento…"}
+
+    # ── Casa: lâmpada e tomada Tuya ───────────────────────────────
+    # O trabalho fica no casa_inteligente.py. A tomada aparece só como
+    # leitura: ela alimenta este PC, então ligar/cortar é pelo celular.
+
+    def casa_estado(self) -> dict:
+        try:
+            import casa_inteligente as casa
+            if not casa.configurada():
+                return {"ok": False, "configurada": False, "dispositivos": []}
+            dados = casa.estado()
+            for item in dados.get("dispositivos", []):
+                item.pop("hsv", None)
+            return {**dados, "configurada": True}
+        except Exception as e:  # noqa: BLE001
+            _log(f"casa_estado: {e}")
+            return {"ok": False, "configurada": True, "mensagem": str(e), "dispositivos": []}
+
+    def casa_luz(self, acao: str, valores: dict | None = None) -> dict:
+        valores = valores if isinstance(valores, dict) else {}
+        try:
+            import casa_inteligente as casa
+            return casa.controlar_luz(str(acao or ""), alvo=str(valores.get("alvo") or ""),
+                                      cor=str(valores.get("cor") or ""), brilho=valores.get("brilho"),
+                                      temperatura=valores.get("temperatura"))
+        except Exception as e:  # noqa: BLE001
+            _log(f"casa_luz: {e}")
+            return {"ok": False, "mensagem": str(e)}
 
 
     # ── Modelo e raciocínio (seletores do composer) ───────────────

@@ -246,6 +246,12 @@ function oficina() {
     logs_limpar: () => true,
     logs_reiniciar_ngrok: () => true,
     emily_atualizacao_inicio: () => ({ verificar: false, em_pacote: false }),
+    casa_estado: () => ({ ok: true, configurada: true, dispositivos: [
+      { id: 'luz1', nome: 'Lâmpada', tipo: 'luz', ligada: true, modo: 'cor', cor: 'laranja', brilho: 80, temperatura: 40 },
+      { id: 'tom1', nome: 'Tomada', tipo: 'tomada', ligada: true, potencia_w: 142, tensao_v: 127,
+        ao_voltar_energia: 'volta como estava', energia_pc: true },
+    ] }),
+    casa_luz: (acao, v = {}) => ({ ok: true, mensagem: `Lâmpada ${acao === 'desligar' ? 'desligada' : 'ligada'}${v.cor ? ` em ${v.cor}` : ''}.` }),
     janela: () => true,
   };
   window.pywebview = { api };
@@ -540,6 +546,8 @@ const ICO = {
   nivel:   '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1.5 14h5M9.5 8h5M17.5 16h5"/>',
   corte:   '<path d="M3 12h2M8 9v6M11 6v12M14 12h7"/><path d="M17 9l3 3-3 3"/>',
   mudo:    '<path d="M11 5L6 9H2v6h4l5 4V5z"/><path d="M22 9l-6 6M16 9l6 6"/>',
+  lampada: '<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 00-3.6 10.8c.6.5 1 1.2 1.1 2V16h5v-.2c.1-.8.5-1.5 1.1-2A6 6 0 0012 3z"/>',
+  tomada:  '<rect x="4" y="3" width="16" height="18" rx="4"/><path d="M9.5 9v2.5M14.5 9v2.5M9.5 15.5a3.5 3.5 0 005 0"/>',
 };
 
 // Cada intensidade tem uma silhueta própria, inclusive na pílula fechada.
@@ -4087,6 +4095,7 @@ const CONFIG_GRUPOS = [
     { id: 'memoria', titulo: 'Memória', ico: 'cerebro', tom: 'coral', sobre: 'O que ela lembra de você e dos outros', busca: 'você pessoas discord unificada fatos' },
   ] },
   { nome: 'Dispositivos', paginas: [
+    { id: 'casa', titulo: 'Casa', ico: 'lampada', tom: 'ambar', sobre: 'Lâmpada e tomada inteligentes', busca: 'luz lampada cor brilho tomada energia tuya smart life' },
     { id: 'tv', titulo: 'TV', ico: 'tv', tom: 'areia', sobre: 'Android TV pela rede de casa', busca: 'parear conectar dispositivo' },
     { id: 'gateway', titulo: 'Conexão do celular', ico: 'celular', tom: 'ambar', sobre: 'Ponte entre o PC e o Android', busca: 'gateway ngrok endpoint android url túnel' },
     { id: 'sistema', titulo: 'Este computador', ico: 'chip', tom: 'oliva', sobre: 'Uso do processador e da memória', busca: 'processador memória uso sistema' },
@@ -4402,6 +4411,9 @@ async function montarConfig() {
       <div id="cfg-mem-unificada" hidden></div>`,
       'O que ela lembra de você e de quem fala com ela no Discord.', '', 'memoria') +
     secao('Este computador', medidores(sis || {}), '', '', 'sistema') +
+    secao('Casa', `<div id="cfg-casa"><p class="secao-nota">Lendo a casa…</p></div>`,
+      'A Emily controla a lâmpada pela rede de casa, com a nuvem da Tuya de reserva. A tomada alimenta este PC: ligar e cortar a energia é pelo celular.',
+      `<button class="btn-linha tv-add" id="cfg-casa-atualizar" type="button" aria-label="Atualizar estado da casa">${svg(ICO.refazer)}<span>Atualizar</span></button>`, 'casa') +
     secao('TV',
       `<div id="cfg-tv"></div>
        <p class="secao-nota" id="cfg-tv-status" hidden></p>`,
@@ -4438,6 +4450,7 @@ async function montarConfig() {
   ligarConfig();
   atualizarGatewayEndpoint(gateway);
   desenharTv(tvs || []);
+  desenharCasa();
   desenharAtualizacao();
   ESTADO.pessoas = pessoas || [];
   ESTADO.pessoaPag = 0;
@@ -4529,6 +4542,130 @@ function desenharTv(dispositivos) {
         redesenharTv();
       }
     };
+  });
+}
+
+/* ── Casa: lâmpada e tomada Tuya ───────────────────────────────────
+   A lâmpada tem controle completo aqui. A tomada só mostra o estado:
+   ela alimenta este PC, e cortar a energia daqui seria cortar a própria
+   Emily — esse controle mora no celular. */
+
+const CASA_CORES = [
+  ['vermelho', '#ff2a1a'], ['laranja', '#ff7a1a'], ['amarelo', '#ffc21a'],
+  ['verde', '#2fd26a'], ['ciano', '#1ad6e0'], ['azul', '#2f6bff'],
+  ['roxo', '#8a3dff'], ['rosa', '#ff4f9a'],
+];
+
+async function desenharCasa() {
+  const box = $('#cfg-casa');
+  if (!box) return;
+  const atualizar = $('#cfg-casa-atualizar');
+  if (atualizar) atualizar.onclick = () => { box.innerHTML = '<p class="secao-nota">Lendo a casa…</p>'; desenharCasa(); };
+  const dados = await tenta('casa_estado', { __teto: 15000 }) || {};
+  if (!box.isConnected) return;
+  if (dados.configurada === false) {
+    box.innerHTML = '<p class="secao-nota">Nenhum aparelho configurado neste PC. Os aparelhos ficam em ~/.config/emily-casa.</p>';
+    return;
+  }
+  const lista = dados.dispositivos || [];
+  if (!lista.length) {
+    box.innerHTML = `<p class="secao-nota">${esc(dados.mensagem || 'Não consegui ler a casa agora.')}</p>`;
+    return;
+  }
+  box.innerHTML = lista.map(d => d.tipo === 'luz' ? cartaoLuz(d) : cartaoTomada(d)).join('')
+    + '<p class="secao-nota" id="cfg-casa-aviso" role="status" aria-live="polite" hidden></p>';
+  ligarCasa(lista);
+}
+
+function cartaoLuz(d) {
+  if (d.erro) return `<div class="lista casa-cartao"><div class="item">${svg(ICO.lampada, 'item-ico')}
+    <div class="item-txt"><strong>${esc(d.nome)}</strong><small>${esc(d.erro)}</small></div></div></div>`;
+  const estado = !d.ligada ? 'Desligada' : d.modo === 'cor'
+    ? `Cor ${esc(d.cor)} · brilho ${d.brilho}%` : `Luz branca · brilho ${d.brilho}%`;
+  return `<div class="lista casa-cartao" data-casa="${esc(d.id)}" data-ligada="${d.ligada}">
+    <div class="item">
+      ${svg(ICO.lampada, 'item-ico')}
+      <div class="item-txt"><strong>${esc(d.nome)}</strong><small class="casa-estado-txt">${estado}</small></div>
+      <button class="chave casa-chave" role="switch" aria-label="Ligar ${esc(d.nome)}" aria-checked="${!!d.ligada}"></button>
+    </div>
+    <div class="item casa-controles">
+      <div class="casa-cores" role="group" aria-label="Cores">
+        ${CASA_CORES.map(([nome, hex]) => `<button class="casa-cor${d.ligada && d.modo === 'cor' && d.cor === nome ? ' ativa' : ''}"
+          type="button" data-cor="${nome}" style="--cor:${hex}" aria-label="${nome}" title="${nome}"></button>`).join('')}
+        <button class="casa-cor branca${d.ligada && d.modo !== 'cor' ? ' ativa' : ''}" type="button" data-cor="branca"
+          aria-label="Luz branca" title="Luz branca"></button>
+      </div>
+      <label class="casa-faixa"><span>Brilho</span>
+        <input type="range" class="vol-slider" data-casa-brilho min="1" max="100" step="1" value="${d.brilho || 100}" aria-label="Brilho">
+        <span class="vol-valor">${d.brilho || 100}%</span></label>
+      <label class="casa-faixa"><span>Quente · fria</span>
+        <input type="range" class="vol-slider casa-temp" data-casa-temp min="0" max="100" step="1" value="${d.temperatura ?? 50}" aria-label="Temperatura da luz branca">
+        <span class="vol-valor">${d.temperatura ?? 50}%</span></label>
+    </div>
+  </div>`;
+}
+
+function cartaoTomada(d) {
+  const sub = d.erro ? esc(d.erro) : [
+    d.ligada ? 'Ligada' : 'Desligada',
+    d.potencia_w != null ? `${Math.round(d.potencia_w)} W agora` : '',
+    d.tensao_v != null ? `${Math.round(d.tensao_v)} V` : '',
+    d.ao_voltar_energia ? `após queda de luz ${esc(d.ao_voltar_energia)}` : '',
+  ].filter(Boolean).join(' · ');
+  return `<div class="lista casa-cartao"><div class="item">
+    ${svg(ICO.tomada, 'item-ico')}
+    <div class="item-txt"><strong>${esc(d.nome)}${d.energia_pc ? ' · energia do PC' : ''}</strong><small>${sub}</small></div>
+    ${d.erro ? '' : `<span class="casa-selo${d.ligada ? ' ligada' : ''}">${d.ligada ? 'Ligada' : 'Desligada'}</span>`}
+  </div></div>`;
+}
+
+function ligarCasa(lista) {
+  const aviso = texto => {
+    const el = $('#cfg-casa-aviso');
+    if (!el) return;
+    el.hidden = !texto; el.textContent = texto || '';
+  };
+  const mandar = async (cartao, acao, valores = {}) => {
+    const alvo = lista.find(d => d.id === cartao.dataset.casa)?.nome || '';
+    cartao.classList.add('enviando');
+    const r = await tenta('casa_luz', acao, { ...valores, alvo }, { __teto: 15000 });
+    cartao.classList.remove('enviando');
+    if (!r?.ok) { aviso(r?.mensagem || 'A lâmpada não respondeu.'); return false; }
+    aviso('');
+    // "Lâmpada ligada em azul, brilho 80%." vira "Ligada em azul, brilho 80%".
+    const sub = $('.casa-estado-txt', cartao);
+    const texto = String(r.mensagem || '').replace(alvo, '').trim().replace(/\.$/, '');
+    if (sub && texto) sub.textContent = texto[0].toUpperCase() + texto.slice(1);
+    return true;
+  };
+  $$('.casa-cartao[data-casa]').forEach(cartao => {
+    const chave = $('.casa-chave', cartao);
+    chave.onclick = async () => {
+      const ligar = chave.getAttribute('aria-checked') !== 'true';
+      chave.setAttribute('aria-checked', String(ligar));
+      if (!await mandar(cartao, ligar ? 'ligar' : 'desligar')) chave.setAttribute('aria-checked', String(!ligar));
+    };
+    $$('.casa-cor', cartao).forEach(b => b.onclick = async () => {
+      const cor = b.dataset.cor;
+      if (await mandar(cartao, cor === 'branca' ? 'branco' : 'cor', cor === 'branca' ? {} : { cor })) {
+        $$('.casa-cor', cartao).forEach(x => x.classList.toggle('ativa', x === b));
+        chave.setAttribute('aria-checked', 'true');
+      }
+    });
+    const faixa = (input, acao, chaveValor) => {
+      const valor = input.nextElementSibling;
+      const pintar = () => {
+        input.style.setProperty('--pct', `${input.value}%`);
+        if (valor) valor.textContent = `${input.value}%`;
+      };
+      pintar();
+      input.oninput = pintar;
+      input.onchange = async () => {
+        if (await mandar(cartao, acao, { [chaveValor]: Number(input.value) })) chave.setAttribute('aria-checked', 'true');
+      };
+    };
+    faixa($('[data-casa-brilho]', cartao), 'brilho', 'brilho');
+    faixa($('[data-casa-temp]', cartao), 'temperatura', 'temperatura');
   });
 }
 
@@ -5466,7 +5603,8 @@ function ligarConfig() {
     ], { classe: 'popover-modelos-chat' });
   };
 
-  $$('.chave').forEach(ch => ch.onclick = async () => {
+  // Só as chaves de preferência: a da lâmpada (Casa) tem ligação própria.
+  $$('.chave[data-chave]').forEach(ch => ch.onclick = async () => {
     const ligado = ch.getAttribute('aria-checked') !== 'true';
     ch.setAttribute('aria-checked', String(ligado));   // otimista: o toggle responde na hora
     const ok = await tenta('set_toggle', ch.dataset.chave, ligado);

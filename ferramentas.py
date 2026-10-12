@@ -5233,6 +5233,136 @@ def _registrar_contexto():
             propriedades=props,obrigatorios=required,somente_leitura=True,aviso="",executar=lambda _fn=fn,**a: json.dumps(_fn(**a),ensure_ascii=False)))
 _registrar_contexto()
 
+# ═════════════════════════════════════════════════════════════════
+# CATÁLOGO — CASA: lâmpada e tomada Tuya
+#
+# O trabalho fica no casa_inteligente.py. No PC fala direto pela rede de casa
+# (com a nuvem da Tuya de reserva); na Oracle, que atende o Android e o
+# Discord, vai só pela nuvem. energia_pc existe SÓ na Oracle: a tomada
+# alimenta o PC, e o PC não consegue religar a própria energia.
+# ═════════════════════════════════════════════════════════════════
+
+def _casa():
+    import casa_inteligente
+    if not casa_inteligente.configurada():
+        raise casa_inteligente.CasaErro(
+            "A casa ainda não está configurada (faltam os aparelhos da Tuya nesta máquina).")
+    return casa_inteligente
+
+
+def _casa_estado():
+    try:
+        casa = _casa()
+        return consulta(casa.descrever_estado(casa.estado()))
+    except Exception as e:  # noqa: BLE001 - CasaErro e falhas de rede viram recusa
+        return recusa(str(e))
+
+
+registrar(Ferramenta(
+    nome="casa_estado",
+    descricao=(
+        "Lê o estado real da lâmpada e da tomada inteligente da casa do Vitor: se "
+        "estão ligadas, cor, brilho e temperatura da luz, e o consumo da tomada. "
+        "Use antes de responder perguntas sobre elas e quando um comando falhar."
+    ),
+    propriedades={},
+    aviso="",
+    executar=lambda: _casa_estado(),
+    somente_leitura=True,
+))
+
+
+def _casa_luz(acao: str, cor: str = "", brilho=None, temperatura=None, alvo: str = ""):
+    try:
+        casa = _casa()
+        r = casa.controlar_luz(acao, alvo=alvo, cor=cor, brilho=brilho, temperatura=temperatura)
+        return ResultadoFerramenta(texto=r["mensagem"], ok=True, mudou=True)
+    except Exception as e:  # noqa: BLE001
+        return recusa(str(e))
+
+
+registrar(Ferramenta(
+    nome="controlar_luz",
+    descricao=(
+        "Controla a lâmpada inteligente RGB do Vitor. acao: ligar, desligar, "
+        "alternar, cor (passe cor: vermelho, laranja, amarelo, verde, ciano, azul, "
+        "roxo, lilás, rosa, magenta, branca, quente, fria ou um código #rrggbb), "
+        "brilho (passe brilho 1-100), temperatura (passe temperatura 0 = bem "
+        "quente/amarelada a 100 = bem fria/azulada) ou branco (volta à luz branca). "
+        "Pode combinar cor ou temperatura com brilho numa chamada só. Os comandos "
+        "são absolutos: não repita uma chamada que deu certo."
+    ),
+    propriedades={
+        "acao": {"type": "string", "enum": ["ligar", "desligar", "alternar", "cor", "brilho", "temperatura", "branco"],
+                 "description": "O que fazer com a luz."},
+        "cor": {"type": "string", "description": "Nome da cor ou #rrggbb, para acao=cor."},
+        "brilho": {"type": "integer", "description": "Brilho de 1 a 100."},
+        "temperatura": {"type": "integer", "description": "0 = bem quente, 100 = bem fria (luz branca)."},
+        "alvo": {"type": "string", "description": "Nome da lâmpada, só se houver mais de uma."},
+    },
+    obrigatorios=["acao"],
+    aviso="",
+    executar=lambda acao, cor="", brilho=None, temperatura=None, alvo="":
+        _casa_luz(acao, cor, brilho, temperatura, alvo),
+))
+
+
+def _pc_responde() -> Optional[bool]:
+    """Na Oracle: o gateway do PC responde pelo túnel? None = não deu pra saber."""
+    try:
+        import requests
+        cfg = json.loads(Path(os.environ["EMILY_RELAY_CONFIG"]).read_text())
+        with requests.get(cfg["pc_url"].rstrip("/") + "/pc/status",
+                          headers={"Authorization": "Bearer " + cfg["pc_token"]},
+                          timeout=(2, 3), allow_redirects=False) as r:
+            return r.status_code == 200
+    except (KeyError, OSError, ValueError):
+        return None
+    except Exception:  # noqa: BLE001 - recusa de conexão: túnel caído, PC fora
+        return False
+
+
+def _energia_pc(acao: str, aguardar_pc: bool = False):
+    if acao not in {"estado", "ligar", "desligar", "cancelar"}:
+        return recusa("Use estado, ligar, desligar ou cancelar.")
+    try:
+        casa = _casa()
+        r = casa.energia_pc(acao, pc_online=_pc_responde, aguardar_pc=bool(aguardar_pc))
+        if acao == "estado":
+            return consulta(r["mensagem"])
+        texto = r["mensagem"]
+        if r.get("requer_confirmacao"):
+            # O corte forçado só existe no celular, com confirmação no turno seguinte.
+            texto += (" Por aqui não dá para forçar o corte: o caminho é desligar o PC "
+                      "e pedir de novo com aguardar_pc=true, ou forçar pelo celular.")
+        return ResultadoFerramenta(texto=texto, ok=bool(r.get("ok")), mudou=bool(r.get("ok")))
+    except Exception as e:  # noqa: BLE001
+        return recusa(str(e))
+
+
+if os.getenv("EMILY_RUNTIME_CLOUD") == "1":
+    registrar(Ferramenta(
+        nome="energia_pc",
+        descricao=(
+            "Liga ou corta a energia da tomada que alimenta o estabilizador do PC do "
+            "Vitor. acao=estado lê a tomada e diz se o PC parece ligado. acao=ligar "
+            "devolve a energia (o PC só liga sozinho se a BIOS estiver configurada). "
+            "acao=desligar corta a energia SOMENTE se o PC já estiver desligado; com "
+            "o PC ligado não corta e explica. Para desligar tudo, desligue o PC antes "
+            "e chame desligar com aguardar_pc=true: a tomada é cortada quando ele "
+            "apagar. acao=cancelar desiste do corte pendente. Isto não desliga o PC."
+        ),
+        propriedades={
+            "acao": {"type": "string", "enum": ["estado", "ligar", "desligar", "cancelar"]},
+            "aguardar_pc": {"type": "boolean",
+                            "description": "Com acao=desligar: esperar o PC desligar e então cortar."},
+        },
+        obrigatorios=["acao"],
+        aviso="",
+        executar=lambda acao, aguardar_pc=False: _energia_pc(acao, aguardar_pc),
+    ))
+
+
 GRUPO_PADRAO = "geral"
 
 # Volta ao comportamento antigo: 148 ferramentas em toda chamada. Existe pra

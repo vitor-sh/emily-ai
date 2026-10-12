@@ -4102,3 +4102,48 @@ body.modo-config .config .memu-filtros select { border-radius: 10px; }
   body.modo-config .config .secao:not([hidden]) .medidor { animation: none; }
   body.modo-config .config .chave::after { transition: none; }
 }
+
+/* ── Configurações → Casa: lâmpada e tomada ────────────────── */
+body.modo-config .config .casa-cartao + .casa-cartao { margin-top: 12px; }
+body.modo-config .config .casa-cartao { transition: opacity var(--medio); }
+body.modo-config .config .casa-cartao.enviando { opacity: .7; pointer-events: none; }
+body.modo-config .config .casa-cartao[data-ligada="true"] > .item:first-child > .item-ico {
+  box-shadow: 0 0 18px -4px color-mix(in srgb, var(--tom) 70%, transparent);
+}
+body.modo-config .config .casa-controles {
+  flex-direction: column; align-items: stretch; gap: 14px; padding-top: 4px;
+}
+.casa-cores { display: flex; flex-wrap: wrap; gap: 10px; }
+.casa-cor {
+  width: 30px; height: 30px; border-radius: 99px; padding: 0;
+  background: var(--cor); border: 2px solid rgba(255,255,255,.08);
+  box-shadow: inset 0 0 0 2px rgba(0,0,0,.25);
+  transition: transform var(--medio), box-shadow var(--medio), border-color var(--rapido);
+}
+.casa-cor:hover { transform: translateY(-2px) scale(1.06); }
+.casa-cor:focus-visible { outline: 2px solid var(--acento-mo); outline-offset: 3px; }
+.casa-cor.ativa {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--cor) 45%, transparent), 0 6px 16px -6px var(--cor);
+}
+.casa-cor.branca { --cor: #f4ede2; background: linear-gradient(135deg, #ffd9a8, #f4f1ec 55%, #d6e6ff); }
+.casa-faixa {
+  display: grid; grid-template-columns: 96px 1fr auto; align-items: center; gap: 12px;
+  font-size: 12px; color: var(--txt-2);
+}
+body.modo-config .config .casa-faixa .vol-slider { width: 100%; }
+body.modo-config .config .casa-temp {
+  background: linear-gradient(90deg, #ffb35c, #f4f1ec 50%, #9cc4ff);
+}
+.casa-selo {
+  flex: 0 0 auto; padding: 4px 10px; border-radius: 99px; font-size: 11.5px; font-weight: 600;
+  color: var(--txt-3); background: rgba(255,255,255,.05); border: 1px solid var(--line);
+}
+.casa-selo.ligada {
+  color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+}
+@media (max-width: 520px) {
+  .casa-faixa { grid-template-columns: 1fr auto; }
+  .casa-faixa > span:first-child { grid-column: 1 / -1; }
+}

@@ -196,6 +196,13 @@ def create_app(cfg=None):
             return jsonify(erro='Consulta grande demais'),413
         return runtime_proxy('search')
 
+    @app.post('/casa')
+    def smart_home():
+        # Lâmpada e energia do PC pela nuvem da Tuya: não depende do PC ligado.
+        if request.content_length and request.content_length > 4096:
+            return jsonify(ok=False,mensagem='Pedido grande demais'),413
+        return runtime_proxy('casa')
+
     @app.post('/admin/discord/rpc')
     def discord_rpc():
         if request.content_length and request.content_length > 256*1024:

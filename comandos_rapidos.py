@@ -29,6 +29,9 @@ def parse(text):
     s = re.sub(r' (?:agora|por favor|pra mim)$', '', s)
     m = re.fullmatch(r'(?:abre|abra|abrir) (?:o |a )?('+'|'.join(APPS)+r')(?: no (?:meu )?(?:pc|computador))?',s)
     if m: return ('abrir_app', {'nome':APPS[m[1]]})
+    # Só a lâmpada. Energia do PC nunca é atalho: passa pelo agente e pela trava.
+    m = re.fullmatch(r'(liga|ligue|ligar|acende|acenda|desliga|desligue|desligar|apaga|apague) (?:a |minha |a minha )?(?:luz|lampada)(?: do (?:meu )?quarto)?', s)
+    if m: return ('controlar_luz', {'acao': 'ligar' if m[1] in {'liga','ligue','ligar','acende','acenda'} else 'desligar'})
     return None
 
 

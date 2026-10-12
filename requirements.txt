@@ -57,6 +57,7 @@ beautifulsoup4==4.15.0
 playwright==1.60.0
 websockets==16.0
 androidtvremote2==0.3.2           # controle de Android TV (mesmo protocolo do app do celular)
+tinytuya==1.20.0               # lâmpada e tomada Tuya (casa_inteligente.py)
 yt-dlp==2026.8.19              # downloads de vídeo/áudio pedidos na aba atual
 
 # ── Discord ────────────────────────────────────────────────────────

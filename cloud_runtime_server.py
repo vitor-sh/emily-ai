@@ -107,6 +107,41 @@ def create_app():
         except Exception:
             return jsonify(erro='Pesquisa indisponível no momento'), 502
 
+    @app.post('/casa')
+    def casa():
+        """Lâmpada e tomada pela nuvem da Tuya, para o Android funcionar com o PC desligado."""
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get('args', {}), dict):
+            return jsonify(ok=False, mensagem='Pedido inválido'), 400
+        import casa_inteligente as casa
+        from ferramentas import _pc_responde
+        operation, args = data.get('operation'), data.get('args', {})
+        try:
+            if not casa.configurada():
+                return jsonify(ok=False, mensagem='A casa ainda não está configurada na Oracle.'), 503
+            if operation == 'estado':
+                result = casa.estado()
+                for item in result.get('dispositivos', []): item.pop('hsv', None)
+                return jsonify({**result, 'ok': True, 'mensagem': casa.descrever_estado(result)})
+            if operation == 'luz':
+                allowed = {'acao', 'cor', 'brilho', 'temperatura', 'alvo'}
+                if not set(args) <= allowed or not isinstance(args.get('acao'), str):
+                    return jsonify(ok=False, mensagem='Argumentos inválidos'), 400
+                return jsonify(casa.controlar_luz(args['acao'], alvo=str(args.get('alvo') or ''),
+                    cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura')))
+            if operation == 'energia_pc':
+                acao = args.get('acao')
+                if acao not in {'estado', 'ligar', 'desligar', 'confirmar_desligar', 'cancelar'}:
+                    return jsonify(ok=False, mensagem='Ação de energia inválida'), 400
+                return jsonify(casa.energia_pc(acao, pc_online=_pc_responde,
+                    aguardar_pc=args.get('aguardar_pc') is True,
+                    confirmation_id=str(args.get('confirmation_id') or '')))
+            return jsonify(ok=False, mensagem='Operação desconhecida'), 400
+        except casa.CasaErro as exc:
+            return jsonify(ok=False, mensagem=str(exc)), 502
+        except Exception:
+            return jsonify(ok=False, mensagem='A casa não respondeu agora. Tente de novo.'), 502
+
     @app.post('/discord/rpc')
     def rpc():
         import discord_bot as bot

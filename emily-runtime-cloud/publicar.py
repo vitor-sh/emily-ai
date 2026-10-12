@@ -48,7 +48,8 @@ def configuration():
         EMILY_CONFIG_FILE='/home/ubuntu/.config/emily-runtime-cloud/providers.env',
         EMILY_RELAY_CONFIG='/home/ubuntu/.config/emily-relay/config.json',
         EMILY_MEMORIA_UNIFICADA='1', EMILY_MEMORIA_PASTA=REMOTE+'/data/memoria_unificada',
-        EMILY_OLLAMA_URL='http://127.0.0.1:11434')
+        EMILY_OLLAMA_URL='http://127.0.0.1:11434',
+        EMILY_CASA_DIR='/home/ubuntu/.config/emily-runtime-cloud/casa', EMILY_CASA_TRANSPORTE='nuvem')
     # dotenv e systemd aceitam estas strings; não executar o arquivo como shell.
     sections = []
     providers = sorted({k.split('_')[2].lower() for k in selected if k.startswith('EMILY_PROVEDOR_') and k != 'EMILY_PROVEDOR_LLM'})
