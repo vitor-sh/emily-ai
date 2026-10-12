@@ -156,6 +156,18 @@ _lock = threading.RLock()
 _nuvem = None
 
 
+def _tinytuya():
+    """A biblioteca pode não estar na versão compilada; isso é um aviso, não um traceback."""
+    try:
+        import tinytuya
+    except ImportError as e:
+        raise CasaErro(
+            "Esta Emily compilada não traz a biblioteca da Tuya (tinytuya). "
+            "Recompile com build_emily_linux.py, ou controle pelo celular."
+        ) from e
+    return tinytuya
+
+
 def _cliente_nuvem():
     global _nuvem
     with _lock:
@@ -164,7 +176,7 @@ def _cliente_nuvem():
         cfg = _ler_json("tinytuya.json", None)
         if not isinstance(cfg, dict) or not cfg.get("apiKey") or not cfg.get("apiSecret"):
             raise CasaErro("A nuvem da Tuya não está configurada (falta tinytuya.json).")
-        import tinytuya
+        tinytuya = _tinytuya()
         cliente = tinytuya.Cloud(apiRegion=cfg.get("apiRegion") or "us", apiKey=cfg["apiKey"],
                                  apiSecret=cfg["apiSecret"], apiDeviceID=cfg.get("apiDeviceID") or "")
         if cliente.error or not cliente.token:
@@ -186,7 +198,7 @@ def _erro_tuya(resposta) -> str:
 def _dispositivo_local(d: dict):
     if not d["ip"] or not d["chave"]:
         raise CasaErro(f"{d['nome']} não tem IP ou chave local salvos.")
-    import tinytuya
+    tinytuya = _tinytuya()
     dev = tinytuya.Device(d["id"], d["ip"], d["chave"], version=float(d["versao"]))
     dev.set_socketTimeout(2.5)
     dev.set_socketRetryLimit(1)
@@ -265,7 +277,10 @@ def _via(d: dict, local: Callable, nuvem: Callable, transporte: str):
             erros.append(str(e))
         except Exception as e:  # noqa: BLE001
             erros.append(f"nuvem: {e}")
-    raise CasaErro(" ".join(erros) or f"Sem caminho para falar com {d['nome']}.")
+    # Local e nuvem costumam falhar pelo mesmo motivo (ex.: biblioteca ausente):
+    # repetir a mesma frase duas vezes só polui a tela.
+    unicos = list(dict.fromkeys(erros))
+    raise CasaErro(" ".join(unicos) or f"Sem caminho para falar com {d['nome']}.")
 
 
 def ler(d: dict, transporte: str = "") -> Dict[str, object]:

@@ -26,7 +26,9 @@ PACOTES = ("memoria_unificada", "emily_cloud", "hollow_knight_emily",
            "google.auth", "google.oauth2")
 COLETAR = ("discord", "aiohttp", "watchdog", "webview", "pystray",
            "chromadb", "onnxruntime", "tokenizers", "soundcard",
-           "flask", "websockets", "playwright")
+           "flask", "websockets", "playwright",
+           # casa_inteligente.py importa tinytuya dentro das funções (invisível ao PyInstaller).
+           "tinytuya", "colorama")
 
 
 def modulos_raiz() -> list[str]:

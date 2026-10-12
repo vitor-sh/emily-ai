@@ -279,7 +279,7 @@ class FishAudioDireto:
             return b""
         base = self._cfg("EMILY_FISH_BASE_URL", "https://api.fish.audio").rstrip("/")
         voz = self._cfg(
-            "EMILY_FISH_VOICE_ID", "1d5c6866f45a44a3aa8df65061908ab2"
+            "EMILY_FISH_VOICE_ID", "28d1575c848841de930786be8d1ca40d"
         )
         modelo = self._cfg("EMILY_FISH_MODELO_TTS", "s2.1-pro-free")
         tentativas = max(1, int(self._cfg("EMILY_TTS_TENTATIVAS", "2")))
@@ -336,7 +336,7 @@ class FishAudioDireto:
         base = self._cfg(
             "EMILY_FISH_BASE_URL", "https://api.fish.audio").rstrip("/")
         voz = self._cfg(
-            "EMILY_FISH_VOICE_ID", "1d5c6866f45a44a3aa8df65061908ab2")
+            "EMILY_FISH_VOICE_ID", "28d1575c848841de930786be8d1ca40d")
         modelo = self._cfg("EMILY_FISH_MODELO_TTS", "s2.1-pro-free")
         tentativas = max(1, int(self._cfg("EMILY_TTS_TENTATIVAS", "2")))
         ultimo_erro: Exception | None = None

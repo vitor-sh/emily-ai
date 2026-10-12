@@ -203,6 +203,10 @@ hidden_imports += [
 collect_all = [
     "discord", "aiohttp", "watchdog", "webview", "pystray",
     "chromadb", "onnxruntime", "tokenizers", "playwright",
+    # casa_inteligente.py importa tinytuya só dentro das funções; o PyInstaller
+    # não enxerga isso. Sem esta linha a página Casa mostrava "No module named
+    # 'tinytuya'" no app compilado (12/10/2026).
+    "tinytuya", "colorama",
 ]
 
 # ─────────────────────────────────────────────────────────────────

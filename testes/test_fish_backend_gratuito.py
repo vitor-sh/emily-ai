@@ -60,3 +60,25 @@ def test_timeout_continua_permitindo_retry():
     assert not ns['_erro_tts_permanente'](TimeoutError())
     assert not ns['_erro_tts_permanente'](SimpleNamespace(status=429))
     assert not ns['_erro_tts_permanente'](SimpleNamespace(status=503))
+
+
+def test_aviso_de_400_aponta_para_a_voz():
+    ns = funcoes()
+    for status in (400, 404):
+        erro = SimpleNamespace(status=status)
+        assert 'FISH_VOICE_ID' in ns['_aviso_tts_permanente'](erro)
+    assert 'FISH_VOICE_ID' not in ns['_aviso_tts_permanente'](SimpleNamespace(status=401))
+
+
+def test_voz_padrao_e_a_mesma_no_pc_no_hollow_knight_e_no_android():
+    """O padrão do pacote público (1d5c6866) não existe na conta do Vitor: o Fish
+    responde 400. Os três lugares precisam apontar para a mesma voz da conta."""
+    import re
+    voz = re.search(r"FISH_VOICE_ID = os\.getenv\('FISH_VOICE_ID', '([0-9a-f]{32})'\)",
+                    (RAIZ / 'voz.py').read_text()).group(1)
+    hk = set(re.findall(r'"EMILY_FISH_VOICE_ID",\s*"([0-9a-f]{32})"',
+                        (RAIZ / 'hollow_knight_emily/python/hollow_knight_permanente.py').read_text()))
+    android = RAIZ / 'EmilyAPP2/app/src/main/java/com/example/emilyapp/FishAudioTTS.kt'
+    assert hk == {voz}
+    if android.exists():
+        assert re.search(r'FISH_VOICE_ID = "([0-9a-f]{32})"', android.read_text()).group(1) == voz

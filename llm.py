@@ -860,6 +860,16 @@ class ProvedorOpenAI(Provedor):
             raise ErroTransporte(f"{status} do provedor '{self.nome}': {texto}") from e
 
         if status in (401, 403):
+            # O OmniRoute aceita a chave da Emily mas responde 401 quando a conta
+            # do provedor DE TRÁS (ex.: Kiro) perdeu a credencial. Dizer "confira
+            # a credencial" mandava procurar no .env um problema que está no painel.
+            m = re.search(r"no active credentials for provider:\s*([\w.-]+)", texto, re.IGNORECASE)
+            if m:
+                raise ErroConfiguracao(
+                    f"o '{self.nome}' está sem credencial ativa para o provedor '{m.group(1)}' "
+                    f"({status}). Reconecte a conta '{m.group(1)}' no painel do OmniRoute; "
+                    "a chave da Emily está certa."
+                ) from e
             raise ErroConfiguracao(
                 f"provedor '{self.nome}' recusou a credencial ({status}). "
                 "Confira a credencial do provedor nas configurações."
@@ -2817,8 +2827,14 @@ def chamar(
 
     ultimo_erro: Optional[Exception] = None
     comeco = time.monotonic()
+    # Provedores que recusaram a credencial NESTA chamada. Outro modelo do mesmo
+    # provedor falharia igual (e gastaria uma ida e volta à toa), então a cadeia
+    # pula direto para o próximo provedor.
+    provedores_sem_acesso: set = set()
 
     for _indice_modelo, (_provedor_id, modelo_final) in enumerate(cadeia_modelos):
+        if _provedor_id in provedores_sem_acesso:
+            continue
         # O primário usa o orçamento de tentativas da rota; os fallbacks
         # ganham menos — já estamos em modo de degradação. Cada degrau tem
         # limitador próprio, porque provedor novo tem RPM próprio.
@@ -2908,9 +2924,21 @@ def chamar(
                         resultado = _medir_stream(resultado, inicio, modelo_final)
                 return resultado
 
-            except ErroConfiguracao:
-                # Chave errada ou faltando não melhora com retry.
-                raise
+            except ErroConfiguracao as e:
+                # Chave errada ou faltando não melhora com retry. Mas se a cadeia
+                # tem OUTRO provedor, ele ainda pode responder: antes isto
+                # abortava a rota inteira e a Emily ficava muda mesmo com o
+                # Claude de reserva funcionando. Sem mais provedores, o erro
+                # original sobe intacto (mesma mensagem de sempre).
+                provedores_sem_acesso.add(_provedor_id)
+                restantes = [p for p, _ in cadeia_modelos[_indice_modelo + 1:]
+                             if p not in provedores_sem_acesso]
+                if not restantes:
+                    raise
+                ultimo_erro = e
+                _log(f"rota '{rota_nome}': provedor '{_provedor_id}' recusou o acesso "
+                     f"({e}). Passando para o próximo provedor da cadeia.")
+                break
 
             except (ErroLimiteTaxa, ErroTransporte) as e:
                 ultimo_erro = e

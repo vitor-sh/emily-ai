@@ -31,7 +31,10 @@ except ImportError:  # pragma: no cover
 load_dotenv()
 
 FISH_AUDIO_KEY = os.getenv('FISH_AUDIO_KEY')
-FISH_VOICE_ID = os.getenv('FISH_VOICE_ID', '1d5c6866f45a44a3aa8df65061908ab2')
+# EmilyV2, a voz da conta do Vitor. O padrão do pacote público (1d5c6866…) NÃO
+# existe nesta conta: o Fish responde 400 na síntese e 404 no get_model. O
+# public-release/exportar.py troca esta linha pelo ID público na exportação.
+FISH_VOICE_ID = os.getenv('FISH_VOICE_ID', '28d1575c848841de930786be8d1ca40d')
 def _aplicar_timeout_fish(sessao):
     """Amarra um teto de tempo no cliente HTTP da Fish.
 
@@ -317,6 +320,10 @@ def _aviso_tts_permanente(erro):
     if status == 402:
         return ("Fish Audio recusou a síntese por cobrança/acesso (HTTP 402). "
                 "Modelo selecionado: " + _backend_fish() + ". A resposta escrita continua disponível.")
+    if status in (400, 404):
+        return ("Fish Audio recusou a solicitação (HTTP " + str(status) + "). Confira se a voz "
+                "(FISH_VOICE_ID) existe na conta dona da chave, além do modelo. "
+                "A resposta escrita continua disponível.")
     return "Fish Audio recusou a solicitação. Confira chave, voz e modelo. A resposta escrita continua disponível."
 
 
