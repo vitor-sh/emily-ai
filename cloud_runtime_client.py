@@ -48,7 +48,7 @@ def ferramenta_local_na_nuvem(f):
     return f.grupo == 'discord' or f.nome in {
         'pesquisar_internet', 'hora_atual', 'perguntar_usuario_tarefa', 'lembrar_fatos',
         # A casa fala com a nuvem da Tuya: funciona na Oracle sem o PC.
-        'casa_estado', 'controlar_luz', 'energia_pc',
+        'casa_estado', 'controlar_luz', 'controlar_tomada',
         'ver_canais_discord', 'ler_chat_discord', 'mandar_mensagem_discord',
         'responder_mensagem_discord', 'mandar_dm_discord',
     }

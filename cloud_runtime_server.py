@@ -129,6 +129,12 @@ def create_app():
                     return jsonify(ok=False, mensagem='Argumentos inválidos'), 400
                 return jsonify(casa.controlar_luz(args['acao'], alvo=str(args.get('alvo') or ''),
                     cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura')))
+            if operation == 'tomada':
+                allowed = {'acao', 'aparelho', 'aguardar_pc'}
+                if not set(args) <= allowed or not isinstance(args.get('acao'), str):
+                    return jsonify(ok=False, mensagem='Argumentos inválidos'), 400
+                return jsonify(casa.controlar_tomada(args['acao'], str(args.get('aparelho') or ''),
+                    pc_online=_pc_responde, aguardar_pc=args.get('aguardar_pc') is True))
             if operation == 'energia_pc':
                 acao = args.get('acao')
                 if acao not in {'estado', 'ligar', 'desligar', 'confirmar_desligar', 'cancelar'}:

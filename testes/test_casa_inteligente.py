@@ -46,6 +46,9 @@ def casa_falsa(tmp_path, monkeypatch):
 
     monkeypatch.setattr(casa, "ler", ler)
     monkeypatch.setattr(casa, "enviar", enviar)
+    # A thread de aprendizado acorda segundos depois do teste e leria a tomada de
+    # verdade (inclusive pela nuvem). Os testes dela chamam a função direto.
+    monkeypatch.setattr(casa, "_aprender_depois", lambda *a, **k: None)
     casa._pendente.clear()
     casa._espera.clear()
     return estados, enviados
@@ -119,11 +122,12 @@ def test_resumo_da_tomada_aplica_escala(casa_falsa):
     assert info["ao_voltar_energia"] == "volta como estava"
 
 
-def test_estado_descreve_tudo_e_marca_a_energia_do_pc(casa_falsa):
-    dados = casa.estado()
-    texto = casa.descrever_estado(dados)
+def test_estado_descreve_tudo_e_mostra_o_aparelho_da_tomada(casa_falsa):
+    texto = casa.descrever_estado(casa.estado())
     assert "Lâmpada: desligada" in texto
-    assert "Tomada (energia do PC): ligada, consumindo 150 W" in texto
+    assert "Tomada: ligada, consumindo 150 W" in texto
+    casa.lembrar_aparelho("ventilador")
+    assert "Tomada (aparelho: ventilador): ligada, consumindo 150 W" in casa.descrever_estado(casa.estado())
 
 
 # ── A trava: a tomada alimenta o PC ───────────────────────────────
@@ -251,8 +255,9 @@ def test_ferramentas_registradas_e_energia_so_na_nuvem(monkeypatch):
     assert {"casa_estado", "controlar_luz"} <= set(ferramentas.CATALOGO)
     assert ferramentas.CATALOGO["casa_estado"].somente_leitura is True
     assert "energia_pc" not in ferramentas.CATALOGO
+    assert "controlar_tomada" in ferramentas.CATALOGO
     from cloud_runtime_client import ferramenta_local_na_nuvem
-    for nome in ("casa_estado", "controlar_luz"):
+    for nome in ("casa_estado", "controlar_luz", "controlar_tomada"):
         assert ferramenta_local_na_nuvem(ferramentas.CATALOGO[nome])
 
 
@@ -294,3 +299,215 @@ def test_ferramenta_sem_casa_recusa_sem_quebrar(tmp_path, monkeypatch):
     monkeypatch.setenv("EMILY_CASA_DIR", str(tmp_path))
     r = ferramentas.executar_estruturado("controlar_luz", {"acao": "ligar"})
     assert r.ok is False and "não está configurada" in r.texto
+
+
+# ── Tomada para qualquer aparelho ─────────────────────────────────
+
+@pytest.fixture
+def tomada_livre(casa_falsa, monkeypatch):
+    """Tomada desligada, sem nada aprendido; o aprendizado em segundo plano fica desligado."""
+    estados, enviados = casa_falsa
+    estados["tom456"].update(switch_1=False, cur_power=0)
+    return estados, enviados
+
+
+@pytest.mark.parametrize("pedido,nome", [("o ventilador", "ventilador"), ("a Air Fryer", "air fryer"),
+                                         ("a minha air fryer", "air fryer"), ("", "")])
+def test_nome_do_aparelho_e_limpo(pedido, nome):
+    assert casa.limpar_aparelho(pedido) == nome
+
+
+@pytest.mark.parametrize("nome,pc", [("PC", True), ("o computador", True), ("estabilizador", True),
+                                      ("ventilador", False), ("air fryer", False), ("pcb da tv", False)])
+def test_reconhece_o_pc_pelo_nome(nome, pc):
+    assert casa.eh_pc(nome) is pc
+
+
+def test_liga_e_desliga_o_ventilador_direto(tomada_livre):
+    estados, enviados = tomada_livre
+    r = casa.controlar_tomada("ligar", "o ventilador", pc_online=lambda: True)
+    assert r["ok"] and "ventilador" in r["mensagem"]
+    assert enviados == [("tom456", {"switch_1": True})]
+    estados["tom456"].update(cur_power=400)      # 40 W: ventilador ligado
+    r = casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)
+    assert r["ok"] and enviados[-1] == ("tom456", {"switch_1": False})
+
+
+def test_trocar_de_aparelho_nao_precisa_de_cadastro(tomada_livre):
+    _, enviados = tomada_livre
+    casa.controlar_tomada("ligar", "ventilador", pc_online=lambda: True)
+    casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)
+    casa.controlar_tomada("ligar", "air fryer", pc_online=lambda: True)
+    assert casa.ultimo_aparelho()["nome"] == "air fryer"
+    assert [c for _, c in enviados] == [{"switch_1": True}, {"switch_1": False}, {"switch_1": True}]
+
+
+def test_sem_nome_vale_o_ultimo_aparelho(tomada_livre):
+    _, enviados = tomada_livre
+    casa.lembrar_aparelho("ventilador")
+    r = casa.controlar_tomada("ligar", "", pc_online=lambda: True)
+    assert r["ok"] and "ventilador" in r["mensagem"]
+
+
+def test_sem_nome_e_sem_historico_pergunta(tomada_livre):
+    with pytest.raises(casa.CasaErro, match="Qual aparelho"):
+        casa.controlar_tomada("ligar", "", pc_online=lambda: True)
+
+
+def test_nome_citado_vence_o_ultimo(tomada_livre):
+    casa.lembrar_aparelho("ventilador")
+    casa.controlar_tomada("ligar", "air fryer", pc_online=lambda: True)
+    assert casa.ultimo_aparelho()["nome"] == "air fryer"
+
+
+def test_pc_continua_com_a_trava_pelo_nome(casa_falsa):
+    _, enviados = casa_falsa            # tomada ligada, 150 W, PC respondendo
+    r = casa.controlar_tomada("desligar", "o PC", pc_online=lambda: True)
+    assert r["ok"] is False and r["requer_confirmacao"] and enviados == []
+
+
+def test_emily_do_pc_nao_liga_nem_corta_a_propria_energia(casa_falsa):
+    _, enviados = casa_falsa
+    with pytest.raises(casa.CasaErro, match="celular"):
+        casa.controlar_tomada("desligar", "PC", pc_online=lambda: True, no_pc=True)
+    assert enviados == []
+    # Outro aparelho no mesmo PC: sem restrição.
+    estados, _ = casa_falsa
+    estados["tom456"].update(switch_1=False, cur_power=0)
+    assert casa.controlar_tomada("ligar", "ventilador", pc_online=lambda: True, no_pc=True)["ok"]
+
+
+def test_nao_corta_o_pc_achando_que_e_o_ventilador(casa_falsa):
+    """Tomada ligada puxando 150 W, PC no ar, nunca informaram o aparelho: pode ser o PC."""
+    _, enviados = casa_falsa
+    r = casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)
+    assert r["ok"] is False and r["conflito_pc"] and enviados == []
+    assert "acao=trocar" in r["mensagem"]
+
+
+def test_depois_de_confirmar_a_troca_o_ventilador_desliga(casa_falsa):
+    _, enviados = casa_falsa
+    casa.controlar_tomada("trocar", "ventilador", pc_online=lambda: True)
+    r = casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)
+    assert r["ok"] and enviados == [("tom456", {"switch_1": False})]
+
+
+def test_pc_desligado_nao_pode_ser_a_carga(casa_falsa):
+    """Gateway fora do ar: a palavra do Vitor vale, mesmo sem histórico."""
+    _, enviados = casa_falsa
+    assert casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: False)["ok"]
+    assert enviados == [("tom456", {"switch_1": False})]
+
+
+def test_consumo_baixo_demais_para_ser_pc_libera(casa_falsa):
+    estados, enviados = casa_falsa
+    estados["tom456"].update(cur_power=300)      # 30 W... abaixo do limite de PC ligado
+    estados["tom456"].update(cur_power=200)      # 20 W
+    assert casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)["ok"]
+    assert enviados
+
+
+def test_consumo_destoante_do_aparelho_aprendido_avisa(casa_falsa):
+    estados, enviados = casa_falsa
+    casa.lembrar_aparelho("ventilador")
+    casa._aprender_consumo("ventilador", 40.0)
+    r = casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)   # 150 W na tomada
+    assert r["ok"] is False and "costuma puxar" in r["mensagem"] and enviados == []
+
+
+def test_consumo_parecido_do_aparelho_aprendido_segue(casa_falsa):
+    estados, enviados = casa_falsa
+    casa.lembrar_aparelho("ventilador")
+    casa._aprender_consumo("ventilador", 140.0)
+    assert casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)["ok"]
+
+
+def test_aprende_consumo_tipico_sem_o_pc(casa_falsa):
+    casa._aprender_consumo("ventilador", 40.0)
+    casa._aprender_consumo("ventilador", 44.0)
+    casa._aprender_consumo("pc", 300.0)
+    casa._aprender_consumo("lixo", 1.0)
+    tipicos = casa._estado_tomada()["tipicos"]
+    assert tipicos == {"ventilador": 42.0}
+
+
+def test_palpite_pelo_consumo_so_com_um_candidato(casa_falsa):
+    casa._aprender_consumo("ventilador", 40.0)
+    casa._aprender_consumo("air fryer", 1500.0)
+    assert casa.adivinhar_aparelho(42.0) == "ventilador"
+    assert casa.adivinhar_aparelho(900.0) is None
+    assert casa.adivinhar_aparelho(1.0) is None
+    casa._aprender_consumo("abajur", 38.0)
+    assert casa.adivinhar_aparelho(40.0) is None           # dois candidatos: não chuta
+
+
+def test_estado_da_tomada_mostra_o_palpite(casa_falsa):
+    estados, _ = casa_falsa
+    casa.lembrar_aparelho("ventilador")
+    casa._aprender_consumo("air fryer", 150.0)
+    texto = casa.descrever_estado(casa.estado())
+    assert "pelo consumo parece ser air fryer" in texto
+
+
+def test_estado_da_tomada_para_um_aparelho(tomada_livre):
+    casa.lembrar_aparelho("ventilador")
+    r = casa.controlar_tomada("estado", "", pc_online=lambda: True)
+    assert r["ok"] and "ventilador" in r["mensagem"] and "desligada" in r["mensagem"]
+
+
+def test_memoria_corrompida_nao_quebra(tomada_livre, tmp_path):
+    (tmp_path / casa.ESTADO_TOMADA).write_text("{lixo")
+    assert casa.ultimo_aparelho() is None
+    assert casa.controlar_tomada("ligar", "ventilador", pc_online=lambda: True)["ok"]
+    assert casa.ultimo_aparelho()["nome"] == "ventilador"
+
+
+def test_acao_invalida_da_tomada(tomada_livre):
+    with pytest.raises(casa.CasaErro):
+        casa.controlar_tomada("explodir", "ventilador", pc_online=lambda: True)
+
+
+def test_rota_tomada_da_oracle(tomada_livre, tmp_path, monkeypatch):
+    import cloud_runtime_server as server
+    import ferramentas
+    config = tmp_path / "relay2.json"
+    config.write_text(json.dumps({"upload_key": "k-test"}))
+    monkeypatch.setenv("EMILY_RELAY_CONFIG", str(config))
+    monkeypatch.setattr(ferramentas, "_pc_responde", lambda: True)
+    http = server.create_app().test_client()
+    h = {"Authorization": "Bearer k-test"}
+    r = http.post("/casa", headers=h, json={"operation": "tomada", "args": {"acao": "ligar", "aparelho": "ventilador"}}).get_json()
+    assert r["ok"] and "ventilador" in r["mensagem"]
+    assert http.post("/casa", headers=h, json={"operation": "tomada", "args": {"acao": "ligar", "x": 1}}).status_code == 400
+    assert http.post("/casa", headers=h, json={"operation": "tomada", "args": {}}).status_code == 400
+
+
+def test_ferramenta_controlar_tomada_no_pc_nao_corta_o_proprio_pc(casa_falsa, monkeypatch):
+    import ferramentas
+    monkeypatch.delenv("EMILY_RUNTIME_CLOUD", raising=False)
+    r = ferramentas.executar_estruturado("controlar_tomada", {"acao": "desligar", "aparelho": "PC"})
+    assert r.ok is False and "celular" in r.texto
+
+
+def test_aprendizado_em_segundo_plano_mede_depois_de_ligar(tmp_path, monkeypatch):
+    (tmp_path / "devices.json").write_text(json.dumps([LUZ, TOMADA]))
+    monkeypatch.setenv("EMILY_CASA_DIR", str(tmp_path))
+    monkeypatch.setattr(casa, "ESPERA_APRENDER_S", 0)
+    monkeypatch.setattr(casa, "_ler_tomada", lambda d, t: {"potencia_w": 42.0})
+    d = next(x for x in casa.dispositivos() if x["tipo"] == "tomada")
+    casa._aprender_depois("ventilador", d, "").join(timeout=5)
+    assert casa._estado_tomada(tmp_path)["tipicos"] == {"ventilador": 42.0}
+
+
+def test_aprendizado_que_falha_nunca_quebra(tmp_path, monkeypatch):
+    (tmp_path / "devices.json").write_text(json.dumps([LUZ, TOMADA]))
+    monkeypatch.setenv("EMILY_CASA_DIR", str(tmp_path))
+    monkeypatch.setattr(casa, "ESPERA_APRENDER_S", 0)
+
+    def falha(d, t):
+        raise casa.CasaErro("sem rede")
+
+    monkeypatch.setattr(casa, "_ler_tomada", falha)
+    d = next(x for x in casa.dispositivos() if x["tipo"] == "tomada")
+    casa._aprender_depois("ventilador", d, "").join(timeout=5)
+    assert casa._estado_tomada(tmp_path) == {}

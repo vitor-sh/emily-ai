@@ -249,7 +249,7 @@ function oficina() {
     casa_estado: () => ({ ok: true, configurada: true, dispositivos: [
       { id: 'luz1', nome: 'Lâmpada', tipo: 'luz', ligada: true, modo: 'cor', cor: 'laranja', brilho: 80, temperatura: 40 },
       { id: 'tom1', nome: 'Tomada', tipo: 'tomada', ligada: true, potencia_w: 142, tensao_v: 127,
-        ao_voltar_energia: 'volta como estava', energia_pc: true },
+        ao_voltar_energia: 'volta como estava', aparelho: 'ventilador' },
     ] }),
     voz_fish_estado: () => ({ ok: true, atual: 'emily', vozes: [
       { chave: 'emily', nome: 'Emily', detalhe: 'A voz de sempre (EmilyV2)' },
@@ -4419,7 +4419,7 @@ async function montarConfig() {
       'O que ela lembra de você e de quem fala com ela no Discord.', '', 'memoria') +
     secao('Este computador', medidores(sis || {}), '', '', 'sistema') +
     secao('Casa', `<div id="cfg-casa"><p class="secao-nota">Lendo a casa…</p></div>`,
-      'A Emily controla a lâmpada pela rede de casa, com a nuvem da Tuya de reserva. A tomada alimenta este PC: ligar e cortar a energia é pelo celular.',
+      'A Emily controla a lâmpada pela rede de casa, com a nuvem da Tuya de reserva. A tomada serve ao aparelho que você citar (ventilador, air fryer, PC...): peça pelo celular ou pelo Discord. Neste PC ela só aparece para leitura, porque o PC não liga nem corta a própria energia.',
       `<button class="btn-linha tv-add" id="cfg-casa-atualizar" type="button" aria-label="Atualizar estado da casa">${svg(ICO.refazer)}<span>Atualizar</span></button>`, 'casa') +
     secao('TV',
       `<div id="cfg-tv"></div>
@@ -4668,11 +4668,12 @@ function cartaoTomada(d) {
     d.ligada ? 'Ligada' : 'Desligada',
     d.potencia_w != null ? `${Math.round(d.potencia_w)} W agora` : '',
     d.tensao_v != null ? `${Math.round(d.tensao_v)} V` : '',
+    d.palpite ? `pelo consumo parece ser ${esc(d.palpite)}` : '',
     d.ao_voltar_energia ? `após queda de luz ${esc(d.ao_voltar_energia)}` : '',
   ].filter(Boolean).join(' · ');
   return `<div class="lista casa-cartao"><div class="item">
     ${svg(ICO.tomada, 'item-ico')}
-    <div class="item-txt"><strong>${esc(d.nome)}${d.energia_pc ? ' · energia do PC' : ''}</strong><small>${sub}</small></div>
+    <div class="item-txt"><strong>${esc(d.nome)}${d.aparelho ? ' · ' + esc(d.aparelho) : ''}</strong><small>${sub}</small></div>
     ${d.erro ? '' : `<span class="casa-selo${d.ligada ? ' ligada' : ''}">${d.ligada ? 'Ligada' : 'Desligada'}</span>`}
   </div></div>`;
 }

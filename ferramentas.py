@@ -5238,8 +5238,9 @@ _registrar_contexto()
 #
 # O trabalho fica no casa_inteligente.py. No PC fala direto pela rede de casa
 # (com a nuvem da Tuya de reserva); na Oracle, que atende o Android e o
-# Discord, vai só pela nuvem. energia_pc existe SÓ na Oracle: a tomada
-# alimenta o PC, e o PC não consegue religar a própria energia.
+# Discord, vai só pela nuvem. A tomada serve ao aparelho que o Vitor citar
+# (PC, ventilador, air fryer...). Só o PC tem trava, e a Emily do PC não liga nem
+# corta a própria energia: isso é feito pela Oracle (celular e Discord).
 # ═════════════════════════════════════════════════════════════════
 
 def _casa():
@@ -5322,45 +5323,57 @@ def _pc_responde() -> Optional[bool]:
         return False
 
 
-def _energia_pc(acao: str, aguardar_pc: bool = False):
-    if acao not in {"estado", "ligar", "desligar", "cancelar"}:
-        return recusa("Use estado, ligar, desligar ou cancelar.")
+def _controlar_tomada(acao: str, aparelho: str = "", aguardar_pc: bool = False):
+    if acao not in {"estado", "ligar", "desligar", "trocar", "cancelar"}:
+        return recusa("Use estado, ligar, desligar, trocar ou cancelar.")
+    na_oracle = os.getenv("EMILY_RUNTIME_CLOUD") == "1"
     try:
         casa = _casa()
-        r = casa.energia_pc(acao, pc_online=_pc_responde, aguardar_pc=bool(aguardar_pc))
-        if acao == "estado":
-            return consulta(r["mensagem"])
+        r = casa.controlar_tomada(
+            acao, aparelho,
+            # Na Oracle, "PC ligado" é o gateway responder. No PC, ele está ligado por definição.
+            pc_online=_pc_responde if na_oracle else (lambda: True),
+            aguardar_pc=bool(aguardar_pc), no_pc=not na_oracle)
         texto = r["mensagem"]
         if r.get("requer_confirmacao"):
-            # O corte forçado só existe no celular, com confirmação no turno seguinte.
-            texto += (" Por aqui não dá para forçar o corte: o caminho é desligar o PC "
-                      "e pedir de novo com aguardar_pc=true, ou forçar pelo celular.")
+            texto += (" O corte forçado só existe no celular, com a confirmação do Vitor no turno "
+                      "seguinte; por aqui o caminho seguro é desligar o PC e pedir de novo com "
+                      "aguardar_pc=true.")
+        if acao == "estado":
+            return consulta(texto)
+        # "Não mexi" por conflito é recusa, não ação feita.
         return ResultadoFerramenta(texto=texto, ok=bool(r.get("ok")), mudou=bool(r.get("ok")))
     except Exception as e:  # noqa: BLE001
         return recusa(str(e))
 
 
-if os.getenv("EMILY_RUNTIME_CLOUD") == "1":
-    registrar(Ferramenta(
-        nome="energia_pc",
-        descricao=(
-            "Liga ou corta a energia da tomada que alimenta o estabilizador do PC do "
-            "Vitor. acao=estado lê a tomada e diz se o PC parece ligado. acao=ligar "
-            "devolve a energia (o PC só liga sozinho se a BIOS estiver configurada). "
-            "acao=desligar corta a energia SOMENTE se o PC já estiver desligado; com "
-            "o PC ligado não corta e explica. Para desligar tudo, desligue o PC antes "
-            "e chame desligar com aguardar_pc=true: a tomada é cortada quando ele "
-            "apagar. acao=cancelar desiste do corte pendente. Isto não desliga o PC."
-        ),
-        propriedades={
-            "acao": {"type": "string", "enum": ["estado", "ligar", "desligar", "cancelar"]},
-            "aguardar_pc": {"type": "boolean",
-                            "description": "Com acao=desligar: esperar o PC desligar e então cortar."},
-        },
-        obrigatorios=["acao"],
-        aviso="",
-        executar=lambda acao, aguardar_pc=False: _energia_pc(acao, aguardar_pc),
-    ))
+registrar(Ferramenta(
+    nome="controlar_tomada",
+    descricao=(
+        "Liga ou desliga a energia da tomada inteligente do Vitor para o APARELHO QUE ELE "
+        "CITAR: ventilador, air fryer, PC, qualquer eletrodoméstico. Ele troca o aparelho de "
+        "tomada quando quiser e a Emily não precisa perguntar onde está: pegue o nome do pedido "
+        "('liga o ventilador' -> aparelho=ventilador). Se ele só disse 'liga a tomada', deixe "
+        "aparelho vazio e vale o último citado; se não houver, pergunte o nome. acao=estado lê "
+        "a tomada (ligada, watts, último aparelho); trocar só anota qual aparelho está na tomada, "
+        "sem ligar nada. Se voltar 'Não mexi... não tenho certeza', NÃO insista: pergunte ao "
+        "Vitor se o aparelho já está na tomada e, se ele confirmar, chame acao=trocar e repita o "
+        "pedido. Comandos são absolutos: não repita o que já deu certo. Com aparelho=PC isto só "
+        "liga/corta a energia do estabilizador: o PC só é cortado se já estiver desligado (ou "
+        "aguardar_pc=true, que espera ele apagar); não desliga o PC, para isso use pc_energia."
+    ),
+    propriedades={
+        "acao": {"type": "string", "enum": ["estado", "ligar", "desligar", "trocar", "cancelar"]},
+        "aparelho": {"type": "string",
+                     "description": "Nome do aparelho como o Vitor falou (ventilador, air fryer, PC). "
+                                    "Vazio = o último citado."},
+        "aguardar_pc": {"type": "boolean",
+                        "description": "Com aparelho=PC e acao=desligar: esperar o PC desligar e então cortar."},
+    },
+    obrigatorios=["acao"],
+    aviso="",
+    executar=lambda acao, aparelho="", aguardar_pc=False: _controlar_tomada(acao, aparelho, aguardar_pc),
+))
 
 
 GRUPO_PADRAO = "geral"

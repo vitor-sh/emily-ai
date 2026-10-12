@@ -13,14 +13,20 @@ Os dados ficam FORA do projeto (nunca no git):
   PC:     ~/.config/emily-casa/{tinytuya.json, devices.json, casa.json}
   Oracle: ~/.config/emily-runtime-cloud/casa/ (sem as chaves locais)
 tinytuya.json e devices.json são os que o `python -m tinytuya wizard` gera.
-casa.json é opcional: apelidos, qual tomada é a energia do PC e o limite de
-consumo que conta como "PC ligado".
+casa.json é opcional: apelidos, qual tomada usar (energia_pc, se houver mais de
+uma) e o limite de consumo que conta como "PC ligado". tomada-estado.json é da
+própria Emily: último aparelho informado e consumo típico de cada um.
 
 Todo comando é ABSOLUTO (liga, desliga, cor X, brilho Y). "Alternar" é
 resolvido lendo o estado antes. Por isso uma falha local pode cair para a
 nuvem sem risco de aplicar duas vezes o contrário do pedido.
 
-A tomada alimenta o estabilizador do PC. Cortar com ele ligado é igual a
+A tomada serve ao APARELHO QUE O VITOR CITAR (PC, ventilador, air fryer...) e
+ele troca de aparelho quando quiser. A Tuya não informa o que está espetado,
+só os watts; então o nome vem do pedido (controlar_tomada) e a Emily guarda o
+último aparelho e o consumo típico de cada um, só para avisar quando o consumo
+não combina. Só o PC tem trava: a tomada dele alimenta o estabilizador. Cortar
+com ele ligado é igual a
 puxar o cabo: perde a sessão e pode corromper dados. energia_pc() só corta
 direto quando o PC parece desligado (gateway sem resposta E consumo baixo);
 fora isso, aguarda o PC desligar ou exige uma confirmação explícita.
@@ -124,6 +130,11 @@ def tomada_pc() -> Optional[dict]:
     if indicada:
         return next((d for d in tomadas if d["id"] == indicada), None)
     return tomadas[0] if len(tomadas) == 1 else None
+
+
+# A tomada é uma só e serve ao aparelho que o Vitor citar; o nome histórico
+# tomada_pc() continua valendo para o fluxo de energia do PC.
+tomada = tomada_pc
 
 
 def _limite_pc_w() -> float:
@@ -442,6 +453,116 @@ def _frase_luz(d: dict, acao: str, comandos: dict) -> str:
 
 # ─── Tomada ────────────────────────────────────────────────────────
 
+# ─── Qual aparelho está na tomada ─────────────────────────────────
+# A Tuya não diz o que está espetado: só liga/desliga e mede watts. O nome vem
+# do pedido do Vitor (ele avisa, e a palavra dele vale). A Emily só lembra o
+# último aparelho citado e o consumo típico de cada um, para avisar quando o
+# consumo não combina e para proteger o PC.
+
+ESTADO_TOMADA = "tomada-estado.json"
+ESPERA_APRENDER_S = 3.0          # tempo para o aparelho "assentar" antes de medir
+_RE_PC = re.compile(r"\b(pc|computador|desktop|estabilizador|gabinete)\b")
+_PALAVRAS_SOLTAS = {"o", "a", "os", "as", "um", "uma", "meu", "minha", "do", "da", "de",
+                    "no", "na", "pra", "para", "energia", "tomada", "aparelho"}
+
+
+def limpar_aparelho(texto: str) -> str:
+    """'a minha air fryer' -> 'air fryer'. Vazio quando só falou 'a tomada'."""
+    n = re.sub(r"[^a-z0-9 ]+", " ", _normalizar(texto))
+    return " ".join(t for t in n.split() if t not in _PALAVRAS_SOLTAS)[:40]
+
+
+def eh_pc(nome: str) -> bool:
+    return bool(_RE_PC.search(_normalizar(nome)))
+
+
+def _estado_tomada(base: Optional[Path] = None) -> dict:
+    try:
+        dados = json.loads(((base or pasta()) / ESTADO_TOMADA).read_text(encoding="utf-8"))
+        return dados if isinstance(dados, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _salvar_estado_tomada(dados: dict, base: Optional[Path] = None) -> None:
+    caminho = (base or pasta()) / ESTADO_TOMADA
+    tmp = caminho.with_suffix(".tmp")
+    try:
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(dados, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, caminho)
+    except OSError:
+        pass   # a memória é um extra: nunca pode impedir o controle
+
+
+def ultimo_aparelho() -> Optional[dict]:
+    u = _estado_tomada().get("ultimo")
+    if isinstance(u, dict) and isinstance(u.get("nome"), str) and u["nome"]:
+        try:
+            quando = float(u.get("quando") or 0)
+        except (TypeError, ValueError):
+            quando = 0.0
+        return {"nome": u["nome"], "quando": quando}
+    return None
+
+
+def lembrar_aparelho(nome: str) -> None:
+    if not nome:
+        return
+    with _lock:
+        dados = _estado_tomada()
+        dados["ultimo"] = {"nome": nome, "quando": time.time()}
+        _salvar_estado_tomada(dados)
+
+
+def _aprender_consumo(nome: str, watts, base: Optional[Path] = None) -> None:
+    """Guarda o consumo típico. PC não entra: o consumo dele varia demais."""
+    if not nome or eh_pc(nome) or watts is None or watts < 3:
+        return
+    with _lock:
+        dados = _estado_tomada(base)
+        tipicos = dados.setdefault("tipicos", {})
+        antes = tipicos.get(nome)
+        if isinstance(antes, (int, float)) and antes > 0 and 0.5 <= watts / antes <= 2.0:
+            tipicos[nome] = round((antes + watts) / 2, 1)
+        else:
+            tipicos[nome] = round(float(watts), 1)
+        _salvar_estado_tomada(dados, base)
+
+
+def _aprender_depois(nome: str, d: dict, transporte: str) -> "threading.Thread":
+    """Mede o consumo logo depois de ligar: é o momento em que o nome é confiável."""
+    # Fixa a pasta AGORA: a thread acorda segundos depois, e o ambiente pode ter
+    # mudado (nos testes, o EMILY_CASA_DIR já terá voltado ao valor real).
+    base = pasta()
+
+    def trabalho():
+        time.sleep(ESPERA_APRENDER_S)
+        try:
+            _aprender_consumo(nome, _ler_tomada(d, transporte).get("potencia_w"), base)
+        except Exception:  # noqa: BLE001 - aprender é extra
+            pass
+
+    t = threading.Thread(target=trabalho, name="casa-aprende", daemon=True)
+    t.start()
+    return t
+
+
+def adivinhar_aparelho(watts) -> Optional[str]:
+    """Aparelho cujo consumo típico combina com a leitura (só se for um único)."""
+    if watts is None or watts < 3:
+        return None
+    tipicos = {n: w for n, w in (_estado_tomada().get("tipicos") or {}).items()
+               if isinstance(w, (int, float)) and w > 0}
+    perto = [n for n, w in tipicos.items() if abs(watts - w) <= max(5.0, 0.25 * w)]
+    return perto[0] if len(perto) == 1 else None
+
+
+def rotulo_aparelho(nome: str) -> str:
+    return nome
+
+
 def _escala(d: dict, codigo: str, valor) -> Optional[float]:
     dp = d["codigos"].get(codigo)
     if valor is None or dp is None:
@@ -477,10 +598,16 @@ def estado(transporte: str = "") -> dict:
 
     with ThreadPoolExecutor(max_workers=max(1, len(todos))) as pool:
         lista = list(pool.map(um, todos))
-    pc = tomada_pc()
+    plug = tomada()
+    ultimo = ultimo_aparelho()
     for item in lista:
-        if pc and item["id"] == pc["id"]:
-            item["energia_pc"] = True
+        if plug and item["id"] == plug["id"]:
+            if ultimo:
+                item["aparelho"] = ultimo["nome"]
+            if item.get("ligada"):
+                palpite = adivinhar_aparelho(item.get("potencia_w"))
+                if palpite and palpite != item.get("aparelho"):
+                    item["palpite"] = palpite
     return {"ok": True, "dispositivos": lista}
 
 
@@ -498,9 +625,11 @@ def descrever_estado(dados: dict) -> str:
                 linhas.append(f"- {item['nome']}: ligada em luz branca, brilho {item['brilho']}%, "
                               f"temperatura {item['temperatura']}% (0 quente, 100 fria)")
         elif item["tipo"] == "tomada":
-            papel = " (energia do PC)" if item.get("energia_pc") else ""
+            papel = f" (aparelho: {rotulo_aparelho(item['aparelho'])})" if item.get("aparelho") else ""
             consumo = f", consumindo {item['potencia_w']:.0f} W" if item.get("potencia_w") is not None else ""
-            linhas.append(f"- {item['nome']}{papel}: {'ligada' if item['ligada'] else 'desligada'}{consumo}")
+            palpite = (f"; pelo consumo parece ser {rotulo_aparelho(item['palpite'])}"
+                       if item.get("palpite") else "")
+            linhas.append(f"- {item['nome']}{papel}: {'ligada' if item['ligada'] else 'desligada'}{consumo}{palpite}")
     return "\n".join(linhas) or "Nenhum aparelho da casa configurado."
 
 
@@ -557,6 +686,7 @@ def energia_pc(acao: str, *, pc_online: Callable[[], Optional[bool]], aguardar_p
     if acao == "ligar":
         cancelar_espera()
         enviar(d, {"switch_1": True}, transporte)
+        lembrar_aparelho("pc")
         return {"ok": True, "mensagem": (
             "Energia do PC ligada. Ele só liga sozinho se a BIOS estiver em 'ligar quando a energia "
             "voltar'; se não ligar em alguns segundos, falta apertar o botão.")}
@@ -565,15 +695,10 @@ def energia_pc(acao: str, *, pc_online: Callable[[], Optional[bool]], aguardar_p
         return {"ok": True, "mensagem": "Cancelei o corte de energia pendente." if houve
                 else "Não tinha nenhum corte de energia pendente."}
     if acao == "confirmar_desligar":
-        valido = _pendente.get("id") and secrets.compare_digest(str(confirmation_id), str(_pendente["id"])) \
-            and agora() < float(_pendente.get("expira", 0))
-        if not valido:
-            return {"ok": False, "mensagem": "Não há corte de energia aguardando essa confirmação (pode ter expirado)."}
-        _pendente.clear()
-        enviar(d, {"switch_1": False}, transporte)
-        return {"ok": True, "mensagem": "Energia do PC cortada por confirmação explícita."}
+        return confirmar_corte(confirmation_id, transporte=transporte, agora=agora)
     if acao != "desligar":
         raise CasaErro("Ação de energia desconhecida. Use estado, ligar, desligar, confirmar_desligar ou cancelar.")
+    lembrar_aparelho("pc")
 
     info = _ler_tomada(d, transporte)
     if not info["ligada"]:
@@ -588,7 +713,8 @@ def energia_pc(acao: str, *, pc_online: Callable[[], Optional[bool]], aguardar_p
             f"O PC ainda está ligado ({motivo}). Vou cortar a energia assim que ele terminar de "
             f"desligar, esperando até {ESPERA_MAX_S // 60} minutos. Isso não desliga o PC: use "
             "pc_energia para desligá-lo, se ainda não pediu.")}
-    _pendente.update(id=secrets.token_hex(6), expira=agora() + CONFIRMACAO_TTL)
+    _pendente.clear()
+    _pendente.update(id=secrets.token_hex(6), expira=agora() + CONFIRMACAO_TTL, aparelho="pc")
     return {"ok": False, "requer_confirmacao": True, "confirmation_id": _pendente["id"],
             "confirmacao_expira_em_segundos": CONFIRMACAO_TTL, "mensagem": (
                 f"Não cortei: o PC parece ligado ({motivo}). Cortar agora é igual a puxar o cabo e "
@@ -637,3 +763,146 @@ def cancelar_espera() -> bool:
             return False
         _espera["cancelada"].set()
         return True
+
+
+def confirmar_corte(confirmation_id: str = "", *, transporte: str = "nuvem",
+                    agora: Callable[[], float] = time.time) -> dict:
+    """Corta a energia depois da confirmação explícita do Vitor (id certo, dentro do prazo)."""
+    d = tomada()
+    if d is None:
+        raise CasaErro("Não achei a tomada. Indique qual é em casa.json (energia_pc).")
+    valido = _pendente.get("id") and secrets.compare_digest(str(confirmation_id), str(_pendente["id"])) \
+        and agora() < float(_pendente.get("expira", 0))
+    if not valido:
+        return {"ok": False, "mensagem": "Não há corte de energia aguardando essa confirmação (pode ter expirado)."}
+    nome = str(_pendente.get("aparelho") or "pc")
+    _pendente.clear()
+    enviar(d, {"switch_1": False}, transporte)
+    lembrar_aparelho(nome)
+    quem = "do PC" if eh_pc(nome) else f"({nome})"
+    return {"ok": True, "mensagem": f"Energia {quem} cortada por confirmação explícita."}
+
+
+# ─── Tomada para qualquer aparelho ────────────────────────────────
+
+ACOES_TOMADA = ("estado", "ligar", "desligar", "trocar", "cancelar")
+
+
+def _conflito_com_pc(nome: str, info: dict, pc_online: Callable[[], Optional[bool]]) -> str:
+    """Motivo, se o aparelho citado pode estar errado porque o PC ainda parece estar na tomada.
+
+    A tomada nasceu alimentando o PC. Só há risco real se TUDO isto vale: o último
+    aparelho conhecido é o PC (ou nunca houve registro), o Vitor cita outro, a
+    tomada está ligada, o PC está respondendo na rede e a tomada puxa o que um PC
+    puxaria. Se o PC está desligado ou fora da rede, ele não pode ser a carga, e
+    a palavra do Vitor vale sem perguntar. Vazio = pode seguir.
+    """
+    if not nome or eh_pc(nome) or not info.get("ligada"):
+        return ""
+    ultimo = ultimo_aparelho()
+    if ultimo is not None and not eh_pc(ultimo["nome"]):
+        return ""
+    try:
+        online = pc_online()
+    except Exception:  # noqa: BLE001
+        online = None
+    if online is False:
+        return ""
+    watts = info.get("potencia_w")
+    if watts is not None and watts < _limite_pc_w():
+        return ""        # consumo baixo demais para ser o PC: ele não está nesta tomada
+    if online:
+        return "o PC está respondendo na rede" + (f" e a tomada puxa {watts:.0f} W" if watts is not None else "")
+    return f"a tomada puxa {watts:.0f} W" if watts is not None else "não consegui medir o consumo"
+
+
+def _consumo_nao_combina(nome: str, info: dict) -> str:
+    """Motivo, se o consumo atual destoa muito do típico JÁ APRENDIDO desse aparelho.
+
+    Pega o caso em que o PC voltou para a tomada sem o Vitor avisar: o ventilador
+    puxa ~40 W e a tomada marca 150 W. Sem consumo típico aprendido não opina.
+    """
+    watts = info.get("potencia_w")
+    tipico = (_estado_tomada().get("tipicos") or {}).get(nome)
+    if watts is None or not isinstance(tipico, (int, float)) or tipico <= 0:
+        return ""
+    if abs(watts - tipico) > max(15.0, 0.6 * tipico):
+        return f"{nome} costuma puxar uns {tipico:.0f} W e a tomada marca {watts:.0f} W"
+    return ""
+
+
+def controlar_tomada(acao: str, aparelho: str = "", *, pc_online: Callable[[], Optional[bool]],
+                     aguardar_pc: bool = False, no_pc: bool = False, transporte: str = "",
+                     agora: Callable[[], float] = time.time) -> dict:
+    """Liga/desliga a tomada para o aparelho que o Vitor citou.
+
+    O nome do pedido vale: ele troca de aparelho quando quiser e a Emily não
+    pergunta onde está espetado. PC é o único com trava (ver energia_pc).
+    no_pc=True quando quem chama é a Emily do próprio PC: ela não liga nem corta
+    a energia de si mesma.
+    """
+    acao = _normalizar(acao).replace(" ", "_")
+    if acao not in ACOES_TOMADA:
+        raise CasaErro("Ação da tomada desconhecida. Use " + ", ".join(ACOES_TOMADA) + ".")
+    d = tomada()
+    if d is None:
+        raise CasaErro("Não achei a tomada. Indique qual é em casa.json (energia_pc).")
+    explicito = limpar_aparelho(aparelho)
+    ultimo = ultimo_aparelho()
+    nome = explicito or (ultimo["nome"] if ultimo else "")
+    via_nuvem = transporte or "nuvem"
+
+    if acao == "cancelar":
+        return energia_pc("cancelar", pc_online=pc_online, transporte=via_nuvem, agora=agora)
+    if acao == "estado":
+        if nome and eh_pc(nome):
+            return energia_pc("estado", pc_online=pc_online, transporte=via_nuvem, agora=agora)
+        info = _ler_tomada(d, transporte)
+        partes = [f"Tomada {'ligada' if info['ligada'] else 'desligada'}"]
+        if nome:
+            partes.append(f"último aparelho: {nome}")
+        if info.get("potencia_w") is not None:
+            partes.append(f"consumo {info['potencia_w']:.0f} W")
+        palpite = adivinhar_aparelho(info.get("potencia_w")) if info["ligada"] else None
+        if palpite and palpite != nome:
+            partes.append(f"pelo consumo parece ser {palpite}")
+        return {"ok": True, "estado": info, "aparelho": nome, "mensagem": ", ".join(partes) + "."}
+
+    if not nome:
+        raise CasaErro("Qual aparelho está na tomada agora (ex.: ventilador, air fryer, PC)? Me diga o nome.")
+    if eh_pc(nome):
+        if no_pc:
+            raise CasaErro("A energia do PC é controlada pelo celular: este PC não consegue ligar nem "
+                           "cortar a própria energia.")
+        if acao == "trocar":
+            lembrar_aparelho("pc")
+            return {"ok": True, "mensagem": "Anotei: o PC está na tomada."}
+        return energia_pc(acao, pc_online=pc_online, aguardar_pc=aguardar_pc,
+                          transporte=via_nuvem, agora=agora)
+
+    if acao == "trocar":
+        lembrar_aparelho(nome)
+        return {"ok": True, "mensagem": f"Anotei: {nome} está na tomada."}
+    info = _ler_tomada(d, transporte)
+    # Tomada desligada não tem o que proteger: ligar é seguro. Com a tomada
+    # LIGADA, "ligar" não muda nada na prática mas anotaria o aparelho errado,
+    # e "desligar" cortaria a energia de quem estiver lá. Nos dois casos confere.
+    if info.get("ligada"):
+        motivo = _conflito_com_pc(explicito, info, pc_online) or _consumo_nao_combina(nome, info)
+        if motivo:
+            return {"ok": False, "conflito_pc": True, "mensagem": (
+                f"Não mexi: não tenho certeza de que {nome} é quem está na tomada ({motivo}). "
+                f"Se for, o Vitor precisa confirmar (acao=trocar com aparelho={nome}) e eu repito o "
+                "pedido. Não troque por conta própria nem insista sem a confirmação dele.")}
+    if acao == "ligar":
+        enviar(d, {"switch_1": True}, transporte)
+        lembrar_aparelho(nome)
+        _aprender_depois(nome, d, transporte)
+        return {"ok": True, "mensagem": f"Tomada ligada ({nome})."}
+    if not info["ligada"]:
+        lembrar_aparelho(nome)
+        return {"ok": True, "mensagem": f"A tomada ({nome}) já estava desligada."}
+    _aprender_consumo(nome, info.get("potencia_w"))
+    enviar(d, {"switch_1": False}, transporte)
+    lembrar_aparelho(nome)
+    return {"ok": True, "mensagem": f"Tomada desligada ({nome})."}
