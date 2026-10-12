@@ -594,6 +594,7 @@ class Api:
         "tv_parear": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "tv_codigo": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "tv_dispositivos": [],
+        "voz_fish_definir": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "casa_estado": {"ok": False, "configurada": False, "dispositivos": []},
         "casa_luz": {"ok": False, "mensagem": "Bloqueado durante o Modo Demo."},
         "definir_provedor_e_modelo": False,
@@ -3559,6 +3560,30 @@ class Api:
                 self._j._push("tv", {"tipo": "erro", "mensagem": str(e)})
         threading.Thread(target=trabalho, daemon=True).start()
         return {"ok": True, "mensagem": "Concluindo pareamento…"}
+
+    # ── Voz do Fish: qual das vozes testadas a Emily usa ──────────
+    # O catálogo e a preferência vivem no vozes_fish.py. A troca vale na
+    # próxima fala (voz.py lê a escolha a cada síntese), sem reiniciar.
+
+    def voz_fish_estado(self) -> dict:
+        try:
+            import vozes_fish
+            import voz
+            return {"ok": True, "vozes": vozes_fish.catalogo(),
+                    "atual": vozes_fish.chave_atual(voz.FISH_VOICE_ID)}
+        except Exception as e:  # noqa: BLE001
+            _log(f"voz_fish_estado: {e}")
+            return {"ok": False, "vozes": [], "atual": "", "mensagem": str(e)}
+
+    def voz_fish_definir(self, chave: str) -> dict:
+        try:
+            import vozes_fish
+            if not vozes_fish.definir(str(chave or "")):
+                return {"ok": False, "mensagem": "Não consegui salvar a voz."}
+            return {"ok": True, "atual": str(chave)}
+        except Exception as e:  # noqa: BLE001
+            _log(f"voz_fish_definir: {e}")
+            return {"ok": False, "mensagem": str(e)}
 
     # ── Casa: lâmpada e tomada Tuya ───────────────────────────────
     # O trabalho fica no casa_inteligente.py. A tomada aparece só como

@@ -355,6 +355,19 @@ def _parametros_call(para_call: bool) -> dict:
     }
 
 
+def _voz_fish_atual() -> str:
+    """Voz escolhida nas Configurações; sem escolha (ou sem o módulo), FISH_VOICE_ID.
+
+    Lê a cada fala: trocar a voz vale na frase seguinte, sem reiniciar. O módulo
+    pode faltar em pacotes derivados, e nesse caso nada muda.
+    """
+    try:
+        import vozes_fish
+        return vozes_fish.id_atual(FISH_VOICE_ID)
+    except Exception:  # noqa: BLE001 - a fala nunca pode cair por causa disso
+        return FISH_VOICE_ID
+
+
 def _requisicao_fish(texto_fala: str, formato: str = None,
                      para_call: bool = False) -> TTSRequest:
     """Um construtor só de request: streaming e não-streaming não divergem.
@@ -365,7 +378,7 @@ def _requisicao_fish(texto_fala: str, formato: str = None,
     """
     return TTSRequest(
         text=texto_fala,
-        reference_id=FISH_VOICE_ID,
+        reference_id=_voz_fish_atual(),
         format=formato or _formato_fish(),
         sample_rate=_taxa_saida(),
         # "balanced" (~300ms) em vez de "normal" (~500ms): aqui o que importa

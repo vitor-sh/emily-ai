@@ -78,7 +78,8 @@ def test_voz_padrao_e_a_mesma_no_pc_no_hollow_knight_e_no_android():
                     (RAIZ / 'voz.py').read_text()).group(1)
     hk = set(re.findall(r'"EMILY_FISH_VOICE_ID",\s*"([0-9a-f]{32})"',
                         (RAIZ / 'hollow_knight_emily/python/hollow_knight_permanente.py').read_text()))
-    android = RAIZ / 'EmilyAPP2/app/src/main/java/com/example/emilyapp/FishAudioTTS.kt'
+    android = RAIZ / 'EmilyAPP2/app/src/main/java/com/example/emilyapp/VozesFish.kt'
     assert hk == {voz}
     if android.exists():
-        assert re.search(r'FISH_VOICE_ID = "([0-9a-f]{32})"', android.read_text()).group(1) == voz
+        # A primeira voz do catálogo do Android é a padrão.
+        assert re.search(r'Voz\("emily",[^,]+,[^,]+,\s*"([0-9a-f]{32})"\)', android.read_text()).group(1) == voz

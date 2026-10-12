@@ -251,6 +251,12 @@ function oficina() {
       { id: 'tom1', nome: 'Tomada', tipo: 'tomada', ligada: true, potencia_w: 142, tensao_v: 127,
         ao_voltar_energia: 'volta como estava', energia_pc: true },
     ] }),
+    voz_fish_estado: () => ({ ok: true, atual: 'emily', vozes: [
+      { chave: 'emily', nome: 'Emily', detalhe: 'A voz de sempre (EmilyV2)' },
+      { chave: 'voz1', nome: 'Voz 1', detalhe: 'Garota fofa' },
+      { chave: 'voz2', nome: 'Voz 2', detalhe: 'Fofa' },
+    ] }),
+    voz_fish_definir: chave => ({ ok: true, atual: chave }),
     casa_luz: (acao, v = {}) => ({ ok: true, mensagem: `Lâmpada ${acao === 'desligar' ? 'desligada' : 'ligada'}${v.cor ? ` em ${v.cor}` : ''}.` }),
     janela: () => true,
   };
@@ -4344,7 +4350,8 @@ async function montarConfig() {
          </div>` : ''}
        </div>`, '', '', 'automacao') +
     secao('Voz',
-      `<div class="lista">
+      `<div id="cfg-voz-fish" class="voz-fish" aria-live="polite"></div>
+       <div class="lista">
          <div class="item">
            ${svg(ICO.tecla, 'item-ico')}
            <div class="item-txt"><strong>Tecla para falar</strong><small>Segure para falar com a Emily neste computador</small></div>
@@ -4451,6 +4458,7 @@ async function montarConfig() {
   atualizarGatewayEndpoint(gateway);
   desenharTv(tvs || []);
   desenharCasa();
+  desenharVozFish();
   desenharAtualizacao();
   ESTADO.pessoas = pessoas || [];
   ESTADO.pessoaPag = 0;
@@ -4542,6 +4550,56 @@ function desenharTv(dispositivos) {
         redesenharTv();
       }
     };
+  });
+}
+
+/* ── Voz do Fish: Emily / Voz 1 / Voz 2 ─────────────────────────────
+   Três cartões de escolha única. A troca vale na próxima fala: o voz.py lê a
+   preferência a cada síntese, sem reiniciar. O catálogo vem do Python
+   (vozes_fish.py), então a tela nunca mostra uma voz que o PC não conhece. */
+
+async function desenharVozFish() {
+  const box = $('#cfg-voz-fish');
+  if (!box) return;
+  const dados = await tenta('voz_fish_estado') || {};
+  if (!box.isConnected) return;
+  const vozes = dados.vozes || [];
+  if (!vozes.length) {
+    box.innerHTML = `<p class="secao-nota">${esc(dados.mensagem || 'Não consegui ler as vozes agora.')}</p>`;
+    return;
+  }
+  box.innerHTML = `<div class="voz-fish-cab"><strong>Voz da Emily</strong>
+      <small>Vale na próxima fala, sem reiniciar.</small></div>
+    <div class="voz-fish-opcoes" role="radiogroup" aria-label="Voz da Emily">
+      ${vozes.map(v => `<button class="voz-fish-op${v.chave === dados.atual ? ' ativa' : ''}" type="button"
+        role="radio" aria-checked="${v.chave === dados.atual}" data-voz="${esc(v.chave)}">
+        <span class="voz-fish-ico" aria-hidden="true">${svg(ICO.voz)}</span>
+        <span class="voz-fish-txt"><strong>${esc(v.nome)}</strong><small>${esc(v.detalhe)}</small></span>
+        <span class="voz-fish-marca" aria-hidden="true">${svg(ICO.check)}</span>
+      </button>`).join('')}
+    </div>
+    <p class="secao-nota voz-fish-aviso" id="cfg-voz-fish-aviso" role="status" hidden></p>`;
+  const opcoes = $$('.voz-fish-op', box);
+  opcoes.forEach(b => b.onclick = async () => {
+    if (b.classList.contains('ativa') || box.classList.contains('salvando')) return;
+    const anterior = opcoes.find(x => x.classList.contains('ativa'));
+    const marcar = alvo => opcoes.forEach(x => {
+      x.classList.toggle('ativa', x === alvo);
+      x.setAttribute('aria-checked', String(x === alvo));
+    });
+    marcar(b);                       // otimista: responde na hora
+    box.classList.add('salvando');
+    const r = await tenta('voz_fish_definir', b.dataset.voz);
+    box.classList.remove('salvando');
+    const aviso = $('#cfg-voz-fish-aviso', box);
+    if (!r?.ok) {
+      marcar(anterior);
+      if (aviso) { aviso.hidden = false; aviso.textContent = r?.mensagem || 'Não consegui trocar a voz.'; }
+      toast('Não consegui trocar a voz', 'erro');
+      return;
+    }
+    if (aviso) aviso.hidden = true;
+    toast(`Voz: ${b.querySelector('strong').textContent}`);
   });
 }
 

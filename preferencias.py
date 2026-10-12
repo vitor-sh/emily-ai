@@ -79,6 +79,7 @@ _PADROES: Dict[str, Any] = {
     "audio_preprocess_normalize": True,   # loudnorm antes do Whisper
     "audio_preprocess_vad": True,         # Silero corta silêncio antes do Whisper
     "volume_voz": 1.0,          # fator do volume da voz (0 a 1.5; 1.0 = o TTS cru)
+    "voz_fish": "",             # voz do Fish: emily, voz1 ou voz2 (vazio = FISH_VOICE_ID)
     "visual_provedor": "",
     "visual_modelo": "",
     "visual_raciocinio": "",
