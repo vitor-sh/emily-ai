@@ -25,7 +25,7 @@ import time
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import casa_inteligente as casa
 
@@ -204,6 +204,49 @@ def _resumo(item: dict, agora: Optional[float] = None) -> str:
     return f"[{item['id']}] {item['descricao']} {_rotulo_hora(item['quando'], agora)}"
 
 
+# ─── Frase do aviso (falada, na primeira pessoa) ───────────────────
+
+_FEMININOS = {"air fryer", "airfryer", "fritadeira", "cafeteira", "chaleira", "luminaria",
+              "luz", "lampada", "tomada", "geladeira"}
+
+
+def _artigo(nome: str) -> str:
+    n = _normalizar(nome)
+    return "a" if n in _FEMININOS else "o"
+
+
+def _passado_e_infinitivo(item: dict) -> Tuple[str, str]:
+    """('liguei a air fryer', 'ligar a air fryer') a partir do que estava agendado."""
+    a = item["args"]
+    acao = a.get("acao", "")
+    if item["ferramenta"] == "controlar_luz":
+        extra = {"cor": (f"deixei a luz {a.get('cor', '')}".strip(), f"deixar a luz {a.get('cor', '')}".strip()),
+                 "brilho": (f"deixei a luz com {a.get('brilho')}% de brilho", f"ajustar o brilho da luz"),
+                 "temperatura": ("ajustei a temperatura da luz", "ajustar a temperatura da luz"),
+                 "branco": ("deixei a luz branca", "deixar a luz branca"),
+                 "alternar": ("alternei a luz", "alternar a luz"),
+                 "ligar": ("liguei a luz", "ligar a luz"),
+                 "desligar": ("desliguei a luz", "desligar a luz")}
+        return extra.get(acao, ("mexi na luz", "mexer na luz"))
+    nome = a.get("aparelho") or "a tomada"
+    quem = f"{_artigo(nome)} {nome}" if a.get("aparelho") else "a tomada"
+    if acao == "ligar":
+        return f"liguei {quem}", f"ligar {quem}"
+    if acao == "desligar":
+        return f"desliguei {quem}", f"desligar {quem}"
+    return f"mexi em {quem}", f"mexer em {quem}"
+
+
+def frase_aviso(item: dict, ok: bool, mensagem: str = "", expirado: bool = False) -> str:
+    feito, infinitivo = _passado_e_infinitivo(item)
+    if expirado:
+        return f"Não consegui {infinitivo} na hora marcada: a nuvem ficou fora do ar."
+    if ok:
+        return f"Pronto, {feito}."
+    motivo = " ".join(str(mensagem or "").split())[:160]
+    return f"Não consegui {infinitivo}." + (f" {motivo}" if motivo else "")
+
+
 # ─── Operações ────────────────────────────────────────────────────
 
 def _validar_chamada(ferramenta: str, args: dict) -> dict:
@@ -356,7 +399,8 @@ def resolver_conflitos(ferramenta: str, args: dict) -> List[str]:
 
 # ─── Disparo ──────────────────────────────────────────────────────
 
-def _disparar(item: dict, executar: Callable[[str, dict], dict], motivo: str = "") -> dict:
+def _disparar(item: dict, executar: Callable[[str, dict], dict], motivo: str = "",
+              avisar: Optional[Callable[[str], object]] = None) -> dict:
     try:
         r = executar(item["ferramenta"], item["args"])
         ok = bool(r.get("ok"))
@@ -370,7 +414,18 @@ def _disparar(item: dict, executar: Callable[[str, dict], dict], motivo: str = "
             _salvar(dados)
     prefixo = "Antecipado: " if motivo == "antecipado" else ""
     print(f"[AGENDA-CASA] {item['descricao']}: {'ok' if ok else 'falhou'} — {mensagem[:120]}", flush=True)
+    _avisar(avisar, frase_aviso(item, ok, mensagem))
     return {"ok": ok, "mensagem": prefixo + mensagem}
+
+
+def _avisar(avisar: Optional[Callable[[str], object]], texto: str) -> None:
+    """Aviso é extra: falhar aqui nunca desfaz nem repete a ação já feita."""
+    if avisar is None:
+        return
+    try:
+        avisar(texto)
+    except Exception as e:  # noqa: BLE001
+        print(f"[AGENDA-CASA] aviso falhou: {e}", flush=True)
 
 
 def vencidos(agora: Optional[float] = None) -> List[dict]:
@@ -379,7 +434,8 @@ def vencidos(agora: Optional[float] = None) -> List[dict]:
         return [a for a in _ler()["ativos"] if a["quando"] <= agora]
 
 
-def rodar_vencidos(executar: Callable[[str, dict], dict], agora: Optional[float] = None) -> int:
+def rodar_vencidos(executar: Callable[[str, dict], dict], agora: Optional[float] = None,
+                  avisar: Optional[Callable[[str], object]] = None) -> int:
     agora = agora if agora is not None else time.time()
     feitos = 0
     for item in vencidos(agora):
@@ -388,8 +444,9 @@ def rodar_vencidos(executar: Callable[[str, dict], dict], agora: Optional[float]
                 dados = _ler()
                 _arquivar(dados, item, "expirado", "a Oracle ficou fora do ar na hora marcada")
                 _salvar(dados)
+            _avisar(avisar, frase_aviso(item, False, expirado=True))
             continue
-        _disparar(item, executar)
+        _disparar(item, executar, avisar=avisar)
         feitos += 1
     return feitos
 
@@ -400,7 +457,8 @@ def proximo(agora: Optional[float] = None) -> Optional[float]:
     return min((a["quando"] for a in ativos), default=None)
 
 
-def iniciar(executar: Callable[[str, dict], dict]) -> None:
+def iniciar(executar: Callable[[str, dict], dict],
+            avisar: Optional[Callable[[str], object]] = None) -> None:
     """Thread do agendador (uma por processo). Dorme até o próximo horário ou até mudar a lista."""
     global _rodando
     with _lock:
@@ -411,7 +469,7 @@ def iniciar(executar: Callable[[str, dict], dict]) -> None:
     def laco():
         while True:
             try:
-                rodar_vencidos(executar)
+                rodar_vencidos(executar, avisar=avisar)
                 prox = proximo()
                 espera = 300.0 if prox is None else max(0.2, min(300.0, prox - time.time()))
             except Exception as e:  # noqa: BLE001

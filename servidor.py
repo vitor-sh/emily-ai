@@ -1266,6 +1266,36 @@ def iniciar_servidor(porta=None):
         servidor_http.server_close()
 
 
+_callback_aviso_casa = None
+
+
+def definir_callback_aviso_casa(fn):
+    """main.py liga aqui a fala dos avisos da agenda da casa: fn(texto) -> (falou, motivo)."""
+    global _callback_aviso_casa
+    _callback_aviso_casa = fn
+
+
+@app.post("/internal/casa/aviso")
+def casa_aviso():
+    """A Oracle pede para a Emily do PC falar o aviso de um agendamento da casa."""
+    import hmac
+    expected = os.getenv("EMILY_CLOUD_RPC_KEY", "")
+    supplied = request.headers.get("X-Emily-Cloud-Key", "")
+    if not _ponte_token_ok() or not expected or not hmac.compare_digest(expected, supplied):
+        return jsonify(erro="Não autorizado"), 401
+    data = request.get_json(silent=True)
+    texto = data.get("texto") if isinstance(data, dict) else None
+    if not isinstance(texto, str) or not 1 <= len(texto.strip()) <= 600:
+        return jsonify(erro="Pedido inválido"), 400
+    if _callback_aviso_casa is None:
+        return jsonify(falou=False, motivo="a Emily do PC ainda não está pronta")
+    try:
+        falou, motivo = _callback_aviso_casa(texto.strip())
+    except Exception as erro:  # noqa: BLE001 - o aviso cai para o celular
+        return jsonify(falou=False, motivo=f"erro ao falar ({type(erro).__name__})")
+    return jsonify(falou=bool(falou), motivo=str(motivo or ""))
+
+
 @app.post("/internal/cloud/tool")
 def cloud_tool():
     import hmac

@@ -350,6 +350,8 @@ def _voz_delegacao_rapida_ativa() -> bool:
 
 def _executar_turno_voz_pc(texto: str) -> str:
     """Seleciona somente a rota do PTT, mantendo o chat e o Android intactos."""
+    global ultimo_uso_usuario
+    ultimo_uso_usuario = time.time()   # PTT também conta como "PC em uso"
     if _voz_delegacao_rapida_ativa():
         return _executar_turno_voz_rapido(texto)
     return _executar_turno_com_ferramentas(texto, canal="voz")
@@ -363,6 +365,45 @@ def _pc_livre_para_aviso_delegacao() -> bool:
         and not voz.falar_ativo.is_set()
         and not voz.escutando_ativo.is_set()
     )
+
+
+def _falar_aviso_casa(texto: str):
+    """Aviso de um agendamento da casa, pedido pela Oracle. (falou, motivo).
+
+    Só fala se o PC está em uso recente e livre; senão a Oracle manda para o
+    celular. Mesma reserva de saída do aviso de delegação, para nunca abrir o
+    microfone em cima da própria fala nem interromper um turno.
+    """
+    import aviso_casa
+    texto = (texto or "").strip()
+    if not texto:
+        return False, "sem texto"
+    with _trava_aviso_delegacao:
+        pode, motivo = aviso_casa.pc_pode_falar(
+            ultimo_uso=ultimo_uso_usuario, agora=time.time(),
+            ocupada=emily_ocupada.is_set(), falando=voz.falar_ativo.is_set(),
+            escutando=voz.escutando_ativo.is_set(), mudo=voz.mudo.is_set(),
+            escrito=bool(modo_escrito_ativo))
+        if not pode:
+            return False, motivo
+        emily_ocupada.set()
+        try:
+            if voz.falar_ativo.is_set() or voz.escutando_ativo.is_set():
+                return False, "a Emily do PC ficou ocupada"
+            print(f"[AVISO-CASA] falando no PC: {texto[:80]}")
+            voz.falar_ativo.set()
+            try:
+                voz.falar(texto)
+            finally:
+                voz.falar_ativo.clear()
+            try:
+                _orquestrador_voz.registrar_aviso_emitido(texto)
+            except Exception:  # noqa: BLE001 - histórico é extra
+                pass
+            return True, ""
+        finally:
+            emily_ocupada.clear()
+            restaurar_status()
 
 
 def _falar_aviso_delegacao(texto: str, eh_resultado: bool) -> bool:
@@ -1311,6 +1352,7 @@ janela.callback_arquivos = processar_arquivos_chat
 janela.callback_trocar_monitor = visao.trocar_monitor
 
 servidor.definir_callback(processar_texto_digitado)
+servidor.definir_callback_aviso_casa(_falar_aviso_casa)
 servidor.definir_callbacks_remota(_remota_inicio, _remota_fim)
 # Passos das ferramentas do CELULAR durante um comando remoto: retransmitidos
 # pro painel de progresso da interface (mesma animação dos turnos locais).

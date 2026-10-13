@@ -158,6 +158,12 @@ def create_app():
                 r = casa.controlar_luz(args['acao'], alvo=str(args.get('alvo') or ''),
                     cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura'))
                 return jsonify(_com_agenda_resolvida(r, 'controlar_luz', args))
+            if operation == 'push_token':
+                # O celular registra (e renova) o token de aviso na Oracle, para ela
+                # avisar com o PC desligado.
+                import aviso_casa
+                aviso_casa.salvar_token(str(args.get('token') or ''))
+                return jsonify(ok=True)
             if operation == 'agenda':
                 import agenda_casa
                 acao = args.get('acao')
@@ -311,7 +317,8 @@ def main(preflight=False):
     try:
         import agenda_casa, casa_inteligente
         if casa_inteligente.configurada():
-            agenda_casa.iniciar(executar_casa)
+            import aviso_casa
+            agenda_casa.iniciar(executar_casa, aviso_casa.avisar)
     except Exception as erro:  # a agenda nunca impede o Discord e a pesquisa de subirem
         print(f'[AGENDA-CASA] não iniciou: {erro}', flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
