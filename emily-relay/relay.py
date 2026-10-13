@@ -203,6 +203,13 @@ def create_app(cfg=None):
             return jsonify(ok=False,mensagem='Pedido grande demais'),413
         return runtime_proxy('casa')
 
+    @app.post('/admin/casa')
+    def smart_home_admin():
+        # Emily do PC (chave de administração): agenda da casa, que vive na Oracle.
+        if request.content_length and request.content_length > 4096:
+            return jsonify(ok=False,mensagem='Pedido grande demais'),413
+        return runtime_proxy('casa')
+
     @app.post('/admin/discord/rpc')
     def discord_rpc():
         if request.content_length and request.content_length > 256*1024:

@@ -5277,6 +5277,7 @@ def _casa_luz(acao: str, cor: str = "", brilho=None, temperatura=None, alvo: str
     try:
         casa = _casa()
         r = casa.controlar_luz(acao, alvo=alvo, cor=cor, brilho=brilho, temperatura=temperatura)
+        _avisar_agenda_em_segundo_plano("controlar_luz", {"acao": acao})
         return ResultadoFerramenta(texto=r["mensagem"], ok=True, mudou=True)
     except Exception as e:  # noqa: BLE001
         return recusa(str(e))
@@ -5335,6 +5336,8 @@ def _controlar_tomada(acao: str, aparelho: str = "", aguardar_pc: bool = False):
             pc_online=_pc_responde if na_oracle else (lambda: True),
             aguardar_pc=bool(aguardar_pc), no_pc=not na_oracle)
         texto = r["mensagem"]
+        if r.get("ok") and acao in {"ligar", "desligar"} and not na_oracle:
+            _avisar_agenda_em_segundo_plano("controlar_tomada", {"acao": acao, "aparelho": aparelho})
         if r.get("requer_confirmacao"):
             texto += (" O corte forçado só existe no celular, com a confirmação do Vitor no turno "
                       "seguinte; por aqui o caminho seguro é desligar o PC e pedir de novo com "
@@ -5374,6 +5377,118 @@ registrar(Ferramenta(
     aviso="",
     executar=lambda acao, aparelho="", aguardar_pc=False: _controlar_tomada(acao, aparelho, aguardar_pc),
 ))
+
+
+# ─── Agenda da casa ("liga a air fryer daqui 20 minutos") ──────────
+# A agenda vive na Oracle (agenda_casa.py), que fica sempre ligada: o timer
+# dispara com o PC desligado e o celular vê a mesma lista. Na Oracle a
+# ferramenta usa o módulo direto; no PC ela fala com a Oracle pelo relay.
+
+def _agenda_na_oracle(dados: dict) -> dict:
+    import requests
+    from cloud_runtime_client import CONFIG
+    cfg = json.loads(CONFIG.read_text())
+    r = requests.post(cfg["url"].rstrip("/") + "/admin/casa",
+                      headers={"Authorization": "Bearer " + cfg["key"]},
+                      json={"operation": "agenda", "args": dados}, timeout=(4, 20))
+    try:
+        corpo = r.json()
+    except ValueError:
+        corpo = {}
+    if not isinstance(corpo, dict) or "mensagem" not in corpo:
+        raise RuntimeError(f"a Oracle não respondeu à agenda (HTTP {r.status_code})")
+    return corpo
+
+
+def _agenda_local(dados: dict) -> dict:
+    import agenda_casa
+    import cloud_runtime_server
+    acao = dados.get("acao")
+    if acao == "listar":
+        return agenda_casa.listar()
+    if acao == "agendar":
+        return agenda_casa.agendar(dados.get("ferramenta", ""), dados.get("args") or {}, dados.get("quando", ""))
+    if acao == "cancelar":
+        return agenda_casa.cancelar(dados.get("referencia", ""), todos=dados.get("todos") is True)
+    if acao == "remarcar":
+        return agenda_casa.remarcar(dados.get("referencia", ""), dados.get("quando", ""))
+    if acao == "agora":
+        return agenda_casa.executar_agora(dados.get("referencia", ""), cloud_runtime_server.executar_casa)
+    raise ValueError("ação da agenda inválida")
+
+
+def _agendar_casa(acao: str, ferramenta: str = "", acao_aparelho: str = "", quando: str = "",
+                  aparelho: str = "", cor: str = "", brilho=None, temperatura=None,
+                  referencia: str = "", todos: bool = False):
+    if acao not in {"agendar", "listar", "cancelar", "remarcar", "agora"}:
+        return recusa("Use agendar, listar, cancelar, remarcar ou agora.")
+    dados = {"acao": acao, "quando": quando, "referencia": referencia, "todos": bool(todos)}
+    if acao == "agendar":
+        args = {"acao": acao_aparelho}
+        if ferramenta == "controlar_tomada":
+            args["aparelho"] = aparelho
+        else:
+            args.update({k: v for k, v in (("cor", cor), ("brilho", brilho), ("temperatura", temperatura))
+                         if v not in (None, "")})
+        dados.update(ferramenta=ferramenta, args=args)
+    try:
+        r = _agenda_local(dados) if os.getenv("EMILY_RUNTIME_CLOUD") == "1" else _agenda_na_oracle(dados)
+    except Exception as e:  # noqa: BLE001 - AgendaErro, CasaErro e rede viram recusa
+        return recusa(str(e) if str(e) else "A agenda da casa não respondeu agora.")
+    if acao == "listar":
+        return consulta(r.get("mensagem", ""))
+    return ResultadoFerramenta(texto=r.get("mensagem", ""), ok=bool(r.get("ok")), mudou=bool(r.get("ok")))
+
+
+registrar(Ferramenta(
+    nome="agendar_casa",
+    descricao=(
+        "Agenda uma ação da luz ou da tomada para DEPOIS: 'liga a air fryer daqui 20 minutos', "
+        "'desliga a luz às 23h', 'deixa a luz azul às 19:30', 'desliga o ventilador em 1 hora e meia'. "
+        "Use isto (e NÃO controlar_luz/controlar_tomada) sempre que o pedido tiver um tempo ou horário. "
+        "acao=agendar: ferramenta=controlar_tomada (com aparelho) ou controlar_luz, acao_aparelho "
+        "(ligar, desligar; na luz também cor, brilho, temperatura, branco) e quando ('20 minutos', "
+        "'1 hora e meia', '22:30', 'amanhã 7h'). acao=listar mostra o que está marcado. "
+        "acao=cancelar e acao=remarcar (com quando novo) usam referencia: o id ou palavras como "
+        "'air fryer' ou 'luz'. acao=agora faz já o que estava agendado e tira da lista. Vale com o PC "
+        "desligado: a agenda roda na nuvem. Se o Vitor fizer na hora a mesma ação de um agendamento, "
+        "ele sai sozinho da lista."
+    ),
+    propriedades={
+        "acao": {"type": "string", "enum": ["agendar", "listar", "cancelar", "remarcar", "agora"]},
+        "ferramenta": {"type": "string", "enum": ["controlar_tomada", "controlar_luz"]},
+        "acao_aparelho": {"type": "string",
+                          "description": "ligar, desligar; na luz também cor, brilho, temperatura, branco."},
+        "quando": {"type": "string", "description": "'20 minutos', '1 hora e meia', '22:30', 'amanhã 7h'."},
+        "aparelho": {"type": "string", "description": "Aparelho na tomada, como o Vitor falou."},
+        "cor": {"type": "string"}, "brilho": {"type": "integer"}, "temperatura": {"type": "integer"},
+        "referencia": {"type": "string", "description": "id ou palavras do agendamento (cancelar/remarcar/agora)."},
+        "todos": {"type": "boolean", "description": "Com cancelar: todos os que combinarem."},
+    },
+    obrigatorios=["acao"],
+    aviso="",
+    executar=lambda acao, ferramenta="", acao_aparelho="", quando="", aparelho="", cor="",
+                    brilho=None, temperatura=None, referencia="", todos=False:
+        _agendar_casa(acao, ferramenta, acao_aparelho, quando, aparelho, cor, brilho,
+                      temperatura, referencia, todos),
+))
+
+
+def _avisar_agenda_em_segundo_plano(ferramenta: str, args: dict) -> None:
+    """Emily do PC fez a ação na hora: o agendamento igual pendente sai da lista.
+
+    Em thread: a resposta ao Vitor não pode esperar a ida e volta à Oracle.
+    """
+    if os.getenv("EMILY_RUNTIME_CLOUD") == "1":
+        return
+
+    def trabalho():
+        try:
+            _agenda_na_oracle({"acao": "resolver", "ferramenta": ferramenta, "args": args})
+        except Exception:  # noqa: BLE001 - sem Oracle, a agenda continua como estava
+            pass
+
+    threading.Thread(target=trabalho, name="agenda-resolver", daemon=True).start()
 
 
 GRUPO_PADRAO = "geral"

@@ -44,6 +44,34 @@ async def acompanhar_call():
             # Uma reconexão transitória não apaga o canal salvo.
         await asyncio.sleep(2)
 
+def executar_casa(ferramenta, args):
+    """Executa uma ação agendada da casa, com as mesmas travas do pedido feito na hora."""
+    import casa_inteligente as casa
+    from ferramentas import _pc_responde
+    if ferramenta == 'controlar_luz':
+        return casa.controlar_luz(args.get('acao', ''), alvo=str(args.get('alvo') or ''),
+            cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura'))
+    if ferramenta == 'controlar_tomada':
+        return casa.controlar_tomada(args.get('acao', ''), str(args.get('aparelho') or ''),
+            pc_online=_pc_responde, aguardar_pc=args.get('aguardar_pc') is True)
+    raise ValueError(f'ferramenta não agendável: {ferramenta}')
+
+
+def _com_agenda_resolvida(resultado, ferramenta, args):
+    """Ação feita na hora tira da agenda o agendamento igual que ficou redundante."""
+    if not resultado.get('ok'):
+        return resultado
+    try:
+        import agenda_casa
+        removidos = agenda_casa.resolver_conflitos(ferramenta, args)
+    except Exception:  # noqa: BLE001 - agenda é extra; a ação já foi feita
+        removidos = []
+    if removidos:
+        resultado = dict(resultado, mensagem=resultado.get('mensagem', '') +
+                         ' Tirei da agenda: ' + '; '.join(removidos) + '.')
+    return resultado
+
+
 def create_app():
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 12*1024*1024
@@ -127,14 +155,36 @@ def create_app():
                 allowed = {'acao', 'cor', 'brilho', 'temperatura', 'alvo'}
                 if not set(args) <= allowed or not isinstance(args.get('acao'), str):
                     return jsonify(ok=False, mensagem='Argumentos inválidos'), 400
-                return jsonify(casa.controlar_luz(args['acao'], alvo=str(args.get('alvo') or ''),
-                    cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura')))
+                r = casa.controlar_luz(args['acao'], alvo=str(args.get('alvo') or ''),
+                    cor=str(args.get('cor') or ''), brilho=args.get('brilho'), temperatura=args.get('temperatura'))
+                return jsonify(_com_agenda_resolvida(r, 'controlar_luz', args))
+            if operation == 'agenda':
+                import agenda_casa
+                acao = args.get('acao')
+                if acao == 'listar':
+                    return jsonify(agenda_casa.listar())
+                if acao == 'agendar':
+                    return jsonify(agenda_casa.agendar(str(args.get('ferramenta') or ''),
+                        args.get('args') if isinstance(args.get('args'), dict) else {}, str(args.get('quando') or '')))
+                if acao == 'cancelar':
+                    return jsonify(agenda_casa.cancelar(str(args.get('referencia') or ''), todos=args.get('todos') is True))
+                if acao == 'remarcar':
+                    return jsonify(agenda_casa.remarcar(str(args.get('referencia') or ''), str(args.get('quando') or '')))
+                if acao == 'agora':
+                    return jsonify(agenda_casa.executar_agora(str(args.get('referencia') or ''), executar_casa))
+                if acao == 'resolver':
+                    # A Emily do PC fez a ação na hora (rede local) e avisa a agenda.
+                    removidos = agenda_casa.resolver_conflitos(str(args.get('ferramenta') or ''),
+                        args.get('args') if isinstance(args.get('args'), dict) else {})
+                    return jsonify(ok=True, removidos=removidos)
+                return jsonify(ok=False, mensagem='Ação da agenda inválida'), 400
             if operation == 'tomada':
                 allowed = {'acao', 'aparelho', 'aguardar_pc'}
                 if not set(args) <= allowed or not isinstance(args.get('acao'), str):
                     return jsonify(ok=False, mensagem='Argumentos inválidos'), 400
-                return jsonify(casa.controlar_tomada(args['acao'], str(args.get('aparelho') or ''),
-                    pc_online=_pc_responde, aguardar_pc=args.get('aguardar_pc') is True))
+                r = casa.controlar_tomada(args['acao'], str(args.get('aparelho') or ''),
+                    pc_online=_pc_responde, aguardar_pc=args.get('aguardar_pc') is True)
+                return jsonify(_com_agenda_resolvida(r, 'controlar_tomada', args))
             if operation == 'energia_pc':
                 acao = args.get('acao')
                 if acao not in {'estado', 'ligar', 'desligar', 'confirmar_desligar', 'cancelar'}:
@@ -258,6 +308,12 @@ def main(preflight=False):
         return
     from werkzeug.serving import make_server
     server = make_server('127.0.0.1', 15100, create_app(), threaded=True)
+    try:
+        import agenda_casa, casa_inteligente
+        if casa_inteligente.configurada():
+            agenda_casa.iniciar(executar_casa)
+    except Exception as erro:  # a agenda nunca impede o Discord e a pesquisa de subirem
+        print(f'[AGENDA-CASA] não iniciou: {erro}', flush=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     asyncio.run(run_bot())
 

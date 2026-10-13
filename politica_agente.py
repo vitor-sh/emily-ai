@@ -263,7 +263,7 @@ def revisar_resposta(pedido: str, texto: str, mensagens: list, rota_nome: str) -
 # segunda volta do modelo nem a revisão: a frase da ferramenta é a resposta.
 # Falha, várias ações no mesmo turno ou outra ferramenta seguem o caminho normal.
 ACOES_RAPIDAS = frozenset({
-    "controlar_luz", "controlar_tomada", "casa_estado",
+    "controlar_luz", "controlar_tomada", "casa_estado", "agendar_casa",
     "player_pausar_ou_tocar", "player_proxima", "player_anterior", "player_volume",
     "abrir_app", "abrir_site", "comando_tv",
 })

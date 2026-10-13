@@ -151,7 +151,7 @@ def nomes_ferramentas_rapidas() -> List[str]:
     }
     nomes.add("ver_tela")
     # Luz e tomada respondem em menos de 1 s: não podem esperar a delegação.
-    nomes.update(n for n in ("controlar_luz", "controlar_tomada", "casa_estado")
+    nomes.update(n for n in ("controlar_luz", "controlar_tomada", "casa_estado", "agendar_casa")
                  if n in ferramentas.CATALOGO)
     return sorted(nomes)
 
