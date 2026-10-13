@@ -11,6 +11,23 @@ APPS = {'calculadora':'calculadora', 'discord':'discord', 'spotify':'spotify',
         'firefox':'firefox', 'brave':'brave', 'chrome':'chrome', 'obs':'obs',
         'steam':'steam', 'vlc':'vlc', 'terminal':'terminal'}
 
+LIGAR = {'liga', 'ligue', 'ligar', 'acende', 'acenda'}
+
+# Cores faladas -> nome que o casa_inteligente conhece. Feminino e masculino.
+CORES = {'vermelha': 'vermelho', 'vermelho': 'vermelho', 'laranja': 'laranja',
+         'amarela': 'amarelo', 'amarelo': 'amarelo', 'verde': 'verde', 'ciano': 'ciano',
+         'azul': 'azul', 'roxa': 'roxo', 'roxo': 'roxo', 'lilas': 'lilás', 'violeta': 'violeta',
+         'rosa': 'rosa', 'pink': 'pink', 'magenta': 'magenta', 'branca': 'branca',
+         'branco': 'branca', 'quente': 'quente', 'fria': 'fria', 'amarelada': 'amarelada'}
+
+# Aparelhos que vão na tomada inteligente. Lista fechada de propósito: "liga a
+# TV", "desliga a música" ou "liga o bluetooth" não podem virar corte de energia.
+APARELHOS = {'ventilador': 'ventilador', 'air fryer': 'air fryer', 'airfryer': 'air fryer',
+             'air fry': 'air fryer', 'fritadeira': 'air fryer', 'ar condicionado': 'ar condicionado',
+             'aquecedor': 'aquecedor', 'cafeteira': 'cafeteira', 'chaleira': 'chaleira',
+             'abajur': 'abajur', 'luminaria': 'luminária', 'umidificador': 'umidificador',
+             'purificador': 'purificador'}
+
 
 def normalize(text):
     text = unicodedata.normalize('NFD', text or '')
@@ -29,9 +46,21 @@ def parse(text):
     s = re.sub(r' (?:agora|por favor|pra mim)$', '', s)
     m = re.fullmatch(r'(?:abre|abra|abrir) (?:o |a )?('+'|'.join(APPS)+r')(?: no (?:meu )?(?:pc|computador))?',s)
     if m: return ('abrir_app', {'nome':APPS[m[1]]})
-    # Só a lâmpada. Energia do PC nunca é atalho: passa pelo agente e pela trava.
-    m = re.fullmatch(r'(liga|ligue|ligar|acende|acenda|desliga|desligue|desligar|apaga|apague) (?:a |minha |a minha )?(?:luz|lampada)(?: do (?:meu )?quarto)?', s)
-    if m: return ('controlar_luz', {'acao': 'ligar' if m[1] in {'liga','ligue','ligar','acende','acenda'} else 'desligar'})
+    luz = r'(?:a |minha |a minha )?(?:luz|lampada)(?: do (?:meu )?quarto)?'
+    m = re.fullmatch(r'(liga|ligue|ligar|acende|acenda|desliga|desligue|desligar|apaga|apague) ' + luz, s)
+    if m: return ('controlar_luz', {'acao': 'ligar' if m[1] in LIGAR else 'desligar'})
+    # "luz azul", "deixa a luz roxa", "muda a luz pra verde", "luz quente"
+    m = re.fullmatch(r'(?:(?:deixa|deixe|coloca|coloque|poe|ponha|muda|mude|troca|troque) )?' + luz
+                     + r' (?:(?:em|pra|para|no|na) )?(' + '|'.join(CORES) + r')', s)
+    if m: return ('controlar_luz', {'acao': 'cor', 'cor': CORES[m[1]]})
+    # "luz no 40", "brilho da luz em 70%", "luz 30 por cento"
+    m = re.fullmatch(r'(?:(?:deixa|deixe|coloca|coloque|poe|ponha|muda|mude) )?(?:(?:o )?brilho d)?' + luz
+                     + r' (?:(?:em|pra|para|no|na) )?(\d{1,3}) ?(?:%|por cento)?', s)
+    if m and 1 <= int(m[1]) <= 100: return ('controlar_luz', {'acao': 'brilho', 'brilho': int(m[1])})
+    # Tomada: só aparelhos conhecidos e só ligar/desligar. O PC fica de fora
+    # ("desliga o PC" desliga o sistema); a trava do PC mora em controlar_tomada.
+    m = re.fullmatch(r'(liga|ligue|ligar|desliga|desligue|desligar) (?:o |a |meu |minha |o meu |a minha )?(' + '|'.join(APARELHOS) + r')', s)
+    if m: return ('controlar_tomada', {'acao': 'ligar' if m[1] in LIGAR else 'desligar', 'aparelho': APARELHOS[m[2]]})
     return None
 
 

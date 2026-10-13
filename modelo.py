@@ -5036,6 +5036,16 @@ def conversar_com_ferramentas(
             print(f"[TEMPO] volta {volta + 1}: ferramentas rodaram em "
                   f"{time.monotonic() - _t_volta:.1f}s")
             turno.extend(mensagens_economicas(motor.mensagens(execucoes), saidas_recebidas))
+            # Uma ação rápida que deu certo no primeiro passo: a frase da
+            # ferramenta já é a confirmação. Sem segunda volta e sem revisão.
+            direta = politica_agente.resposta_direta(execucoes) if volta == 0 else ""
+            if direta:
+                usou_ferramenta = motor.usou_ferramenta
+                _transmitir(direta, iter(()), acumulador)
+                resposta_final += direta
+                tarefa_pendente.clear(chave_tarefa)
+                print(f"[TEMPO] ação rápida respondida direto: {direta[:80]}")
+                break
             catalogo = motor.catalogo
             usou_ferramenta = motor.usou_ferramenta
             evidencia = [(e.nome, json.dumps(e.argumentos, sort_keys=True, default=str), e.resultado.texto)

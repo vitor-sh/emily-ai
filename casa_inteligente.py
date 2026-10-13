@@ -179,6 +179,41 @@ def _tinytuya():
     return tinytuya
 
 
+def _manter_conexao_tuya() -> None:
+    """Faz o tinytuya reaproveitar a conexão HTTPS com a Tuya.
+
+    O Cloud do tinytuya chama requests.get/requests.request soltos: cada comando
+    pagava DNS + TCP + TLS de novo (~0,5 s a mais). Trocar o 'requests' que o
+    módulo enxerga por uma Session mantém o socket vivo entre chamadas.
+    """
+    try:
+        import sys
+        import requests
+        modulo = sys.modules.get("tinytuya.Cloud")
+        if modulo is None or getattr(modulo, "_emily_sessao", False):
+            return
+        sessao = requests.Session()
+
+        class _ComSessao:
+            Request = requests.Request
+            exceptions = requests.exceptions
+
+            @staticmethod
+            def get(url, **kw):
+                kw.setdefault("timeout", 8)
+                return sessao.get(url, **kw)
+
+            @staticmethod
+            def request(metodo, url, **kw):
+                kw.setdefault("timeout", 8)
+                return sessao.request(metodo, url, **kw)
+
+        modulo.requests = _ComSessao
+        modulo._emily_sessao = True
+    except Exception:  # noqa: BLE001 - otimização: sem ela o comando continua funcionando
+        pass
+
+
 def _cliente_nuvem():
     global _nuvem
     with _lock:
@@ -188,6 +223,7 @@ def _cliente_nuvem():
         if not isinstance(cfg, dict) or not cfg.get("apiKey") or not cfg.get("apiSecret"):
             raise CasaErro("A nuvem da Tuya não está configurada (falta tinytuya.json).")
         tinytuya = _tinytuya()
+        _manter_conexao_tuya()
         cliente = tinytuya.Cloud(apiRegion=cfg.get("apiRegion") or "us", apiKey=cfg["apiKey"],
                                  apiSecret=cfg["apiSecret"], apiDeviceID=cfg.get("apiDeviceID") or "")
         if cliente.error or not cliente.token:
@@ -211,7 +247,9 @@ def _dispositivo_local(d: dict):
         raise CasaErro(f"{d['nome']} não tem IP ou chave local salvos.")
     tinytuya = _tinytuya()
     dev = tinytuya.Device(d["id"], d["ip"], d["chave"], version=float(d["versao"]))
-    dev.set_socketTimeout(2.5)
+    # Na rede de casa os aparelhos respondem em < 0,5 s: esperar 2,5 s antes de
+    # cair para a nuvem só atrasava a resposta quando o IP mudava.
+    dev.set_socketTimeout(1.2)
     dev.set_socketRetryLimit(1)
     return dev
 
@@ -891,9 +929,10 @@ def controlar_tomada(acao: str, aparelho: str = "", *, pc_online: Callable[[], O
         motivo = _conflito_com_pc(explicito, info, pc_online) or _consumo_nao_combina(nome, info)
         if motivo:
             return {"ok": False, "conflito_pc": True, "mensagem": (
+                # Falado direto ao Vitor pelos atalhos: sem jargão. O que fazer depois
+                # da confirmação (acao=trocar) está na descrição da ferramenta.
                 f"Não mexi: não tenho certeza de que {nome} é quem está na tomada ({motivo}). "
-                f"Se for, o Vitor precisa confirmar (acao=trocar com aparelho={nome}) e eu repito o "
-                "pedido. Não troque por conta própria nem insista sem a confirmação dele.")}
+                f"Se {nome} já está nela, me confirma que eu faço.")}
     if acao == "ligar":
         enviar(d, {"switch_1": True}, transporte)
         lembrar_aparelho(nome)

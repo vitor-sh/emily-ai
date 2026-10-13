@@ -258,6 +258,33 @@ def revisar_resposta(pedido: str, texto: str, mensagens: list, rota_nome: str) -
     return result
 
 
+# Ações curtas cujo resultado já é a confirmação real: o próprio aparelho/app
+# respondeu ok. Para estas, um pedido de UMA ação que deu certo não paga a
+# segunda volta do modelo nem a revisão: a frase da ferramenta é a resposta.
+# Falha, várias ações no mesmo turno ou outra ferramenta seguem o caminho normal.
+ACOES_RAPIDAS = frozenset({
+    "controlar_luz", "controlar_tomada", "casa_estado",
+    "player_pausar_ou_tocar", "player_proxima", "player_anterior", "player_volume",
+    "abrir_app", "abrir_site", "comando_tv",
+})
+
+
+def resposta_direta(execucoes) -> str:
+    """Texto final pronto quando o turno foi UMA ação rápida bem-sucedida; senão vazio.
+
+    Recebe Execucao do laco_ferramentas (nome, resultado, repetida, escalonou).
+    """
+    validas = [e for e in execucoes if not getattr(e, "escalonou", False)]
+    if len(validas) != 1:
+        return ""
+    e = validas[0]
+    r = e.resultado
+    if (e.nome not in ACOES_RAPIDAS or getattr(e, "repetida", False)
+            or not r.ok or not str(r.texto or "").strip()):
+        return ""
+    return str(r.texto).strip()
+
+
 def revisar_apos_ferramentas(pedido, texto, mensagens, rota_nome):
     """Preferência do usuário: conversa comum não paga outra chamada de IA."""
     from tarefa_pendente import MARKER

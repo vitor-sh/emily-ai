@@ -382,7 +382,7 @@ def test_nao_corta_o_pc_achando_que_e_o_ventilador(casa_falsa):
     _, enviados = casa_falsa
     r = casa.controlar_tomada("desligar", "ventilador", pc_online=lambda: True)
     assert r["ok"] is False and r["conflito_pc"] and enviados == []
-    assert "acao=trocar" in r["mensagem"]
+    assert "me confirma" in r["mensagem"] and "acao=" not in r["mensagem"]
 
 
 def test_depois_de_confirmar_a_troca_o_ventilador_desliga(casa_falsa):

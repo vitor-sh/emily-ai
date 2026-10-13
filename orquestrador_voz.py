@@ -17,6 +17,7 @@ import queue
 import threading
 import time
 from dataclasses import asdict, dataclass
+from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 
 from diagnostico_execucao import measured as _medir_execucao
@@ -143,12 +144,15 @@ def _provedor_para(modelo_id: str) -> str:
 
 
 def nomes_ferramentas_rapidas() -> List[str]:
-    """Player completo e visão somente leitura, sem os domínios pesados."""
+    """Player completo, casa e visão somente leitura, sem os domínios pesados."""
     nomes = {
         nome for nome in ferramentas.CATALOGO
         if nome.startswith("player_") or nome.startswith("playlist_")
     }
     nomes.add("ver_tela")
+    # Luz e tomada respondem em menos de 1 s: não podem esperar a delegação.
+    nomes.update(n for n in ("controlar_luz", "controlar_tomada", "casa_estado")
+                 if n in ferramentas.CATALOGO)
     return sorted(nomes)
 
 
@@ -588,6 +592,7 @@ class OrquestradorVoz:
                     adicionar_texto(texto_da_volta)
 
                 mensagens.append(self._mensagem_assistente(chamadas, texto_da_volta))
+                execucoes_volta = []
                 for chamada in chamadas:
                     ferramentas_usadas.append(chamada.nome)
                     args = chamada.args()
@@ -596,6 +601,7 @@ class OrquestradorVoz:
                             "nome": chamada.nome, "args": args,
                         })
                     resultado = self._executar_chamada_luna(chamada)
+                    execucoes_volta.append(SimpleNamespace(nome=chamada.nome, resultado=resultado))
                     mensagens.append({
                         "role": "tool",
                         "tool_call_id": chamada.id,
@@ -609,6 +615,13 @@ class OrquestradorVoz:
                             "mudou": resultado.mudou,
                             "erro": resultado.erro or "",
                         })
+                # Uma ação rápida que deu certo no primeiro passo: a frase da
+                # ferramenta é a resposta falada. Sem outra volta do modelo.
+                direta = politica_agente.resposta_direta(execucoes_volta) if volta == 0 else ""
+                if direta:
+                    resposta_final += direta
+                    adicionar_texto(direta)
+                    break
             acumulador.finalizar()
             if fila_frases is not None:
                 fila_frases.put(None)
