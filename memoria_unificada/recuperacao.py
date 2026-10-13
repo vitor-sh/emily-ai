@@ -84,11 +84,14 @@ class ContextoMemoria:
             linhas = [f"- {fato.texto}" for fato in self.compromissos]
             blocos.append("COMPROMISSOS ATIVOS SUAS (cumpra ou corrija):\n" + "\n".join(linhas))
         if self.trocas:
+            import tempo_conversa as tc
+            agora = time.time()
             linhas = []
             for evento in self.trocas:
                 autor = "Você" if evento.papel == "assistant" else "Usuário"
-                linhas.append(f"{autor}: {_normalizar_titulo(evento.texto)}")
-            blocos.append("CONVERSA RECENTE (de qualquer canal):\n" + "\n".join(linhas))
+                linhas.append(f"[{tc.rotulo(evento.timestamp, agora)}] {autor}: {_normalizar_titulo(evento.texto)}")
+            blocos.append("CONVERSA RECENTE (de qualquer canal; os horários são só para você se situar, "
+                          "não os cite sem motivo):\n" + "\n".join(linhas))
         if self.lembretes:
             linhas = []
             for lembrete in self.lembretes:
@@ -99,7 +102,14 @@ class ContextoMemoria:
                     f"({autor}, há {horas:.0f}h)"
                 )
             blocos.append("LEMBRETES DO HISTÓRICO RECENTE:\n" + "\n".join(linhas))
-        return "\n\n".join(blocos)
+        texto = "\n\n".join(blocos)
+        # Faz muito tempo desde a última fala registrada: a mensagem de agora não é
+        # continuação direta dela. Vem da memória (não do histórico da janela) porque
+        # é ela que sobrevive a reinício e atravessa PC, celular e Discord.
+        if texto and self.trocas:
+            import tempo_conversa as tc
+            texto += tc.bloco_continuidade(tc.ultimo_timestamp(e.timestamp for e in self.trocas))
+        return texto
 
 
 class RecuperadorMemoria:

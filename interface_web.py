@@ -3377,8 +3377,10 @@ class Api:
             try:
                 from cloud_runtime_client import rpc
                 est["monitor_discord"] = bool(rpc("status", {}).get("monitor"))
-            except Exception:
+            except Exception as erro:
                 est["monitor_discord"] = False
+                est["discord_cloud_erro"] = True
+                _log(f"estado_automacao: Oracle não respondeu ao status do Discord ({type(erro).__name__}: {str(erro)[:120]})")
         return est
 
     def set_toggle(self, qual: str, ligado: bool) -> bool:

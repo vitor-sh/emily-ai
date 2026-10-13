@@ -125,9 +125,21 @@ def formatar(user_id: int, limite: int = LIMITE_PADRAO_NO_PROMPT) -> str:
     if not ficha:
         return ""
     msgs = ficha.get("mensagens", [])[-max(1, int(limite)):]
+    import tempo_conversa
     linhas = []
+    anterior = 0.0
     for m in msgs:
         quem = ("Emily (você)" if m.get("quem") == "emily"
                 else (ficha.get("nome") or "a pessoa"))
-        linhas.append(f"{quem}: {m.get('texto', '')}")
+        quando = float(m.get("quando") or 0)
+        hora = ""
+        if quando:
+            # Pausa longa: a fala de depois não responde à de antes.
+            if anterior and quando - anterior >= tempo_conversa.LIMITE_CONTINUIDADE_S:
+                linhas.append(f"--- {tempo_conversa.duracao(quando - anterior)} depois ---")
+            anterior = quando
+            hora = f"[{tempo_conversa.rotulo(quando)}] "
+        linhas.append(f"{hora}{quem}: {m.get('texto', '')}")
+    if anterior and time.time() - anterior >= tempo_conversa.LIMITE_CONTINUIDADE_S:
+        linhas.append(f"--- {tempo_conversa.duracao(time.time() - anterior)} depois (agora) ---")
     return "\n".join(linhas)

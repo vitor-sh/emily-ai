@@ -27,6 +27,7 @@ import laco_ferramentas
 import llm
 import modelo
 import politica_agente
+import tempo_conversa
 
 
 ESTADOS_FINAIS = frozenset({"completed", "failed"})
@@ -383,6 +384,8 @@ class OrquestradorVoz:
 
     def _mensagens_luna(self, texto: str, estado: EstadoDelegacao) -> List[dict]:
         system = self._persona() + "\n\n" + self._contexto_delegacao(estado)
+        # Faz tempo desde o último turno: a fala de agora não continua a anterior.
+        system += tempo_conversa.bloco_continuidade(getattr(self, "_ultimo_turno_ts", 0.0))
         try:
             import estilo_vitor
             system += estilo_vitor.bloco_voz(texto)
@@ -396,6 +399,7 @@ class OrquestradorVoz:
 
     def _registrar_turno(self, texto: str, resposta: str) -> None:
         with self._historico_lock:
+            self._ultimo_turno_ts = time.time()
             self._historico.extend([
                 {"role": "user", "content": texto},
                 {"role": "assistant", "content": resposta},

@@ -4370,7 +4370,7 @@ async function montarConfig() {
     secao('Automação',
       `<div class="lista">
          ${linhaChave('monitor_discord', ICO.chat, (a.discord_cloud ? 'Acompanhar o Discord na nuvem' : 'Acompanhar o Discord neste PC'),
-           (a.discord_cloud ? 'Chat, direct e voz funcionam pela Oracle, mesmo com este PC desligado' : 'Escuta e responde no servidor; ao ligar aqui, desliga no outro computador'), a.monitor_discord)}
+           (a.discord_cloud ? (a.discord_cloud_erro ? 'A Oracle não respondeu agora (confira a internet). O botão aparece desligado por falta de resposta; abra as Configurações de novo para atualizar' : 'Chat, direct e voz funcionam pela Oracle, mesmo com este PC desligado') : 'Escuta e responde no servidor; ao ligar aqui, desliga no outro computador'), a.monitor_discord)}
          ${linhaChave('autonomia_experimental', ICO.raio, 'Autonomia experimental',
            'Age por conta própria em coisas simples; ordens explícitas do dono dispensam confirmação redundante',
            a.autonomia_experimental)}

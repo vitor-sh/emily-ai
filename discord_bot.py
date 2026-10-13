@@ -328,6 +328,14 @@ def _alvo_do_reply(message) -> str:
         return ""
 
 
+def _quando_da_mensagem(message) -> float:
+    """Instante do envio no Discord (UTC -> epoch); agora, se a mensagem não traz."""
+    try:
+        return float(message.created_at.timestamp())
+    except Exception:  # noqa: BLE001 - mensagem de teste/sem created_at
+        return time.time()
+
+
 def _registrar_na_janela(canal_id: int, *, nome: str, texto: str,
                          message=None, user_id: int = 0, imagens=None,
                          eh_emily: bool = False, respondendo_a: str = "",
@@ -343,6 +351,9 @@ def _registrar_na_janela(canal_id: int, *, nome: str, texto: str,
         "eh_emily":        eh_emily,
         "respondendo_a":   respondendo_a,
         "mencionou_emily": mencionou_emily,
+        # Quando a mensagem foi ENVIADA (não quando a Emily a viu): o histórico frio
+        # preenchido no boot traz mensagens de horas atrás.
+        "quando":          _quando_da_mensagem(message),
     })
     if len(_historico_janela[canal_id]) > _JANELA_CONTEXTO:
         _historico_janela[canal_id].pop(0)
@@ -379,6 +390,8 @@ def _formatar_janela(canal_id: int, excluir_ultima: bool = False) -> str:
         return ""
 
     linhas = []
+    import tempo_conversa
+    anterior = 0.0
     for item in janela:
         marcas = []
         alvo = item.get("respondendo_a")
@@ -388,7 +401,16 @@ def _formatar_janela(canal_id: int, excluir_ultima: bool = False) -> str:
             marcas.append("falou direto com você")
         rotulo = "Emily (você)" if item.get("eh_emily") else item.get("nome", "alguém")
         sufixo = f" [{', '.join(marcas)}]" if marcas else ""
-        linhas.append(f"{rotulo}{sufixo}: {item.get('texto', '')}")
+        quando = float(item.get("quando") or 0)
+        if quando:
+            # Pausa longa entre duas falas: a de depois não é resposta imediata à de antes.
+            if anterior and quando - anterior >= tempo_conversa.LIMITE_CONTINUIDADE_S:
+                linhas.append(f"--- {tempo_conversa.duracao(quando - anterior)} depois ---")
+            anterior = quando
+            hora = f"[{tempo_conversa.rotulo(quando)}] "
+        else:
+            hora = ""
+        linhas.append(f"{hora}{rotulo}{sufixo}: {item.get('texto', '')}")
     return "\n".join(linhas)
 
 
@@ -590,9 +612,9 @@ async def on_message(message: discord.Message):
     if not await asyncio.to_thread(discord_monitor.pode_responder):
         return
 
-    if not _callback_texto:
-        return
-
+    # _callback_texto só existe no desktop (main.py liga). Na Oracle ninguém o registra, e esta
+    # trava ficava aqui descartando TODA mensagem de servidor: menção, reply e participação
+    # espontânea, que não dependem dele. Ele só é necessário no comando com prefixo (abaixo).
     prefixo_comando = _config.get("prefixo_comando", "?")
 
     if not texto:
@@ -698,6 +720,11 @@ async def on_message(message: discord.Message):
     if texto.startswith(prefixo_comando):
         texto_sem_prefixo = texto[len(prefixo_comando):].strip()
         if not texto_sem_prefixo:
+            return
+        if not _callback_texto:
+            # Sem desktop ligado (Oracle): o comando com prefixo é do PC, mas a Emily
+            # responde às menções normalmente. Avisa uma vez em vez de calar.
+            print(f"[Discord] Comando com prefixo de {message.author.name} ignorado: sem desktop ligado")
             return
         print(f"[Discord] Comando de {message.author.name}: '{texto_sem_prefixo}'")
         threading.Thread(
